@@ -21,6 +21,11 @@ final class CliCommandParser {
         MEMORY_DELETE,
         MEMORY_SEARCH,
         MEMORY_SAVE,
+        AGENT_MEMORY_LIST,
+        AGENT_MEMORY_SEARCH,
+        AGENT_MEMORY_STATS,
+        AGENT_MEMORY_EXPORT,
+        AGENT_MEMORY_CLEAR,
         INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
@@ -160,6 +165,29 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/mem search ", 0, 12)) {
             return new ParsedCommand(CommandType.MEMORY_SEARCH, trimmed.substring(12).trim());
+        }
+
+        // /agent-memory 命令组（用户只读视图，对标美团 1024 Agent agent_memory 表）
+        if (trimmed.equalsIgnoreCase("/agent-memory") || trimmed.equalsIgnoreCase("/am")) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_STATS, null);
+        }
+        if (trimmed.equalsIgnoreCase("/agent-memory list") || trimmed.equalsIgnoreCase("/am list")) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_LIST, null);
+        }
+        if (trimmed.equalsIgnoreCase("/agent-memory stats") || trimmed.equalsIgnoreCase("/am stats")) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_STATS, null);
+        }
+        if (trimmed.equalsIgnoreCase("/agent-memory export") || trimmed.equalsIgnoreCase("/am export")) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_EXPORT, null);
+        }
+        if (trimmed.equalsIgnoreCase("/agent-memory clear") || trimmed.equalsIgnoreCase("/am clear")) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_CLEAR, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/agent-memory search ", 0, 21)) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_SEARCH, trimmed.substring(21).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/am search ", 0, 11)) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_SEARCH, trimmed.substring(11).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/save")) {

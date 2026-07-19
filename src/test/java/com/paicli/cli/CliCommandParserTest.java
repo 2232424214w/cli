@@ -253,6 +253,70 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesAgentMemoryStatsSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/agent-memory");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_STATS, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesAgentMemoryStatsSlashCommandExplicit() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/agent-memory stats");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_STATS, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesAgentMemoryListSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/agent-memory list");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_LIST, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesAgentMemorySearchSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/agent-memory search 数据库选型");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_SEARCH, command.type());
+        assertEquals("数据库选型", command.payload());
+    }
+
+    @Test
+    void parsesAgentMemoryExportSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/agent-memory export");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_EXPORT, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesAgentMemoryClearSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/agent-memory clear");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_CLEAR, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesAgentMemoryShortAliasSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/am list");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_LIST, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesAgentMemorySearchShortAliasSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/am search SQLite");
+
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_SEARCH, command.type());
+        assertEquals("SQLite", command.payload());
+    }
+
+    @Test
     void parsesMemoryDeleteSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory delete fact-abcd1234");
 

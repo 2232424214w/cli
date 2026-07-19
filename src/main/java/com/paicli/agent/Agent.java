@@ -8,6 +8,7 @@ import com.paicli.lsp.LspDiagnosticReport;
 import com.paicli.memory.ConversationHistoryCompactor;
 import com.paicli.memory.ExplicitMemoryHints;
 import com.paicli.memory.MemoryManager;
+import com.paicli.memory.SessionMessageIndexer;
 import com.paicli.prompt.PromptAssembler;
 import com.paicli.prompt.PromptContext;
 import com.paicli.prompt.PromptMode;
@@ -56,6 +57,7 @@ public class Agent {
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private SessionMessageIndexer sessionMessageIndexer;
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -108,6 +110,14 @@ public class Agent {
      */
     public void setHitlEnabledSupplier(Supplier<Boolean> supplier) {
         this.hitlEnabledSupplier = supplier == null ? () -> false : supplier;
+    }
+
+    /**
+     * 注入会话消息索引器，每轮对话结束后异步把新增消息索引到 {@link SessionMessageStore}。
+     * 不注入则跳过历史会话检索能力。
+     */
+    public void setSessionMessageIndexer(SessionMessageIndexer indexer) {
+        this.sessionMessageIndexer = indexer;
     }
 
     /**
@@ -231,6 +241,15 @@ public class Agent {
 
                 // 存入记忆
                 memoryManager.addAssistantMessage(response.content());
+
+                // 异步索引本轮新增消息到 SessionMessageStore（不阻塞主路径）
+                if (sessionMessageIndexer != null) {
+                    try {
+                        sessionMessageIndexer.indexIncremental(new ArrayList<>(conversationHistory));
+                    } catch (Exception e) {
+                        log.debug("异步索引会话消息失败: {}", e.getMessage());
+                    }
+                }
 
                 // 记录 token 使用
                 memoryManager.recordTokenUsage(budget.totalInputTokens(), budget.totalOutputTokens(), budget.totalCachedInputTokens());
@@ -395,12 +414,28 @@ public class Agent {
     }
 
     private String buildProjectMemoryContext() {
+        StringBuilder sb = new StringBuilder();
         try {
-            return ProjectMemoryLoader.createDefault(Path.of(toolRegistry.getProjectPath())).loadForPrompt();
+            String paiMd = ProjectMemoryLoader.createDefault(Path.of(toolRegistry.getProjectPath())).loadForPrompt();
+            if (paiMd != null && !paiMd.isBlank()) {
+                sb.append(paiMd);
+            }
         } catch (Exception e) {
             log.warn("Failed to load PAI.md project memory", e);
-            return "";
         }
+        // 拼接 Agent 维护的记忆摘要（前 50 条 / 10KB 硬上限）
+        try {
+            String agentMemory = toolRegistry.getAgentMemorySummary(50, 10_240);
+            if (agentMemory != null && !agentMemory.isBlank()) {
+                if (sb.length() > 0) {
+                    sb.append("\n\n");
+                }
+                sb.append(agentMemory);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load agent memory summary", e);
+        }
+        return sb.toString();
     }
 
     /**

@@ -359,6 +359,500 @@ class ToolRegistryTest {
         assertTrue(result.contains("长期记忆(global)"));
     }
 
+    @Test
+    void readPaiMdToolReturnsContentAndCapacityStatus(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("PAI.md"), "# 项目记忆\n\n- 使用 Java 17\n- 测试框架 JUnit 5");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("read_pai_md", "{}");
+
+        assertTrue(result.contains("PAI.md 容量:"), "应包含容量状态");
+        assertTrue(result.contains("--- PAI.md 内容 ---"), "应包含内容分隔标记");
+        assertTrue(result.contains("使用 Java 17"), "应包含 PAI.md 实际内容");
+        assertTrue(result.contains("已加载 PAI.md 文件"), "应包含已加载文件列表");
+    }
+
+    @Test
+    void readPaiMdToolReturnsOnlySummaryWhenSummaryTrue(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("PAI.md"), "# 项目记忆\n\n- 使用 Java 17\n- 测试框架 JUnit 5");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("read_pai_md", "{\"summary\":true}");
+
+        assertTrue(result.contains("PAI.md 容量:"), "summary 模式应包含容量状态");
+        assertFalse(result.contains("--- PAI.md 内容 ---"), "summary 模式不应包含完整内容");
+        assertFalse(result.contains("使用 Java 17"), "summary 模式不应包含 PAI.md 实际内容");
+    }
+
+    @Test
+    void readPaiMdToolReportsEmptyWhenNoPaiMd(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("read_pai_md", "{}");
+
+        assertTrue(result.contains("PAI.md 容量:"), "无 PAI.md 时也应返回容量状态");
+        assertTrue(result.contains("当前未加载任何 PAI.md 文件"), "应明确提示未加载任何文件");
+    }
+
+    @Test
+    void readPaiMdToolReportsOverThreshold(@TempDir Path tempDir) throws Exception {
+        // 写一个超过 80% 阈值但未超过上限的 PAI.md（默认 2200 字符，阈值 80% 即 1760）
+        StringBuilder content = new StringBuilder("# 项目记忆\n\n");
+        while (content.length() < 1800) {
+            content.append("- 规则条目 ").append(content.length()).append("\n");
+        }
+        Files.writeString(tempDir.resolve("PAI.md"), content.toString());
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("read_pai_md", "{\"summary\":true}");
+
+        assertTrue(result.contains("PAI.md 容量:"), "应返回容量状态");
+        assertTrue(result.contains("已超过 80% 阈值"), "应提示已超过整合阈值");
+    }
+
+    @Test
+    void readPaiMdToolReportsOverLimit(@TempDir Path tempDir) throws Exception {
+        // 写一个超过 2200 字符上限的 PAI.md
+        StringBuilder content = new StringBuilder("# 项目记忆\n\n");
+        while (content.length() < 2300) {
+            content.append("- 规则条目 ").append(content.length()).append("\n");
+        }
+        Files.writeString(tempDir.resolve("PAI.md"), content.toString());
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("read_pai_md", "{\"summary\":true}");
+
+        assertTrue(result.contains("PAI.md 容量:"), "应返回容量状态");
+        assertTrue(result.contains("已超过上限"), "应提示已超过字符上限");
+    }
+
+    @Test
+    void readPaiMdToolUsesInjectedProjectMemoryLoader(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("PAI.md"), "- 注入的 PAI.md 内容");
+        Path userDir = tempDir.resolve("user");
+        Files.createDirectories(userDir);
+        Files.writeString(userDir.resolve("PAI.md"), "- 注入的用户级 PAI.md");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectMemoryLoader(new com.paicli.prompt.ProjectMemoryLoader(userDir, tempDir, false));
+
+        String result = registry.executeTool("read_pai_md", "{}");
+
+        assertTrue(result.contains("注入的 PAI.md 内容"), "应包含项目级 PAI.md 内容");
+        assertTrue(result.contains("注入的用户级 PAI.md"), "应包含用户级 PAI.md 内容");
+    }
+
+    @Test
+    void suggestPaiMdToolAppendsToExistingFile(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("PAI.md"), "# PAI.md\n\n- 已有规则\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("suggest_pai_md",
+                "{\"suggestion\":\"- 新规则：使用 Java 17\",\"reason\":\"用户要求记录\"}");
+
+        assertTrue(result.contains("已追加到 PAI.md"), "应提示已追加成功");
+        assertTrue(result.contains("PAI.md 容量:"), "应返回新的容量状态");
+        String written = Files.readString(tempDir.resolve("PAI.md"));
+        assertTrue(written.contains("已有规则"), "应保留原有内容");
+        assertTrue(written.contains("- 新规则：使用 Java 17"), "应追加新条目");
+    }
+
+    @Test
+    void suggestPaiMdToolCreatesNewFileWhenMissing(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("suggest_pai_md",
+                "{\"suggestion\":\"- 首条规则\"}");
+
+        assertTrue(result.contains("已追加到 PAI.md"), "应提示已追加成功");
+        assertTrue(Files.exists(tempDir.resolve("PAI.md")), "应创建 PAI.md 文件");
+        String written = Files.readString(tempDir.resolve("PAI.md"));
+        assertTrue(written.contains("# PAI.md"), "新文件应包含 PAI.md 头部");
+        assertTrue(written.contains("- 首条规则"), "应包含新条目");
+    }
+
+    @Test
+    void suggestPaiMdToolRejectsWhenOverLimit(@TempDir Path tempDir) throws Exception {
+        StringBuilder content = new StringBuilder("# PAI.md\n\n");
+        while (content.length() < 2300) {
+            content.append("- 占位规则 ").append(content.length()).append("\n");
+        }
+        Files.writeString(tempDir.resolve("PAI.md"), content.toString());
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("suggest_pai_md",
+                "{\"suggestion\":\"- 超限后的新规则\"}");
+
+        assertTrue(result.contains("suggest_pai_md 失败"), "超上限应拒绝");
+        assertTrue(result.contains("已超过上限"), "应提示容量已超上限");
+        assertTrue(result.contains("整合"), "应建议先整合");
+    }
+
+    @Test
+    void suggestPaiMdToolRejectsEmptySuggestion(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("suggest_pai_md", "{\"suggestion\":\"\"}");
+
+        assertTrue(result.contains("suggest_pai_md 失败"), "空建议应拒绝");
+        assertTrue(result.contains("suggestion 不能为空"), "应明确提示 suggestion 不能为空");
+    }
+
+    @Test
+    void suggestPaiMdToolWritesToExplicitTarget(@TempDir Path tempDir) throws Exception {
+        Files.createDirectories(tempDir.resolve(".paicli"));
+        Files.writeString(tempDir.resolve(".paicli").resolve("PAI.md"), "# PAI.md\n\n- 已有\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("suggest_pai_md",
+                "{\"suggestion\":\"- 新规则\",\"target\":\".paicli/PAI.md\"}");
+
+        assertTrue(result.contains("已追加到 PAI.md"), "应提示已追加成功");
+        String written = Files.readString(tempDir.resolve(".paicli").resolve("PAI.md"));
+        assertTrue(written.contains("- 新规则"), "应写入到显式指定的目标文件");
+    }
+
+    @Test
+    void suggestPaiMdToolIsRegisteredAsDangerousTool() {
+        assertTrue(com.paicli.hitl.ApprovalPolicy.requiresApproval("suggest_pai_md"),
+                "suggest_pai_md 应被 ApprovalPolicy 标记为需要 HITL 审批");
+        assertTrue(com.paicli.hitl.ApprovalPolicy.getDangerousTools().contains("suggest_pai_md"),
+                "suggest_pai_md 应在 DANGEROUS_TOOLS 集合中");
+    }
+
+    // ==================== agent_memory_* 工具测试 ====================
+
+    @Test
+    void agentMemorySearchReturnsUninitializedWhenNoStore() {
+        ToolRegistry registry = new ToolRegistry();
+        String result = registry.executeTool("agent_memory_search", "{\"query\":\"测试\"}");
+        assertTrue(result.contains("未初始化"), "未注入 store 时应返回未初始化提示");
+    }
+
+    @Test
+    void agentMemorySearchReturnsResults(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            store.store(com.paicli.memory.AgentMemoryEntry.builder()
+                    .id("mem-1")
+                    .content("项目使用 SQLite 作为本地存储数据库")
+                    .keywords(List.of("SQLite", "数据库", "存储"))
+                    .confidence(0.9)
+                    .scope(com.paicli.memory.AgentMemoryEntry.MemoryScope.PROJECT)
+                    .project(tempDir.toString())
+                    .build());
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_search",
+                    "{\"query\":\"SQLite 数据库\",\"limit\":5}");
+
+            assertTrue(result.contains("Agent 记忆检索"), "应包含检索标题");
+            assertTrue(result.contains("SQLite"), "应包含匹配内容");
+            assertTrue(result.contains("mem-1"), "应包含记忆 ID");
+        }
+    }
+
+    @Test
+    void agentMemorySearchReturnsEmptyMessageWhenNoMatch(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_search",
+                    "{\"query\":\"不存在的关键词\"}");
+
+            assertTrue(result.contains("未找到"), "无匹配时应返回未找到提示");
+        }
+    }
+
+    @Test
+    void agentMemorySearchRejectsEmptyQuery(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_search", "{\"query\":\"\"}");
+            assertTrue(result.contains("query 不能为空"));
+        }
+    }
+
+    @Test
+    void sessionSearchReturnsUninitializedWhenNoStore() {
+        ToolRegistry registry = new ToolRegistry();
+        String result = registry.executeTool("session_search", "{\"query\":\"测试\"}");
+        assertTrue(result.contains("未初始化"), "未注入 store 时应返回未初始化提示");
+    }
+
+    @Test
+    void sessionSearchReturnsResults(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteSessionMessageStore store =
+                     new com.paicli.memory.SqliteSessionMessageStore(tempDir.toFile())) {
+            store.index(com.paicli.memory.SessionMessage.builder()
+                    .id("m1").conversationId("c1").role("user")
+                    .content("如何配置 SQLite FTS5 全文检索").project(tempDir.toString())
+                    .createdAt(java.time.Instant.now()).build());
+            store.index(com.paicli.memory.SessionMessage.builder()
+                    .id("m2").conversationId("c1").role("assistant")
+                    .content("使用 FTS5 模块和 BM25 排序").project(tempDir.toString())
+                    .createdAt(java.time.Instant.now()).build());
+            registry.setSessionMessageStore(store);
+
+            String result = registry.executeTool("session_search",
+                    "{\"query\":\"SQLite FTS5\",\"limit\":3,\"days_back\":30}");
+
+            assertTrue(result.contains("历史会话检索"), "应包含检索标题");
+            assertTrue(result.contains("c1"), "应包含会话 ID");
+            assertTrue(result.contains("SQLite"), "应包含命中内容");
+        }
+    }
+
+    @Test
+    void sessionSearchReturnsEmptyMessageWhenNoMatch(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteSessionMessageStore store =
+                     new com.paicli.memory.SqliteSessionMessageStore(tempDir.toFile())) {
+            store.index(com.paicli.memory.SessionMessage.builder()
+                    .id("m1").conversationId("c1").role("user")
+                    .content("完全无关的对话").project(tempDir.toString())
+                    .createdAt(java.time.Instant.now()).build());
+            registry.setSessionMessageStore(store);
+
+            String result = registry.executeTool("session_search",
+                    "{\"query\":\"SQLite FTS5\"}");
+            assertTrue(result.contains("未找到"));
+        }
+    }
+
+    @Test
+    void sessionSearchRejectsEmptyQuery(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteSessionMessageStore store =
+                     new com.paicli.memory.SqliteSessionMessageStore(tempDir.toFile())) {
+            registry.setSessionMessageStore(store);
+
+            String result = registry.executeTool("session_search", "{\"query\":\"\"}");
+            assertTrue(result.contains("query 不能为空"));
+        }
+    }
+
+    @Test
+    void sessionSearchDoesNotRequireHitl() {
+        assertFalse(com.paicli.hitl.ApprovalPolicy.requiresApproval("session_search"),
+                "session_search 是只读检索工具，不应触发 HITL");
+    }
+
+    @Test
+    void agentMemorySaveStoresEntry(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"项目使用 SQLite 作为本地存储\","
+                            + "\"keywords\":\"SQLite,数据库,存储\","
+                            + "\"confidence\":0.9,"
+                            + "\"type\":\"FACT\"}");
+
+            assertTrue(result.contains("已保存到 Agent 记忆"), "应提示保存成功");
+            assertTrue(result.contains("mem-"), "应返回记忆 ID");
+            assertEquals(1, store.size());
+        }
+    }
+
+    @Test
+    void agentMemorySaveRejectsLowConfidence(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"低置信度事实\","
+                            + "\"keywords\":\"kw1,kw2,kw3\","
+                            + "\"confidence\":0.5,"
+                            + "\"type\":\"FACT\"}");
+
+            assertTrue(result.contains("低于 0.7 门槛"), "低置信度应拒绝");
+            assertEquals(0, store.size());
+        }
+    }
+
+    @Test
+    void agentMemorySaveRejectsSensitiveContent(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"API key 是 sk-1234567890\","
+                            + "\"keywords\":\"api,key,secret\","
+                            + "\"confidence\":0.9,"
+                            + "\"type\":\"FACT\"}");
+
+            assertTrue(result.contains("API key"), "敏感内容应被拦截");
+            assertEquals(0, store.size());
+        }
+    }
+
+    @Test
+    void agentMemorySaveRejectsInvalidKeywordCount(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String tooFew = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"测试\",\"keywords\":\"kw1,kw2\","
+                            + "\"confidence\":0.9,\"type\":\"FACT\"}");
+            assertTrue(tooFew.contains("3-8 个"), "关键词少于 3 个应拒绝");
+
+            String tooMany = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"测试\",\"keywords\":\"k1,k2,k3,k4,k5,k6,k7,k8,k9\","
+                            + "\"confidence\":0.9,\"type\":\"FACT\"}");
+            assertTrue(tooMany.contains("3-8 个"), "关键词超过 8 个应拒绝");
+        }
+    }
+
+    @Test
+    void agentMemorySaveSkipsDuplicateContent(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            // 先保存一条
+            registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"项目使用 SQLite 作为本地存储\","
+                            + "\"keywords\":\"SQLite,数据库,存储\","
+                            + "\"confidence\":0.9,\"type\":\"FACT\"}");
+            assertEquals(1, store.size());
+
+            // 再保存高度相似的内容
+            String result = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"项目使用 SQLite 作为本地存储数据库\","
+                            + "\"keywords\":\"SQLite,数据库,存储\","
+                            + "\"confidence\":0.9,\"type\":\"FACT\"}");
+
+            assertTrue(result.contains("高度相似"), "重复内容应被跳过");
+            assertEquals(1, store.size(), "重复保存不应增加条目");
+        }
+    }
+
+    @Test
+    void agentMemoryUpdateModifiesEntry(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            // 先保存
+            store.store(com.paicli.memory.AgentMemoryEntry.builder()
+                    .id("mem-1")
+                    .content("原始内容")
+                    .keywords(List.of("kw1", "kw2", "kw3"))
+                    .confidence(0.7)
+                    .build());
+
+            String result = registry.executeTool("agent_memory_update",
+                    "{\"id\":\"mem-1\",\"content\":\"更新后的内容\",\"confidence\":0.95}");
+
+            assertTrue(result.contains("已更新 Agent 记忆"), "应提示更新成功");
+            assertTrue(result.contains("mem-1"));
+            assertEquals(0.95, store.retrieve("mem-1").get().getConfidence());
+            assertEquals("更新后的内容", store.retrieve("mem-1").get().getContent());
+        }
+    }
+
+    @Test
+    void agentMemoryUpdateReturnsFailureForMissingId(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_update",
+                    "{\"id\":\"nonexistent\",\"content\":\"新内容\"}");
+
+            assertTrue(result.contains("未找到"), "missing id 应返回未找到");
+        }
+    }
+
+    @Test
+    void agentMemoryDeleteRemovesEntry(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            store.store(com.paicli.memory.AgentMemoryEntry.builder()
+                    .id("mem-1").content("内容").build());
+            assertEquals(1, store.size());
+
+            String result = registry.executeTool("agent_memory_delete",
+                    "{\"id\":\"mem-1\"}");
+
+            assertTrue(result.contains("已删除 Agent 记忆"), "应提示删除成功");
+            assertEquals(0, store.size());
+        }
+    }
+
+    @Test
+    void agentMemoryDeleteReturnsFailureForMissingId(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.paicli.memory.SqliteAgentMemoryStore store =
+                     new com.paicli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String result = registry.executeTool("agent_memory_delete",
+                    "{\"id\":\"nonexistent\"}");
+
+            assertTrue(result.contains("未找到"), "missing id 应返回未找到");
+        }
+    }
+
+    @Test
+    void agentMemoryToolsNotInDangerousToolsSet() {
+        // agent_memory_* 工具不走 HITL（Agent 自主决策），不应在 DANGEROUS_TOOLS 集合中
+        assertFalse(com.paicli.hitl.ApprovalPolicy.requiresApproval("agent_memory_search"),
+                "agent_memory_search 不应触发 HITL");
+        assertFalse(com.paicli.hitl.ApprovalPolicy.requiresApproval("agent_memory_save"),
+                "agent_memory_save 不应触发 HITL");
+        assertFalse(com.paicli.hitl.ApprovalPolicy.requiresApproval("agent_memory_update"),
+                "agent_memory_update 不应触发 HITL");
+        assertFalse(com.paicli.hitl.ApprovalPolicy.requiresApproval("agent_memory_delete"),
+                "agent_memory_delete 不应触发 HITL");
+    }
+
     private static void restoreSystemProperty(String key, String previous) {
         if (previous == null) {
             System.clearProperty(key);

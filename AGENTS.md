@@ -22,6 +22,7 @@
 - Java 17+ / Maven
 - 可选：`ripgrep`（`grep_code` 会优先使用；未安装时自动回退 Java 扫描）
 - 至少一个 API Key：`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `FREELLMAPI_API_KEY` / `XFYUN_MAAS_API_KEY` / `AGNES_API_KEY`
+- 记忆后端（可选，默认 sqlite）：`PAICLI_MEMORY_BACKEND` / `-Dpaicli.memory.backend`，取值 `sqlite`（本地，已交付）/ `postgres`（云端，骨架预留，需要 PostgreSQL JDBC 驱动）
 
 ## 常用命令
 
@@ -38,6 +39,7 @@ mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
 mvn test -DskipTests=false                  # 全量回归
 /init                    # 生成精简项目级记忆 PAI.md；已有文件不覆盖，/init --force 可重写
 /export                  # 导出当前 ReAct 会话为 Markdown，包含完整 system prompt
+/agent-memory            # 查看 Agent 维护的事实记忆统计；/agent-memory list/search/stats/export/clear 管理视图
 ```
 
 ## 架构概览
@@ -50,7 +52,7 @@ mvn test -DskipTests=false                  # 全量回归
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
 
-核心内置工具 11 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`
+核心内置工具 18 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_pai_md` / `suggest_pai_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
 
@@ -74,7 +76,7 @@ src/main/java/com/paicli/
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         GLMClient, DeepSeekClient, StepClient, KimiClient, FreeLlmApiClient, AgnesClient
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
-├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory
+├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory, AgentMemoryStore, SqliteAgentMemoryStore, PostgresAgentMemoryStore, LongTermMemoryMigrator, MemoryMaintenanceScheduler, SessionMessageStore, SqliteSessionMessageStore, PostgresSessionMessageStore, SessionMessageIndexer, MemoryStoreFactory, MemoryMigrator
 ├── plan/        Planner, ExecutionPlan, Task
 ├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker
 ├── lsp/         LspManager, LspDiagnosticFormatter
@@ -110,7 +112,24 @@ src/main/java/com/paicli/
 - `LineReader` 使用 `PaiCliCompleter` 做上下文补全：`/model` provider、`/mcp` 子命令与 server、`/skill` 子命令与 skill name、`/task` / `/browser` / `/snapshot` 子命令、`@image:` 本地路径、本地 `@path` 和 MCP resource `@server:uri` 引用都应从同一个 completer 出口维护。
 - 普通用户输入进入 Agent 前会先展开 MCP resource mention，再由 `LocalPathMentionExpander` 展开本地 `@path`：文件会内联为 `<file>` 块，目录会内联为 `<directory>` 列表；绝对路径或符号链接逃逸项目根时保持原文不展开。
 - `LineReader` 使用 `PaiCliHistory` 持久化输入历史到 `~/.paicli/history/input.history`；如果 `paicli.history.file` / `PAICLI_HISTORY_FILE` 指向目录，也会自动使用该目录下的 `input.history`，避免把目录当文件读；默认忽略空白、重复、明显密钥/Bearer、base64 图片和超长输入，用户可用 `/history clear` 清空本机输入历史。
-- 启动期会加载 `~/.paicli/PAI.md`、项目根 `PAI.md`、项目根 `.paicli/PAI.md`、`PAI.local.md`、`.paicli/PAI.local.md`，按此顺序注入 Project Context；`@relative/path.md` 可导入项目根内文件，总注入内容有字符预算，避免项目记忆变成 token 噪音。
+- 启动期会加载 `~/.paicli/PAI.md`、项目根 `PAI.md`、项目根 `.paicli/PAI.md`、`PAI.local.md`、`.paicli/PAI.local.md`，按此顺序注入 Project Context；`@relative/path.md` 可导入项目根内文件，总注入内容有字符预算，避免项目记忆变成 token 噪音。开启 `PAICLI_PAI_MD_RECURSIVE_DISCOVERY` 或 `-Dpaicli.pai_md.recursive_discovery=true` 后，`ProjectMemoryLoader` 会从项目根向上递归查找祖先目录的 `PAI.md`（对标 Claude Code CLAUDE.md 机制），按"从根到工作目录"顺序拼接。PAI.md 主体字符上限默认 2200（`PAICLI_PAI_MD_MAX_CHARS` / `-Dpaicli.pai_md.max_chars` 可调），超 80% 阈值时 `read_pai_md` 会提示整合，超上限时 `suggest_pai_md` 会拒绝追加。
+- `read_pai_md` 工具：Agent 主动读取当前已加载的 PAI.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要。建议在 `suggest_pai_md` 之前先调用，避免重复添加已有条目或超出容量上限。
+- `suggest_pai_md` 工具：Agent 向 PAI.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件（默认项目根 `PAI.md`，可通过 `target` 指定）。超容量上限时直接拒绝并提示先整合。属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
+- Agent 维护的事实记忆（对标美团 1024 Agent `agent_memory` 表，与 `/save` 长期记忆分工不同）：
+  - 存储：SQLite FTS5（`~/.paicli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权（`final = -bm25 * (0.5 + confidence)`）+ user_vocabulary boost。
+  - `agent_memory_save`：Agent 自主保存事实/模式/调试经验/工作流；`confidence < 0.7` 不应调用；敏感词（API key/密码/Bearer）会被拦截；`keywords` 必须是 3-8 个专有名词。
+  - `agent_memory_search`：BM25 检索，按当前项目作用域过滤（PROJECT + GLOBAL 都可见）。
+  - `agent_memory_update` / `agent_memory_delete`：更新/删除单条记忆。
+  - 护栏：默认 1000 条上限（`PAICLI_MEMORY_MAX_ENTRIES` 可调），超限拒绝写入；`findSimilar` 基于 BM25 相似度（默认 0.85）自动去重；`MemoryMaintenanceScheduler` 后台定期清理 `expired` 状态条目。
+  - 启动注入：`Agent.buildProjectMemoryContext()` 在 PAI.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限），供 system prompt 引用。
+  - 迁移：启动时 `LongTermMemoryMigrator` 自动从 `~/.paicli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，写 `.migrated-to-sqlite` 标记，不删原文件）。
+  - CLI 命令：`/agent-memory`（或 `/am`）查看统计；`/agent-memory list` 列出条目；`/agent-memory search <关键词>` BM25 检索；`/agent-memory stats` 查看统计；`/agent-memory export` 导出为 JSON；`/agent-memory clear` 清空。用户只读视图，写入由 Agent 通过工具自主完成。
+- 历史会话检索（对标美团 1024 Agent `session_messages` + `session_search`）：
+  - 存储：SQLite FTS5（`~/.paicli/memory/session_messages.db`），与 `agent_memory.db` 分开。
+  - `session_search` 工具：BM25 全文检索 + 五阶段管道（检索 → 按 `conversation_id` 分组 → 加载完整会话 → 截断预览 → 返回）。默认当前项目作用域、回溯 30 天；可指定 `role_filter`（user/assistant）和 `days_back`（1-365）。
+  - 异步索引：`SessionMessageIndexer` 在每轮 ReAct 结束后用独立线程池把新增消息增量索引到 SQLite，不阻塞主路径；跳过 `system` 消息和空内容；id = `conversationId-index` 保证幂等。
+  - 迁移：启动时 `SqliteSessionMessageStore.migrateFromJsonl` 自动从 `~/.paicli/history/session_*.jsonl` 迁移历史消息（幂等，写 `.session-messages-migrated` 标记，不删原文件）。
+  - 会话 ID：每次 CLI 启动由 `SessionMessageIndexer.generateConversationId()` 生成新会话 ID。
 - `/init` 会根据当前项目生成短 `PAI.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
 - `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.paicli/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
 - JLine 交互升级计划记录在 `docs/phase-22-jline-interaction-upgrade.md`。
@@ -123,6 +142,7 @@ src/main/java/com/paicli/
 - `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
+- Agent 维护的事实记忆（`agent_memory`）由 Agent 自主读写，不需要用户确认；`confidence < 0.7` 不应保存，敏感词（API key/密码/Bearer）会被拦截；默认 1000 条上限，超限拒绝写入；`findSimilar` 自动去重；`/agent-memory` 命令组提供用户只读视图（list/search/stats/export/clear）
 - 两道压缩不要混淆：shortTermMemory 压缩 vs conversationHistory 压缩（后者是防 window 超限的关键）
 - 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
 
@@ -187,7 +207,7 @@ src/main/java/com/paicli/
 
 ### 5.2 改 Web/搜索 → `web/` 相关 + ToolRegistry + `.env.example` + 文档 + 测试
 
-### 5.3 改 Memory → `MemoryManager` + `LongTermMemory` + `TokenBudget` + 测试 + 文档
+### 5.3 改 Memory → `MemoryManager` + `LongTermMemory` + `AgentMemoryStore` + `SqliteAgentMemoryStore` + `LongTermMemoryMigrator` + `TokenBudget` + 测试 + 文档
 
 ### 5.4 改 HITL/策略 → `policy/` + ToolRegistry + HitlToolRegistry + 提示词 + `.env.example` + 文档 + 测试
 
@@ -207,6 +227,9 @@ src/main/java/com/paicli/
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
 | TUI/终端 | `mvn test -Pphase16-smoke` |
 | RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest` |
+| Agent 记忆 | `mvn test -Dtest=AgentMemoryEntryTest,MemoryQueryModelsTest,SqliteAgentMemoryStoreTest,MemoryMaintenanceSchedulerTest,LongTermMemoryMigratorTest` |
+| 会话历史检索 | `mvn test -Dtest=SessionMessageModelsTest,SqliteSessionMessageStoreTest,SessionMessageIndexerTest` |
+| 可插拔后端 | `mvn test -Dtest=MemoryStoreFactoryTest,PostgresMemoryStoresTest` |
 | 常规回归 | `mvn test -Pquick` |
 
 ## 给新线程的导航
@@ -221,13 +244,16 @@ src/main/java/com/paicli/
 | 代码搜索 | ToolRegistry.java (`glob_files` / `grep_code` / `read_file`) |
 | 模型/API | llm/*Client.java + LlmClientFactory.java |
 | RAG 语义辅助 | CodeRetriever.java + CodeIndex.java + VectorStore.java |
+| Agent 记忆 | memory/AgentMemoryStore.java + SqliteAgentMemoryStore.java + LongTermMemoryMigrator.java |
+| 会话历史检索 | memory/SessionMessageStore.java + SqliteSessionMessageStore.java + SessionMessageIndexer.java |
+| 可插拔后端 | memory/MemoryStoreFactory.java + PostgresAgentMemoryStore.java + PostgresSessionMessageStore.java + MemoryMigrator.java |
 | Multi-Agent | AgentOrchestrator.java + SubAgent.java |
 | MCP | McpServerManager.java + McpClient.java |
 | TUI/渲染 | render/Renderer.java + RendererFactory.java |
 
 ## 当前已知边界
 
-以下在路线图但未交付：容器/VM 沙箱 / MCP OAuth + sampling + server 自动重启
+以下在路线图但未交付：容器/VM 沙箱 / MCP OAuth + sampling + server 自动重启 / PostgreSQL 记忆后端（骨架已就位，需要 JDBC 驱动 + 云端配置）/ SQLite→PostgreSQL 迁移工具（骨架已就位）
 
 不要把 `ROADMAP.md` 中"将来要做"误读成"现在已有"。
 

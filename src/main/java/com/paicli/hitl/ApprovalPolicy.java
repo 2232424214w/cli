@@ -19,7 +19,8 @@ public class ApprovalPolicy {
             "write_file",
             "execute_command",
             "create_project",
-            "revert_turn"
+            "revert_turn",
+            "suggest_pai_md"
     );
 
     private ApprovalPolicy() {
@@ -41,6 +42,7 @@ public class ApprovalPolicy {
             case "revert_turn" -> "🔴 高危";
             case "write_file" -> "🟡 中危";
             case "create_project" -> "🟡 中危";
+            case "suggest_pai_md" -> "🟡 中危";
             default -> isMcpTool(toolName) ? "🟡 MCP" : "🟢 安全";
         };
     }
@@ -54,6 +56,7 @@ public class ApprovalPolicy {
             case "revert_turn" -> "将按 Side-Git 快照批量恢复工作区文件，可能覆盖当前未保存修改";
             case "write_file" -> "将写入或覆盖文件内容，原有内容将丢失";
             case "create_project" -> "将在磁盘上创建新目录和文件";
+            case "suggest_pai_md" -> "将向 PAI.md 项目记忆文件追加新条目，影响后续会话的 system prompt 注入";
             default -> isMcpTool(toolName)
                     ? "将调用外部 MCP server 提供的工具，可能访问网络、文件或第三方服务"
                     : "安全的只读操作";

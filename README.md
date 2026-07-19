@@ -46,6 +46,7 @@ mvn test -DskipTests=false
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
 - 对话接近预算时自动做摘要压缩
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
+- 新增 Agent 维护的事实记忆（对标美团 1024 Agent `agent_memory` 表）：SQLite FTS5 + BM25 + confidence 加权，Agent 通过 `agent_memory_search/save/update/delete` 工具自主检索与保存；`/agent-memory`（`/am`）命令组提供用户只读视图（list/search/stats/export/clear）；启动自动从 `long_term_memory.json` 迁移到 SQLite
 
 ### 第四期：RAG 检索 + 代码库理解
 
@@ -66,8 +67,8 @@ mvn test -DskipTests=false
 
 ### 第六期：Human-in-the-Loop + 审批流
 
-- 危险操作静态规则识别：`write_file`、`execute_command`、`create_project`、`revert_turn`
-- 三级危险等级：高危（`execute_command`）、中危（`write_file` / `create_project`）
+- 危险操作静态规则识别：`write_file`、`execute_command`、`create_project`、`revert_turn`、`suggest_pai_md`
+- 三级危险等级：高危（`execute_command`）、中危（`write_file` / `create_project` / `suggest_pai_md`）
 - 审批决策：批准 / 全部放行 / 拒绝 / 跳过 / 修改参数后执行
 - HITL 默认关闭，通过 `/hitl on` 启用
 - 新增 `/hitl` CLI 命令，支持 `/hitl on`、`/hitl off`、`/hitl`（查看状态）
@@ -168,7 +169,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
 - 普通输入走 ReAct；`/plan <任务>` 走 Plan-and-Execute；`/team <任务>` 走 Multi-Agent；`/cancel` 可取消运行中任务
-- 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
+- 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/agent-memory`、`/export`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
 - 对话历史保存到 `~/.paicli/history/session_*.jsonl`
 - 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）
 - `PAICLI_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
@@ -311,7 +312,7 @@ Tips for getting started:
 
 ### 第六期
 
-- 🔒 危险操作静态规则识别（`write_file` / `execute_command` / `create_project` / `revert_turn`）
+- 🔒 危险操作静态规则识别（`write_file` / `execute_command` / `create_project` / `revert_turn` / `suggest_pai_md`）
 - ⚠️ 三级危险等级展示（高危 / 中危 / 安全）
 - ✅ 审批决策：批准、全部放行、拒绝、跳过、修改参数后执行
 - 🔓 HITL 默认关闭，`/hitl on` 启用、`/hitl off` 关闭
@@ -388,14 +389,52 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 长期记忆只保存显式保存意图下的稳定事实：`/save <事实>`，或用户在自然语言里明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`。默认保存为当前项目作用域；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。它不应包含一次性任务请求或临时文件名/目录名。
 可用 `/memory list` 查看长期记忆，`/memory search <关键词>` 搜索当前项目可见记忆，`/memory delete <id>` 删除单条记忆。
 
+Agent 维护的事实记忆保存在 `~/.paicli/memory/agent_memory.db`（SQLite FTS5），由 Agent 通过 `agent_memory_*` 工具自主读写，与 `/save` 长期记忆分工不同：`/save` 是用户显式保存的稳定偏好，`agent_memory` 是 Agent 在协作中积累的事实/模式/调试经验/工作流。启动时会自动从 `long_term_memory.json` 迁移到 SQLite（幂等，不删原文件）。
+
 项目级记忆使用 Markdown 文件维护，和 `/save` 的长期记忆分工不同：
 
 - `~/.paicli/PAI.md`：用户级稳定偏好，所有项目可见。
 - `PAI.md` / `.paicli/PAI.md`：项目级团队规则，建议提交到 git。
 - `PAI.local.md` / `.paicli/PAI.local.md`：本地覆盖，适合个人调试约定，建议加入 `.gitignore`。
 - `@relative/path.md`：在 `PAI.md` 中导入项目根内的相对文件；越靠后的文件越接近本地覆盖，优先级越高。
+- 向上递归发现：开启 `PAICLI_PAI_MD_RECURSIVE_DISCOVERY=true` 或 `-Dpaicli.pai_md.recursive_discovery=true` 后，`ProjectMemoryLoader` 会从项目根向上查找祖先目录的 `PAI.md`（对标 Claude Code `CLAUDE.md` 机制），按"从根到工作目录"顺序拼接。
 
 可用 `/init` 为当前项目生成一份短 `PAI.md`。该命令默认不覆盖已有文件；确认需要重建时使用 `/init --force`。
+
+PAI.md 主体容量管理（对标美团 1024 Agent MEMORY.md）：
+
+- 主体字符上限默认 2200（`PAICLI_PAI_MD_MAX_CHARS` / `-Dpaicli.pai_md.max_chars` 可调）。
+- 超 80% 阈值时 `read_pai_md` 会提示"建议整合后再添加新条目"。
+- 超上限时 `suggest_pai_md` 会直接拒绝追加，提示先整合已有条目。
+- `read_pai_md` 工具：Agent 主动读取当前已加载的 PAI.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要。
+- `suggest_pai_md` 工具：Agent 向 PAI.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件；属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
+
+Agent 维护的事实记忆（对标美团 1024 Agent `agent_memory` 表，与 `/save` 长期记忆分工不同）：
+
+- 存储：SQLite FTS5（`~/.paicli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权 + user_vocabulary boost。
+- `agent_memory_save`：Agent 自主判断保存事实/模式/调试经验/工作流；`confidence < 0.7` 不应调用；敏感词（API key/密码/Bearer）会被拦截。
+- `agent_memory_search`：BM25 检索，按当前项目作用域过滤（PROJECT + GLOBAL 都可见）。
+- `agent_memory_update` / `agent_memory_delete`：更新/删除单条记忆。
+- 护栏：默认 1000 条上限，超限拒绝写入；`findSimilar` 基于 BM25 相似度自动去重；`MemoryMaintenanceScheduler` 后台定期清理 `expired` 条目。
+- 启动注入：`Agent.buildProjectMemoryContext()` 在 PAI.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限）。
+- 迁移：启动时自动从 `~/.paicli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，不删原文件）。
+- CLI 命令：`/agent-memory`（或 `/am`）查看统计；`/agent-memory list` 列出条目；`/agent-memory search <关键词>` BM25 检索；`/agent-memory stats` 查看统计；`/agent-memory export` 导出为 JSON；`/agent-memory clear` 清空。用户只读视图，写入由 Agent 通过工具自主完成。
+
+历史会话检索（对标美团 1024 Agent `session_messages` + `session_search`）：
+
+- 存储：SQLite FTS5（`~/.paicli/memory/session_messages.db`），与 `agent_memory.db` 分开。
+- `session_search` 工具：BM25 全文检索 + 五阶段管道（检索 → 按 `conversation_id` 分组 → 加载完整会话 → 截断预览 → 返回）。默认当前项目作用域、回溯 30 天；可指定 `role_filter`（user/assistant）和 `days_back`（1-365）。
+- 异步索引：每轮 ReAct 结束后用独立线程池把新增消息增量索引到 SQLite，不阻塞主路径；跳过 `system` 消息和空内容。
+- 迁移：启动时自动从 `~/.paicli/history/session_*.jsonl` 迁移历史消息（幂等，不删原文件）。
+
+可插拔记忆后端（对标美团 1024 Agent 本地/云端切换）：
+
+- 配置：`PAICLI_MEMORY_BACKEND` 环境变量 或 `-Dpaicli.memory.backend` 系统属性，取值 `sqlite`（默认，已交付）/ `postgres`（云端，骨架预留）。
+- `MemoryStoreFactory` 根据 `backend` 创建对应的 `AgentMemoryStore` 和 `SessionMessageStore`。
+- `sqlite`：本地 SQLite FTS5（`~/.paicli/memory/agent_memory.db` + `session_messages.db`），已完整交付。
+- `postgres`：云端 PostgreSQL FTS（`PostgresAgentMemoryStore` + `PostgresSessionMessageStore`），骨架已就位，需要 PostgreSQL JDBC 驱动 + 云端配置后启用。
+- `MemoryMigrator`：SQLite → PostgreSQL 数据迁移工具骨架（`paicli memory migrate --from sqlite --to postgres`），待 PostgreSQL 后端就绪后实现。
+
 代码索引默认保存在 `~/.paicli/rag/codebase.db`。
 调试日志默认滚动写入 `~/.paicli/logs/paicli.log`，旧日志会按保留天数和总容量自动清理。
 ReAct / Plan task / SubAgent / Planner 的模型 `reasoning_content` 会以 `LLM reasoning [...]` 形式写入该日志，便于排查模型为什么选择某个工具或路径。
@@ -632,6 +671,13 @@ I
 - `web_search` - 搜索互联网获取实时信息
 - `web_fetch` - 抓取已知 URL 并提取正文 Markdown
 - `revert_turn` - 恢复到最近第 N 个 pre-turn 快照（走 HITL 与审计）
+- `read_pai_md` - 读取当前已加载的 PAI.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要
+- `suggest_pai_md` - 向 PAI.md 提议新条目，经 HITL 用户确认后追加到目标文件；超容量上限时拒绝（走 HITL 与审计）
+- `agent_memory_search` - BM25 检索 Agent 维护的事实记忆，按当前项目作用域过滤
+- `agent_memory_save` - Agent 自主保存事实/模式/调试经验/工作流到长期记忆；confidence < 0.7 不应调用，敏感词会被拦截
+- `agent_memory_update` - 更新单条 Agent 记忆（content / keywords / confidence / status）
+- `agent_memory_delete` - 删除单条 Agent 记忆
+- `session_search` - BM25 检索历史会话消息，五阶段管道（检索→按会话分组→加载完整→截断预览→返回）；默认当前项目作用域、回溯 30 天
 - `mcp__{server}__{tool}` - MCP server 动态提供的外部工具
 - `mcp__{server}__list_resources` / `mcp__{server}__read_resource` - 支持 resources 的 MCP server 自动注册的虚拟工具
 
@@ -682,6 +728,12 @@ I
 - `/memory clear` - 清空长期记忆
 - `/save <事实>` - 手动保存项目级关键事实到长期记忆；`/save --global <事实>` 保存跨项目通用偏好
 - `save_memory` - Agent 内置工具，仅在用户明确要求保存长期偏好或稳定事实时调用；默认 `scope=project`，跨项目通用偏好才用 `scope=global`
+- `/agent-memory` / `/am` - 查看 Agent 维护的事实记忆统计（SQLite FTS5）
+- `/agent-memory list` - 列出 Agent 记忆条目（用户只读视图）
+- `/agent-memory search <关键词>` - BM25 检索 Agent 记忆
+- `/agent-memory stats` - 查看统计（总数 / 作用域 / token / 置信度）
+- `/agent-memory export` - 导出为 JSON 到 `~/.paicli/exports/agent-memory-*.json`
+- `/agent-memory clear` - 清空所有 Agent 记忆
 - `/init` - 生成精简项目级记忆 `PAI.md`；已存在时不覆盖，`/init --force` 可重写
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.paicli/exports/session-*.md`
 - `/index [路径]` - 索引代码库（默认当前目录）
@@ -778,7 +830,22 @@ src/main/java/com/paicli
 ├── memory/
 │   ├── MemoryEntry.java        # 记忆条目
 │   ├── ConversationMemory.java # 短期记忆
-│   ├── LongTermMemory.java     # 长期记忆
+│   ├── LongTermMemory.java     # 长期记忆（旧版 long_term_memory.json）
+│   ├── AgentMemoryEntry.java   # Agent 维护的事实记忆条目
+│   ├── AgentMemoryStore.java  # Agent 记忆存储接口
+│   ├── SqliteAgentMemoryStore.java # SQLite FTS5 实现（BM25 + confidence 加权）
+│   ├── MemoryMaintenanceScheduler.java # 后台 TTL 清理
+│   ├── LongTermMemoryMigrator.java # 从 long_term_memory.json 迁移到 SQLite
+│   ├── MemorySearchQuery.java / MemoryListQuery.java / MemoryStats.java / MemoryEntryPatch.java / MemorySearchResult.java
+│   ├── SessionMessage.java      # 历史会话消息条目
+│   ├── SessionMessageStore.java  # 会话消息存储接口
+│   ├── SqliteSessionMessageStore.java # SQLite FTS5 实现（BM25 + 五阶段管道）
+│   ├── SessionMessageIndexer.java # 每轮对话结束异步索引
+│   ├── SessionMessageSearchQuery.java / SessionMessageSearchResult.java
+│   ├── MemoryStoreFactory.java   # 可插拔后端工厂（sqlite/postgres）
+│   ├── PostgresAgentMemoryStore.java # PostgreSQL Agent 记忆后端（骨架预留）
+│   ├── PostgresSessionMessageStore.java # PostgreSQL 会话消息后端（骨架预留）
+│   ├── MemoryMigrator.java       # SQLite→PostgreSQL 迁移工具（骨架预留）
 │   ├── ContextCompressor.java  # 上下文压缩
 │   ├── TokenBudget.java        # Token 预算管理
 │   ├── MemoryRetriever.java    # 记忆检索

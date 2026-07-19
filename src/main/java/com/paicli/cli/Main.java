@@ -315,10 +315,82 @@ public class Main {
             hitlToolRegistry.setSkillRegistry(skillRegistry);
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
+            // 记忆存储后端（对标美团 1024 Agent，可插拔：sqlite/postgres，默认 sqlite）
+            File memoryDir = new File(new File(System.getProperty("user.home"), ".paicli"), "memory");
+            String projectPath = Path.of(".").toAbsolutePath().normalize().toString();
+            com.paicli.memory.MemoryStoreFactory memoryFactory =
+                    new com.paicli.memory.MemoryStoreFactory(projectPath, memoryDir);
+
+            // Agent 维护的长期记忆存储（对标美团 1024 Agent agent_memory 表）
+            com.paicli.memory.AgentMemoryStore agentMemoryStore = null;
+            com.paicli.memory.MemoryMaintenanceScheduler memoryScheduler = null;
+            try {
+                agentMemoryStore = memoryFactory.createAgentMemoryStore();
+                if (agentMemoryStore != null) {
+                    hitlToolRegistry.setAgentMemoryStore(agentMemoryStore);
+                    // 从 long_term_memory.json 迁移到 SQLite（幂等，不删原文件）
+                    try {
+                        int migrated = new com.paicli.memory.LongTermMemoryMigrator(agentMemoryStore, memoryDir).migrate();
+                        if (migrated > 0) {
+                            startupNote = appendStartupNote(startupNote, "已从 long_term_memory.json 迁移 " + migrated + " 条记忆到 SQLite");
+                        }
+                    } catch (Exception migEx) {
+                        startupNote = appendStartupNote(startupNote, "长期记忆迁移失败: " + migEx.getMessage());
+                    }
+                    memoryScheduler = new com.paicli.memory.MemoryMaintenanceScheduler(agentMemoryStore);
+                    final com.paicli.memory.AgentMemoryStore storeRef = agentMemoryStore;
+                    final com.paicli.memory.MemoryMaintenanceScheduler schedulerRef = memoryScheduler;
+                    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                        schedulerRef.close();
+                        try {
+                            storeRef.close();
+                        } catch (Exception ignored) {
+                        }
+                    }, "paicli-agent-memory-shutdown"));
+                }
+            } catch (Exception e) {
+                startupNote = appendStartupNote(startupNote, "Agent 记忆存储初始化失败: " + e.getMessage());
+            }
+
+            // 历史会话消息存储（对标美团 1024 Agent session_messages + session_search）
+            com.paicli.memory.SessionMessageStore sessionMessageStore = null;
+            com.paicli.memory.SessionMessageIndexer sessionMessageIndexer = null;
+            try {
+                sessionMessageStore = memoryFactory.createSessionMessageStore();
+                if (sessionMessageStore != null) {
+                    hitlToolRegistry.setSessionMessageStore(sessionMessageStore);
+                    // 从 session_*.jsonl 迁移历史消息（幂等，不删原文件）
+                    try {
+                        File historyDir = new File(new File(System.getProperty("user.home"), ".paicli"), "history");
+                        int migrated = sessionMessageStore.migrateFromJsonl(historyDir);
+                        if (migrated > 0) {
+                            startupNote = appendStartupNote(startupNote, "已从 session_*.jsonl 迁移 " + migrated + " 条消息到 SQLite");
+                        }
+                    } catch (Exception migEx) {
+                        startupNote = appendStartupNote(startupNote, "会话消息迁移失败: " + migEx.getMessage());
+                    }
+                    String conversationId = com.paicli.memory.SessionMessageIndexer.generateConversationId();
+                    sessionMessageIndexer = new com.paicli.memory.SessionMessageIndexer(
+                            sessionMessageStore, conversationId,
+                            Path.of(".").toAbsolutePath().normalize().toString());
+                    final com.paicli.memory.SessionMessageStore storeRef2 = sessionMessageStore;
+                    final com.paicli.memory.SessionMessageIndexer indexerRef = sessionMessageIndexer;
+                    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                        indexerRef.close();
+                        storeRef2.close();
+                    }, "paicli-session-messages-shutdown"));
+                }
+            } catch (Exception e) {
+                startupNote = appendStartupNote(startupNote, "会话消息存储初始化失败: " + e.getMessage());
+            }
+
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
+            if (sessionMessageIndexer != null) {
+                reactAgent.setSessionMessageIndexer(sessionMessageIndexer);
+            }
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
             taskManager.start();
             Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "paicli-task-shutdown"));
@@ -541,6 +613,111 @@ public class Main {
                             reactAgent.getMemoryManager().storeFact(saveRequest.fact(), saveRequest.scope());
                             ui.println("💾 已保存到长期记忆(" + saveRequest.scope() + "): " + saveRequest.fact() + "\n");
                         }
+                        continue;
+                    }
+                    case AGENT_MEMORY_LIST -> {
+                        com.paicli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory list\n");
+                            continue;
+                        }
+                        java.util.List<com.paicli.memory.AgentMemoryEntry> entries = store.list(
+                                com.paicli.memory.MemoryListQuery.builder()
+                                        .limit(100).orderBy("created_at").build());
+                        ui.println(formatAgentMemoryEntries("📋 Agent 记忆列表", entries));
+                        ui.println("   共 " + store.size() + " 条");
+                        ui.println("   /agent-memory search <关键词> - BM25 检索");
+                        ui.println("   /agent-memory stats - 查看统计");
+                        ui.println("   /agent-memory export - 导出为 JSON");
+                        ui.println("   /agent-memory clear - 清空所有 Agent 记忆");
+                        ui.println();
+                        continue;
+                    }
+                    case AGENT_MEMORY_SEARCH -> {
+                        com.paicli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory search\n");
+                            continue;
+                        }
+                        String query = command.payload();
+                        if (query == null || query.isBlank()) {
+                            ui.println("❌ 请提供搜索关键词，例如 /agent-memory search 数据库选型\n");
+                            continue;
+                        }
+                        store.recordUserQuery(query);
+                        java.util.List<com.paicli.memory.MemorySearchResult> results = store.search(
+                                com.paicli.memory.MemorySearchQuery.builder()
+                                        .query(query).limit(20)
+                                        .project(Path.of(".").toAbsolutePath().normalize().toString())
+                                        .build());
+                        ui.println(formatAgentMemorySearchResults("🔎 Agent 记忆搜索: " + query, results));
+                        ui.println();
+                        continue;
+                    }
+                    case AGENT_MEMORY_STATS -> {
+                        com.paicli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory stats\n");
+                            continue;
+                        }
+                        ui.println("📊 Agent 记忆统计：");
+                        ui.println(store.stats().formatForCli());
+                        ui.println();
+                        ui.println("   /agent-memory list - 查看所有条目");
+                        ui.println("   /agent-memory search <关键词> - BM25 检索");
+                        ui.println();
+                        continue;
+                    }
+                    case AGENT_MEMORY_EXPORT -> {
+                        com.paicli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory export\n");
+                            continue;
+                        }
+                        try {
+                            java.util.List<com.paicli.memory.AgentMemoryEntry> all = store.list(
+                                    com.paicli.memory.MemoryListQuery.builder().limit(1000).build());
+                            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                            mapper.enable(com.fasterxml.jackson.databind.SerializationFeature.INDENT_OUTPUT);
+                            Path exportDir = Path.of(System.getProperty("user.home"), ".paicli", "exports");
+                            Files.createDirectories(exportDir);
+                            String timestamp = java.time.LocalDateTime.now()
+                                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                            Path exportFile = exportDir.resolve("agent-memory-" + timestamp + ".json");
+                            java.util.List<java.util.Map<String, Object>> dataList = new java.util.ArrayList<>();
+                            for (com.paicli.memory.AgentMemoryEntry e : all) {
+                                java.util.Map<String, Object> map = new java.util.LinkedHashMap<>();
+                                map.put("id", e.getId());
+                                map.put("content", e.getContent());
+                                map.put("keywords", e.getKeywords());
+                                map.put("type", e.getType().name());
+                                map.put("scope", e.getScope().name());
+                                map.put("project", e.getProject());
+                                map.put("confidence", e.getConfidence());
+                                map.put("source", e.getSource().name());
+                                map.put("status", e.getStatus().name());
+                                map.put("tokenCount", e.getTokenCount());
+                                map.put("accessCount", e.getAccessCount());
+                                map.put("createdAt", e.getCreatedAt() == null ? null : e.getCreatedAt().toString());
+                                map.put("updatedAt", e.getUpdatedAt() == null ? null : e.getUpdatedAt().toString());
+                                dataList.add(map);
+                            }
+                            mapper.writeValue(exportFile.toFile(), dataList);
+                            ui.println("📤 已导出 " + all.size() + " 条 Agent 记忆到: " + exportFile + "\n");
+                        } catch (Exception e) {
+                            ui.println("❌ 导出失败: " + e.getMessage() + "\n");
+                        }
+                        continue;
+                    }
+                    case AGENT_MEMORY_CLEAR -> {
+                        com.paicli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory clear\n");
+                            continue;
+                        }
+                        int before = store.size();
+                        store.clear();
+                        ui.println("🧹 已清空 Agent 记忆：删除 " + before + " 条\n");
                         continue;
                     }
                     case SWITCH_PLAN -> {
@@ -2899,6 +3076,55 @@ public class Main {
             }
             sb.append(" · ").append(entry.getTimestamp()).append("\n")
                     .append("  ").append(entry.getContent()).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private static String formatAgentMemoryEntries(String title, java.util.List<com.paicli.memory.AgentMemoryEntry> entries) {
+        StringBuilder sb = new StringBuilder(title).append("：\n");
+        if (entries == null || entries.isEmpty()) {
+            return sb.append("📭 没有匹配的 Agent 记忆。").toString();
+        }
+        for (com.paicli.memory.AgentMemoryEntry entry : entries) {
+            sb.append("- ").append(entry.getId())
+                    .append(" [").append(entry.getType()).append("/").append(entry.getScope()).append("]");
+            if (entry.getProject() != null && !entry.getProject().isBlank()) {
+                sb.append(" ").append(shortenPath(entry.getProject()));
+            }
+            sb.append(" · conf=").append(String.format("%.2f", entry.getConfidence()));
+            sb.append(" · status=").append(entry.getStatus()).append("\n");
+            String content = entry.getContent();
+            if (content.length() > 120) {
+                content = content.substring(0, 120) + "...";
+            }
+            sb.append("  ").append(content).append("\n");
+            if (!entry.getKeywords().isEmpty()) {
+                sb.append("  keywords: ").append(String.join(", ", entry.getKeywords())).append("\n");
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private static String formatAgentMemorySearchResults(String title, java.util.List<com.paicli.memory.MemorySearchResult> results) {
+        StringBuilder sb = new StringBuilder(title).append("：\n");
+        if (results == null || results.isEmpty()) {
+            return sb.append("📭 没有匹配的 Agent 记忆。").toString();
+        }
+        for (int i = 0; i < results.size(); i++) {
+            com.paicli.memory.MemorySearchResult r = results.get(i);
+            sb.append(i + 1).append(". ").append(r.entry().getId())
+                    .append(" [").append(r.entry().getType()).append("/").append(r.entry().getScope()).append("]")
+                    .append(" · score=").append(String.format("%.3f", r.finalScore()))
+                    .append(" (bm25=").append(String.format("%.3f", r.bm25Score()))
+                    .append(", conf=").append(String.format("%.2f", r.entry().getConfidence())).append(")\n");
+            String content = r.entry().getContent();
+            if (content.length() > 120) {
+                content = content.substring(0, 120) + "...";
+            }
+            sb.append("  ").append(content).append("\n");
+            if (!r.entry().getKeywords().isEmpty()) {
+                sb.append("  keywords: ").append(String.join(", ", r.entry().getKeywords())).append("\n");
+            }
         }
         return sb.toString().trim();
     }

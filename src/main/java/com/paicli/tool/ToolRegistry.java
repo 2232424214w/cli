@@ -19,6 +19,17 @@ import com.paicli.policy.AuditLog;
 import com.paicli.policy.CommandGuard;
 import com.paicli.policy.PathGuard;
 import com.paicli.policy.PolicyException;
+import com.paicli.prompt.ProjectMemoryLoader;
+import com.paicli.memory.AgentMemoryEntry;
+import com.paicli.memory.AgentMemoryStore;
+import com.paicli.memory.MemoryEntryPatch;
+import com.paicli.memory.MemoryListQuery;
+import com.paicli.memory.MemorySearchQuery;
+import com.paicli.memory.MemorySearchResult;
+import com.paicli.memory.SessionMessage;
+import com.paicli.memory.SessionMessageSearchQuery;
+import com.paicli.memory.SessionMessageSearchResult;
+import com.paicli.memory.SessionMessageStore;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.snapshot.RestoreResult;
 import com.paicli.snapshot.SnapshotService;
@@ -101,6 +112,9 @@ public class ToolRegistry {
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
+    private ProjectMemoryLoader projectMemoryLoader = ProjectMemoryLoader.createDefault(Path.of(projectPath));
+    private AgentMemoryStore agentMemoryStore;
+    private SessionMessageStore sessionMessageStore;
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
 
@@ -125,6 +139,9 @@ public class ToolRegistry {
         registerMemoryTools();
         registerSkillTools();
         registerSnapshotTools();
+        registerPaiMdTools();
+        registerAgentMemoryTools();
+        registerSessionSearchTool();
     }
 
     /**
@@ -138,6 +155,7 @@ public class ToolRegistry {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
         }
+        this.projectMemoryLoader = ProjectMemoryLoader.createDefault(Path.of(projectPath));
     }
 
     /**
@@ -224,6 +242,163 @@ public class ToolRegistry {
     public void setSnapshotService(SnapshotService snapshotService) {
         this.snapshotService = snapshotService == null ? SnapshotService.forProject(Path.of(projectPath)) : snapshotService;
         this.customSnapshotService = snapshotService != null;
+    }
+
+    /**
+     * 注入自定义 PAI.md 加载器；默认按 projectPath 自动构造。
+     * 主要供测试或需要固定 userConfigDir / 递归发现行为的场景使用。
+     */
+    public void setProjectMemoryLoader(ProjectMemoryLoader projectMemoryLoader) {
+        this.projectMemoryLoader = projectMemoryLoader == null
+                ? ProjectMemoryLoader.createDefault(Path.of(projectPath))
+                : projectMemoryLoader;
+    }
+
+    public ProjectMemoryLoader getProjectMemoryLoader() {
+        return projectMemoryLoader;
+    }
+
+    /**
+     * 注入 Agent 维护的长期记忆存储（对标美团 agent_memory 表）。
+     * 未注入时 agent_memory_* 工具会返回"未初始化"提示，不影响其他工具。
+     */
+    public void setAgentMemoryStore(AgentMemoryStore agentMemoryStore) {
+        this.agentMemoryStore = agentMemoryStore;
+    }
+
+    public AgentMemoryStore getAgentMemoryStore() {
+        return agentMemoryStore;
+    }
+
+    public void setSessionMessageStore(SessionMessageStore sessionMessageStore) {
+        this.sessionMessageStore = sessionMessageStore;
+    }
+
+    public SessionMessageStore getSessionMessageStore() {
+        return sessionMessageStore;
+    }
+
+    /**
+     * 获取 Agent 记忆的启动摘要（用于注入 system prompt）。
+     * 返回最近 maxEntries 条 active 记忆的精简摘要，硬上限 maxChars 字符。
+     * 供 Agent.java / PlanExecuteAgent.java 的 buildProjectMemoryContext 调用。
+     */
+    public String getAgentMemorySummary(int maxEntries, int maxChars) {
+        if (agentMemoryStore == null) {
+            return "";
+        }
+        try {
+            List<AgentMemoryEntry> recent = agentMemoryStore.list(MemoryListQuery.builder()
+                    .status(AgentMemoryEntry.MemoryStatus.ACTIVE)
+                    .limit(maxEntries)
+                    .orderBy("created_at")
+                    .build());
+            if (recent.isEmpty()) {
+                return "";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("### Agent 维护的记忆摘要（最近 ").append(recent.size()).append(" 条）\n\n");
+            int currentSize = sb.length();
+            for (AgentMemoryEntry entry : recent) {
+                String line = formatMemorySummaryLine(entry);
+                if (currentSize + line.length() > maxChars) {
+                    sb.append("...（已达到 ").append(maxChars).append(" 字符上限，更多记忆可用 agent_memory_search 检索）\n");
+                    break;
+                }
+                sb.append(line);
+                currentSize += line.length();
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static String formatMemorySummaryLine(AgentMemoryEntry entry) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("- [").append(entry.getType()).append("] ");
+        String content = entry.getContent();
+        if (content.length() > 120) {
+            content = content.substring(0, 120) + "...";
+        }
+        sb.append(content);
+        if (!entry.getKeywords().isEmpty()) {
+            sb.append(" (").append(String.join("/", entry.getKeywords())).append(")");
+        }
+        sb.append("\n");
+        return sb.toString();
+    }
+
+    /**
+     * 注册会话历史检索工具（对标美团 1024 Agent session_search）。
+     * 五阶段管道：BM25 检索 → 按会话分组 → 加载完整 → 截断预览 → 返回。
+     */
+    private void registerSessionSearchTool() {
+        tools.put("session_search", new Tool(
+                "session_search",
+                "检索历史会话消息。当用户问\"之前怎么处理过 X\"、或需要回溯历史决策时调用。"
+                        + "BM25 全文检索，按会话分组返回相关历史对话片段。"
+                        + "当前项目作用域内检索，默认回溯 30 天。",
+                createParameters(
+                        new Param("query", "string", "检索查询（关键词或自然语言）", true),
+                        new Param("limit", "integer", "返回会话数，默认 3，最多 10", false),
+                        new Param("role_filter", "string", "user / assistant，默认全部", false),
+                        new Param("days_back", "integer", "回溯天数，默认 30，最大 365", false)
+                ),
+                args -> sessionSearch(args)
+        ));
+    }
+
+    private String sessionSearch(Map<String, String> args) {
+        if (sessionMessageStore == null) {
+            return "session_search 失败: 会话消息存储未初始化";
+        }
+        String query = args.get("query");
+        if (query == null || query.isBlank()) {
+            return "session_search 失败: query 不能为空";
+        }
+        int limit = clamp(parseInt(args.get("limit"), 3), 1, 10);
+        String roleFilter = args.get("role_filter");
+        if (roleFilter != null && roleFilter.isBlank()) roleFilter = null;
+        int daysBack = clamp(parseInt(args.get("days_back"), 30), 1, 365);
+
+        java.time.Instant since = java.time.Instant.now().minusSeconds((long) daysBack * 86400);
+
+        SessionMessageSearchQuery searchQuery = SessionMessageSearchQuery.builder()
+                .query(query.trim())
+                .limit(limit)
+                .roleFilter(roleFilter)
+                .project(projectPath)
+                .since(since)
+                .build();
+
+        try {
+            java.util.List<SessionMessageSearchResult> results = sessionMessageStore.search(searchQuery);
+            if (results.isEmpty()) {
+                return "未找到匹配的历史会话（query=" + query + ", days_back=" + daysBack + "）";
+            }
+            return formatSessionSearchResults(query, results);
+        } catch (Exception e) {
+            return "session_search 检索失败: " + e.getMessage();
+        }
+    }
+
+    private static String formatSessionSearchResults(String query, java.util.List<SessionMessageSearchResult> results) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("🔍 历史会话检索: ").append(query).append("\n");
+        sb.append("找到 ").append(results.size()).append(" 个相关会话:\n\n");
+        for (int i = 0; i < results.size(); i++) {
+            SessionMessageSearchResult r = results.get(i);
+            sb.append("## 会话 #").append(i + 1).append(": ").append(r.getConversationId()).append("\n");
+            sb.append("- 消息数: ").append(r.getTotalMessages()).append("\n");
+            sb.append("- BM25 分: ").append(String.format("%.3f", r.getBestBm25Score())).append("\n");
+            sb.append("- 命中消息:\n");
+            for (SessionMessageSearchResult.MatchedMessage m : r.getMatchedMessages()) {
+                sb.append("  [").append(m.getRole()).append("] ").append(m.getPreview()).append("\n");
+            }
+            sb.append("\n").append(r.formatConversationPreview()).append("\n\n---\n\n");
+        }
+        return sb.toString().trim();
     }
 
     /**
@@ -743,6 +918,410 @@ public class ToolRegistry {
                     }
                 }
         ));
+    }
+
+    /**
+     * 注册 PAI.md 项目记忆相关工具（对标美团 MEMORY.md + Claude Code CLAUDE.md）。
+     * - read_pai_md：Agent 主动读取 PAI.md 完整内容 + 容量状态，用于在 suggest_pai_md 前确认现状
+     * - suggest_pai_md：Agent 提出建议条目，经 HITL 用户确认后追加到 PAI.md
+     */
+    private void registerPaiMdTools() {
+        tools.put("read_pai_md", new Tool(
+                "read_pai_md",
+                "读取当前项目已加载的 PAI.md 完整内容（含用户级 / 项目级 / 本地覆盖 / 向上递归发现的祖先 PAI.md）"
+                        + "并返回容量状态。建议在调用 suggest_pai_md 之前先调用此工具确认现状，避免重复添加已有条目或超出容量上限。",
+                createParameters(
+                        new Param("summary", "boolean", "是否只返回容量摘要而不返回完整内容，默认 false 返回完整内容", false)
+                ),
+                args -> readPaiMd(parseBoolean(args.get("summary"), false))
+        ));
+
+        tools.put("suggest_pai_md", new Tool(
+                "suggest_pai_md",
+                "向 PAI.md 项目记忆文件建议一条新条目；调用前应先 read_pai_md 确认现状。"
+                        + "本工具会经 HITL 用户确认（可批准 / 修改 / 拒绝 / 跳过）后再追加到目标 PAI.md。"
+                        + "建议内容必须精炼、稳定、可跨会话复用（如团队规范、架构约束、常用命令），不要写入一次性任务请求。",
+                createParameters(
+                        new Param("suggestion", "string", "要追加到 PAI.md 的建议条目（单行或多行 markdown 片段，会原样追加）", true),
+                        new Param("target", "string", "写入目标文件路径；省略时由 loader 自动选择（优先项目级 PAI.md）", false),
+                        new Param("reason", "string", "建议原因 / 上下文，便于用户在 HITL 面板理解为何要加这条", false)
+                ),
+                args -> suggestPaiMd(args)
+        ));
+    }
+
+    private String readPaiMd(boolean summaryOnly) {
+        ProjectMemoryLoader loader = projectMemoryLoader;
+        if (loader == null) {
+            return "PAI.md 加载器未初始化";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append(loader.getCapacityStatus()).append("\n");
+        List<Path> loadedFiles = loader.getLoadedFiles();
+        if (loadedFiles.isEmpty()) {
+            sb.append("\n当前未加载任何 PAI.md 文件。");
+        } else {
+            sb.append("\n已加载 PAI.md 文件 ").append(loadedFiles.size()).append(" 个:");
+            for (int i = 0; i < loadedFiles.size(); i++) {
+                sb.append("\n").append(i + 1).append(". ").append(loadedFiles.get(i));
+            }
+        }
+        if (summaryOnly) {
+            return sb.toString().trim();
+        }
+        String content = loader.readContent();
+        if (content == null || content.isBlank()) {
+            return sb.append("\n\n（PAI.md 内容为空）").toString().trim();
+        }
+        sb.append("\n\n--- PAI.md 内容 ---\n").append(content);
+        return sb.toString().trim();
+    }
+
+    private String suggestPaiMd(Map<String, String> args) {
+        ProjectMemoryLoader loader = projectMemoryLoader;
+        if (loader == null) {
+            return "PAI.md 加载器未初始化";
+        }
+        String suggestion = args.get("suggestion");
+        if (suggestion == null || suggestion.isBlank()) {
+            return "suggest_pai_md 失败: suggestion 不能为空";
+        }
+        suggestion = suggestion.trim();
+        // 容量护栏：超上限直接拒绝，提示先整合
+        if (loader.isOverLimit()) {
+            return "suggest_pai_md 失败: " + loader.getCapacityStatus()
+                    + "\n请先整合已有条目（合并相似规则、删除过时条目）后再添加新条目。"
+                    + "可调用 read_pai_md 查看现有内容。";
+        }
+        // 决定写入目标
+        Path target;
+        String targetArg = args.get("target");
+        if (targetArg != null && !targetArg.isBlank()) {
+            target = pathGuard.resolveSafe(targetArg);
+        } else {
+            target = loader.getSuggestTarget();
+        }
+        if (target == null) {
+            return "suggest_pai_md 失败: 无法确定写入目标";
+        }
+        // 确保父目录存在（例如 .paicli/PAI.md）
+        try {
+            Path parent = target.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (Exception e) {
+            return "suggest_pai_md 失败: 创建目标目录失败 - " + e.getMessage();
+        }
+        // 追加到目标文件（保留原有内容，末尾追加换行 + 新条目）
+        String reason = args.get("reason");
+        try {
+            String existing = Files.exists(target) ? Files.readString(target, StandardCharsets.UTF_8) : "";
+            StringBuilder newContent = new StringBuilder();
+            if (existing == null || existing.isBlank()) {
+                // 文件不存在或为空，初始化为 PAI.md 头部 + 新条目
+                newContent.append("# PAI.md\n\n").append(suggestion).append("\n");
+            } else {
+                newContent.append(existing);
+                if (!existing.endsWith("\n")) {
+                    newContent.append("\n");
+                }
+                newContent.append("\n").append(suggestion).append("\n");
+            }
+            Files.writeString(target, newContent.toString(), StandardCharsets.UTF_8);
+            String result = "✅ 已追加到 PAI.md: " + pathGuard.getRootPath().relativize(target)
+                    + "\n新增条目: " + (suggestion.length() > 100 ? suggestion.substring(0, 100) + "..." : suggestion);
+            if (reason != null && !reason.isBlank()) {
+                result += "\n原因: " + reason;
+            }
+            // 刷新 loader 以反映新容量
+            ProjectMemoryLoader refreshed = ProjectMemoryLoader.createDefault(Path.of(projectPath));
+            result += "\n" + refreshed.getCapacityStatus();
+            return result;
+        } catch (Exception e) {
+            return "suggest_pai_md 失败: 写入文件失败 - " + e.getMessage();
+        }
+    }
+
+    /**
+     * 注册 Agent 维护的长期记忆工具（对标美团 1024 Agent agent_memory 表 + Agentic RAG）。
+     * - agent_memory_search：Agent 主动检索记忆（BM25 + confidence 加权）
+     * - agent_memory_save：Agent 自主保存记忆（confidence 门槛 + 敏感词拦截）
+     * - agent_memory_update：Agent 更新已有记忆
+     * - agent_memory_delete：Agent 删除过时记忆
+     *
+     * 这 4 个工具不走 HITL（Agent 自主决策），但保存时会做敏感词拦截和 confidence 门槛检查。
+     */
+    private void registerAgentMemoryTools() {
+        tools.put("agent_memory_search", new Tool(
+                "agent_memory_search",
+                "检索 Agent 维护的长期记忆（BM25 + confidence 加权）。用任务语义构造 query，不要直接用用户原话。"
+                        + "任务开始时、遇到不确定问题时、用户问'之前怎么处理过'时调用。不要每轮都搜，只在需要时调用。",
+                createParameters(
+                        new Param("query", "string", "检索查询，用任务语义构造（例如'数据库选型决策'而非'用什么数据库'）", true),
+                        new Param("limit", "integer", "返回条数，默认 5，最多 20", false),
+                        new Param("type", "string", "FACT / PATTERN / DEBUG_INSIGHT / WORKFLOW，可选过滤", false),
+                        new Param("scope", "string", "PROJECT / GLOBAL，可选过滤", false)
+                ),
+                args -> agentMemorySearch(args)
+        ));
+
+        tools.put("agent_memory_save", new Tool(
+                "agent_memory_save",
+                "保存到 Agent 维护的长期记忆。Agent 自主判断，不需要用户确认。"
+                        + "confidence < 0.7 不要调用；临时任务/文件名不要保存；"
+                        + "不要保存 API key、密码、个人隐私。"
+                        + "keywords 必须是专有名词或核心词，3-8 个。",
+                createParameters(
+                        new Param("fact", "string", "要保存的事实，必须精炼、可跨会话复用", true),
+                        new Param("keywords", "string", "提取的关键词，逗号分隔，3-8 个专有名词（例如：SQLite,数据库,存储）", true),
+                        new Param("confidence", "number", "0-1 置信度，必须诚实评估，< 0.7 不要调用本工具", true),
+                        new Param("type", "string", "FACT / PATTERN / DEBUG_INSIGHT / WORKFLOW", true),
+                        new Param("scope", "string", "PROJECT 或 GLOBAL，默认 PROJECT；跨项目通用偏好才用 GLOBAL", false)
+                ),
+                args -> agentMemorySave(args)
+        ));
+
+        tools.put("agent_memory_update", new Tool(
+                "agent_memory_update",
+                "更新 Agent 维护的记忆。发现旧记忆过时、或要补充新信息时调用。"
+                        + "建议先 agent_memory_search 看原内容。",
+                createParameters(
+                        new Param("id", "string", "要更新的记忆 ID", true),
+                        new Param("content", "string", "新内容（可选，不传则保留原内容）", false),
+                        new Param("keywords", "string", "新关键词，逗号分隔（可选）", false),
+                        new Param("confidence", "number", "新置信度 0-1（可选）", false)
+                ),
+                args -> agentMemoryUpdate(args)
+        ));
+
+        tools.put("agent_memory_delete", new Tool(
+                "agent_memory_delete",
+                "删除 Agent 维护的记忆。发现旧记忆已过时、错误或不再适用时调用。"
+                        + "删除前建议先 agent_memory_search 确认要删除的条目。",
+                createParameters(
+                        new Param("id", "string", "要删除的记忆 ID", true)
+                ),
+                args -> agentMemoryDelete(args)
+        ));
+    }
+
+    private String agentMemorySearch(Map<String, String> args) {
+        if (agentMemoryStore == null) {
+            return "agent_memory_search 失败: Agent 记忆存储未初始化";
+        }
+        String query = args.get("query");
+        if (query == null || query.isBlank()) {
+            return "agent_memory_search 失败: query 不能为空";
+        }
+        int limit = clamp(parseInt(args.get("limit"), 5), 1, 20);
+        AgentMemoryEntry.MemoryType type = parseMemoryType(args.get("type"));
+        AgentMemoryEntry.MemoryScope scope = parseMemoryScope(args.get("scope"));
+        MemorySearchQuery searchQuery = MemorySearchQuery.builder()
+                .query(query.trim())
+                .limit(limit)
+                .type(type)
+                .scope(scope)
+                .project(projectPath)
+                .build();
+        // 记录用户查询到词汇表（用于后续 boost）
+        agentMemoryStore.recordUserQuery(query.trim());
+        List<MemorySearchResult> results = agentMemoryStore.search(searchQuery);
+        if (results.isEmpty()) {
+            return "未找到与查询相关的 Agent 记忆: " + query;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("🔍 Agent 记忆检索: ").append(query).append("\n");
+        sb.append("匹配结果 ").append(results.size()).append(" 条:\n\n");
+        for (int i = 0; i < results.size(); i++) {
+            sb.append(i + 1).append(". ").append(results.get(i).formatForTool()).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private String agentMemorySave(Map<String, String> args) {
+        if (agentMemoryStore == null) {
+            return "agent_memory_save 失败: Agent 记忆存储未初始化";
+        }
+        String fact = args.get("fact");
+        if (fact == null || fact.isBlank()) {
+            return "agent_memory_save 失败: fact 不能为空";
+        }
+        String keywordsStr = args.get("keywords");
+        if (keywordsStr == null || keywordsStr.isBlank()) {
+            return "agent_memory_save 失败: keywords 不能为空";
+        }
+        double confidence = parseDouble(args.get("confidence"), 0.0);
+        if (confidence < 0.7) {
+            return "agent_memory_save 失败: confidence " + confidence + " 低于 0.7 门槛，"
+                    + "只有高置信度的稳定事实才应保存";
+        }
+        // 敏感词拦截
+        String sensitiveCheck = checkSensitiveContent(fact);
+        if (sensitiveCheck != null) {
+            return "agent_memory_save 失败: " + sensitiveCheck;
+        }
+        AgentMemoryEntry.MemoryType type = parseMemoryType(args.get("type"));
+        if (type == null) {
+            return "agent_memory_save 失败: type 不能为空，必须是 FACT / PATTERN / DEBUG_INSIGHT / WORKFLOW";
+        }
+        AgentMemoryEntry.MemoryScope scope = parseMemoryScope(args.get("scope"));
+        List<String> keywords = parseKeywords(keywordsStr);
+        if (keywords.size() < 3 || keywords.size() > 8) {
+            return "agent_memory_save 失败: keywords 必须是 3-8 个，当前 " + keywords.size() + " 个";
+        }
+        // 自动去重检查
+        if (agentMemoryStore.findSimilar(fact, keywords, 0.0).isPresent()) {
+            return "agent_memory_save 跳过: 检测到与已有记忆高度相似，未保存。可先 agent_memory_search 查看现有条目";
+        }
+        String id = generateMemoryId();
+        AgentMemoryEntry entry = AgentMemoryEntry.builder()
+                .id(id)
+                .content(fact.trim())
+                .keywords(keywords)
+                .type(type)
+                .scope(scope)
+                .project(scope == AgentMemoryEntry.MemoryScope.PROJECT ? projectPath : null)
+                .confidence(confidence)
+                .source(AgentMemoryEntry.MemorySource.AGENT_TOOL)
+                .build();
+        try {
+            agentMemoryStore.store(entry);
+            return "💾 已保存到 Agent 记忆: " + id
+                    + "\n内容: " + (fact.length() > 100 ? fact.substring(0, 100) + "..." : fact)
+                    + "\n类型: " + type + " / 作用域: " + scope
+                    + "\n置信度: " + confidence
+                    + "\n关键词: " + String.join(", ", keywords);
+        } catch (IllegalStateException e) {
+            return "agent_memory_save 失败: " + e.getMessage();
+        }
+    }
+
+    private String agentMemoryUpdate(Map<String, String> args) {
+        if (agentMemoryStore == null) {
+            return "agent_memory_update 失败: Agent 记忆存储未初始化";
+        }
+        String id = args.get("id");
+        if (id == null || id.isBlank()) {
+            return "agent_memory_update 失败: id 不能为空";
+        }
+        MemoryEntryPatch.Builder patchBuilder = MemoryEntryPatch.builder();
+        String content = args.get("content");
+        if (content != null && !content.isBlank()) {
+            String sensitiveCheck = checkSensitiveContent(content);
+            if (sensitiveCheck != null) {
+                return "agent_memory_update 失败: " + sensitiveCheck;
+            }
+            patchBuilder.content(content.trim());
+        }
+        String keywordsStr = args.get("keywords");
+        if (keywordsStr != null && !keywordsStr.isBlank()) {
+            List<String> keywords = parseKeywords(keywordsStr);
+            if (keywords.size() < 3 || keywords.size() > 8) {
+                return "agent_memory_update 失败: keywords 必须是 3-8 个，当前 " + keywords.size() + " 个";
+            }
+            patchBuilder.keywords(keywords);
+        }
+        String confidenceStr = args.get("confidence");
+        if (confidenceStr != null && !confidenceStr.isBlank()) {
+            patchBuilder.confidence(parseDouble(confidenceStr, 0.5));
+        }
+        MemoryEntryPatch patch = patchBuilder.build();
+        if (patch.isEmpty()) {
+            return "agent_memory_update 失败: 至少要提供一个要更新的字段（content / keywords / confidence）";
+        }
+        boolean updated = agentMemoryStore.update(id, patch);
+        if (updated) {
+            return "✅ 已更新 Agent 记忆: " + id;
+        }
+        return "agent_memory_update 失败: 未找到 ID 为 " + id + " 的记忆条目";
+    }
+
+    private String agentMemoryDelete(Map<String, String> args) {
+        if (agentMemoryStore == null) {
+            return "agent_memory_delete 失败: Agent 记忆存储未初始化";
+        }
+        String id = args.get("id");
+        if (id == null || id.isBlank()) {
+            return "agent_memory_delete 失败: id 不能为空";
+        }
+        boolean deleted = agentMemoryStore.delete(id);
+        if (deleted) {
+            return "🗑️ 已删除 Agent 记忆: " + id;
+        }
+        return "agent_memory_delete 失败: 未找到 ID 为 " + id + " 的记忆条目";
+    }
+
+    private AgentMemoryEntry.MemoryType parseMemoryType(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return AgentMemoryEntry.MemoryType.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private AgentMemoryEntry.MemoryScope parseMemoryScope(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return AgentMemoryEntry.MemoryScope.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static List<String> parseKeywords(String keywordsStr) {
+        List<String> keywords = new ArrayList<>();
+        for (String kw : keywordsStr.split("[,，]")) {
+            String trimmed = kw.trim();
+            if (!trimmed.isEmpty()) {
+                keywords.add(trimmed);
+            }
+        }
+        return keywords;
+    }
+
+    private static double parseDouble(String value, double fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static String generateMemoryId() {
+        return "mem-" + System.currentTimeMillis() + "-" + (int) (Math.random() * 10000);
+    }
+
+    /**
+     * 敏感词拦截：检测 API key、密码、token 等不应保存到长期记忆的内容。
+     * 返回拒绝原因，null 表示通过。
+     */
+    private static String checkSensitiveContent(String content) {
+        if (content == null || content.isBlank()) {
+            return null;
+        }
+        String lower = content.toLowerCase(Locale.ROOT);
+        if (lower.contains("api key") || lower.contains("api_key") || lower.contains("apikey")) {
+            return "检测到 API key 相关内容，不应保存到长期记忆";
+        }
+        if (lower.contains("password") || lower.contains("passwd") || lower.contains("密码")) {
+            return "检测到密码相关内容，不应保存到长期记忆";
+        }
+        if (lower.contains("secret") || lower.contains("token") && lower.length() > 20) {
+            return "检测到 secret/token 相关内容，不应保存到长期记忆";
+        }
+        if (lower.contains("bearer ") || lower.contains("authorization:")) {
+            return "检测到认证凭据相关内容，不应保存到长期记忆";
+        }
+        return null;
     }
 
     private static int parseInt(String value, int fallback) {
