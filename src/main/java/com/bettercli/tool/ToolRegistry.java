@@ -1345,6 +1345,11 @@ public class ToolRegistry {
                 || "yes".equalsIgnoreCase(value.trim());
     }
 
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT)
+                .contains("win");
+    }
+
     private static String normalizeGlob(String pattern) {
         String normalized = pattern == null ? "**/*" : pattern.replace('\\', '/').trim();
         if (normalized.isEmpty()) {
@@ -1882,7 +1887,9 @@ public class ToolRegistry {
 
         Process process = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", normalized);
+            ProcessBuilder pb = isWindows()
+                    ? new ProcessBuilder("cmd.exe", "/c", normalized)
+                    : new ProcessBuilder("bash", "-c", normalized);
             pb.directory(new File(projectPath));
             pb.redirectErrorStream(true);
             process = pb.start();

@@ -137,7 +137,7 @@ final class RipgrepCodeSearchEngine implements CodeSearchEngine {
 
     private List<String> command(CodeSearchRequest request) {
         List<String> cmd = new ArrayList<>();
-        cmd.add("rg");
+        cmd.add(rgExecutable());
         cmd.add("--json");
         cmd.add("--color=never");
         cmd.add("--line-number");
@@ -184,7 +184,7 @@ final class RipgrepCodeSearchEngine implements CodeSearchEngine {
 
     private boolean isRipgrepAvailable() {
         try {
-            Process process = new ProcessBuilder("rg", "--version").start();
+            Process process = new ProcessBuilder(rgExecutable(), "--version").start();
             boolean finished = process.waitFor(2, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
@@ -197,6 +197,11 @@ final class RipgrepCodeSearchEngine implements CodeSearchEngine {
             }
             return false;
         }
+    }
+
+    private static String rgExecutable() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")
+                ? "rg.exe" : "rg";
     }
 
     private CodeSearchResult fallback(CodeSearchRequest request) {

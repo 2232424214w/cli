@@ -31,13 +31,27 @@ public final class CommandGuard {
             new DenyRule("识别为 fork bomb",
                     Pattern.compile(":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:\\s*&\\s*\\}\\s*;\\s*:")),
             new DenyRule("禁止 curl / wget 管道直接执行远端脚本",
-                    Pattern.compile("(?i)\\b(curl|wget)\\b[^|\\n]*\\|\\s*(sh|bash|zsh|fish|ksh)\\b")),
+                    Pattern.compile("(?i)\\b(curl|wget)\\b[^|\\n]*\\|\\s*(sh|bash|zsh|fish|ksh|powershell|pwsh|cmd)\\b")),
             new DenyRule("不允许扫描 /、~ 或整个文件系统",
                     Pattern.compile("(?i)\\bfind\\s+(/|~|\\$home)")),
             new DenyRule("禁止 chmod 777 全盘",
                     Pattern.compile("(?i)\\bchmod\\s+-R\\s+777\\s+(/|~)")),
             new DenyRule("禁止 shutdown / reboot / halt",
-                    Pattern.compile("(?i)\\b(shutdown|reboot|halt|poweroff)\\b"))
+                    Pattern.compile("(?i)\\b(shutdown|reboot|halt|poweroff)\\b")),
+            // ===== Windows 破坏性命令 =====
+            new DenyRule("禁止 del 递归强制删除系统盘或用户目录",
+                    Pattern.compile("(?i)\\bdel\\s+/[a-z]*[sf][a-z]*\\s+([a-z]:[\\\\/]|%systemroot%|%userprofile%)")),
+            new DenyRule("禁止 rmdir /s 递归删除系统盘",
+                    Pattern.compile("(?i)\\brmdir\\s+/[a-z]*s[a-z]*\\s+([a-z]:[\\\\/]|%systemroot%|%userprofile%)")),
+            new DenyRule("禁止 format 格式化磁盘",
+                    Pattern.compile("(?i)\\bformat\\s+[a-z]:")),
+            new DenyRule("禁止 diskpart 磁盘操作",
+                    Pattern.compile("(?i)\\bdiskpart\\b")),
+            new DenyRule("禁止 PowerShell Remove-Item 递归强制删除系统盘",
+                    Pattern.compile("(?i)\\b(remove-item|del|erase)\\s+[^|\\n]*-recurse[^|\\n]*-force[^|\\n]*([a-z]:[\\\\/]|%systemroot%|%userprofile%)|" +
+                            "\\b(remove-item|del|erase)\\s+[^|\\n]*-force[^|\\n]*-recurse[^|\\n]*([a-z]:[\\\\/]|%systemroot%|%userprofile%)")),
+            new DenyRule("禁止 PowerShell 递归删除系统盘",
+                    Pattern.compile("(?i)\\bremove-item\\s+[^|\\n]*-recurse\\s+[^|\\n]*([a-z]:[\\\\/]|%systemroot%|%userprofile%)"))
     );
 
     private CommandGuard() {

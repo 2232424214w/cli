@@ -27,7 +27,10 @@ class ToolRegistryTest {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
 
-        String result = registry.executeTool("execute_command", "{\"command\":\"pwd\"}");
+        // pwd 是 Unix 专属，cd（无参数）在 Windows cmd 中显示当前目录
+        String cmd = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")
+                ? "cd" : "pwd";
+        String result = registry.executeTool("execute_command", "{\"command\":\"" + cmd + "\"}");
 
         assertTrue(result.contains(tempDir.toString()));
     }
@@ -177,7 +180,10 @@ class ToolRegistryTest {
         ToolRegistry registry = new ToolRegistry(1);
         registry.setProjectPath(tempDir.toString());
 
-        String result = registry.executeTool("execute_command", "{\"command\":\"sleep 2\"}");
+        // sleep 是 Unix 专属；Windows cmd 用 ping 模拟延迟
+        String cmd = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")
+                ? "ping -n 10 127.0.0.1 > nul" : "sleep 2";
+        String result = registry.executeTool("execute_command", "{\"command\":\"" + cmd + "\"}");
 
         assertTrue(result.contains("命令执行超时"));
     }

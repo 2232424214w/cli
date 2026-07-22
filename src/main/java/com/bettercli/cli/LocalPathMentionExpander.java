@@ -12,7 +12,8 @@ import java.util.regex.Pattern;
 final class LocalPathMentionExpander {
     private static final int MAX_FILE_BYTES = 120_000;
     private static final int MAX_DIR_ENTRIES = 80;
-    private static final Pattern LOCAL_PATH_MENTION = Pattern.compile("(^|\\s)@(<[^>]+>|[^\\s<>:]+)");
+    private static final Pattern LOCAL_PATH_MENTION = Pattern.compile(
+            "(^|\\s)@(<[^>]+>|[A-Za-z]:[\\\\/][^\\s<>]*|[^\\s<>:]+)");
 
     private final Path projectRoot;
     private final Path homeDir;
@@ -43,7 +44,11 @@ final class LocalPathMentionExpander {
             return "@" + raw;
         }
         String value = stripAngles(raw);
-        if (value.startsWith("image:") || value.equals("clipboard") || value.contains(":")) {
+        if (value.startsWith("image:") || value.equals("clipboard")) {
+            return "@" + raw;
+        }
+        // MCP @server:uri 格式含冒号需跳过，但 Windows 盘符路径（C:\path / C:/path）应放行
+        if (value.contains(":") && !isWindowsDrivePath(value)) {
             return "@" + raw;
         }
         Path candidate = resolve(value);
@@ -139,6 +144,13 @@ final class LocalPathMentionExpander {
             return raw.substring(1, raw.length() - 1);
         }
         return raw;
+    }
+
+    private static boolean isWindowsDrivePath(String value) {
+        return value.length() >= 3
+                && Character.isLetter(value.charAt(0))
+                && value.charAt(1) == ':'
+                && (value.charAt(2) == '\\' || value.charAt(2) == '/');
     }
 
     private static boolean looksBinary(byte[] bytes, int length) {
