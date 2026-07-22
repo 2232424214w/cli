@@ -153,8 +153,8 @@ class AgentOrchestratorTest {
 
         // step_1 无依赖，step_2 依赖 step_1
         List<AgentOrchestrator.ExecutionStep> steps = new ArrayList<>(List.of(
-                AgentOrchestrator.ExecutionStep.pending("step_1", "创建项目", "COMMAND", List.of()),
-                AgentOrchestrator.ExecutionStep.pending("step_2", "验证结构", "VERIFICATION", List.of("step_1"))
+                AgentOrchestrator.ExecutionStep.pending("step_1", "创建项目", "COMMAND", List.of(), null),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "验证结构", "VERIFICATION", List.of("step_1"), null)
         ));
 
         // 只有 step_1 可执行
@@ -174,13 +174,44 @@ class AgentOrchestratorTest {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
 
         List<AgentOrchestrator.ExecutionStep> steps = List.of(
-                AgentOrchestrator.ExecutionStep.pending("step_1", "任务A", "COMMAND", List.of()),
-                AgentOrchestrator.ExecutionStep.pending("step_2", "任务B", "COMMAND", List.of()),
-                AgentOrchestrator.ExecutionStep.pending("step_3", "汇总", "ANALYSIS", List.of("step_1", "step_2"))
+                AgentOrchestrator.ExecutionStep.pending("step_1", "任务A", "COMMAND", List.of(), null),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "任务B", "COMMAND", List.of(), null),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "汇总", "ANALYSIS", List.of("step_1", "step_2"), null)
         );
 
         List<AgentOrchestrator.ExecutionStep> executable = orchestrator.getExecutableSteps(steps);
         assertEquals(2, executable.size());
+    }
+
+    @Test
+    void shouldParseAssigneeAndIgnoreUnknownWorker() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        String planJson = """
+                {
+                  "summary": "前后端分工",
+                  "steps": [
+                    { "id": "s1", "description": "改前端", "type": "FILE_WRITE", "assignee": "worker-1", "dependencies": [] },
+                    { "id": "s2", "description": "改后端", "type": "FILE_WRITE", "assignee": "worker-2", "dependencies": [] },
+                    { "id": "s3", "description": "幻觉步骤", "type": "COMMAND", "assignee": "worker-99", "dependencies": [] }
+                  ]
+                }
+                """;
+
+        List<AgentOrchestrator.ExecutionStep> steps = orchestrator.parsePlan(planJson);
+        assertEquals(3, steps.size());
+        assertEquals("worker-1", steps.get(0).assignee(), "worker-1 指派应被保留");
+        assertEquals("worker-2", steps.get(1).assignee(), "worker-2 指派应被保留");
+        assertNull(steps.get(2).assignee(), "不存在的 worker 名应被归一化为 null，回退默认调度");
+    }
+
+    @Test
+    void shouldInjectWorkerSpecialtiesIntoPlannerContext() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        // setWorkerSpecialties 会重建 SubAgent 并把团队名单注入 Planner；不应抛异常
+        orchestrator.setWorkerSpecialties(java.util.List.of("偏前端", "偏后端"));
+        // 重建后 roleModelLabel 仍可正常返回（证明 SubAgent 重建成功）
+        assertNotNull(orchestrator.roleModelLabel(AgentRole.PLANNER));
+        assertNotNull(orchestrator.roleModelLabel(AgentRole.WORKER));
     }
 
     @Test

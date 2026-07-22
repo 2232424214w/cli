@@ -47,21 +47,41 @@ public class SubAgent {
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
+    private final String specialty;
     private Supplier<String> externalContextSupplier = () -> "";
+    private String teamWorkersContext;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
+        this(name, role, llmClient, toolRegistry, null);
+    }
+
+    /**
+     * @param specialty 角色专长描述（仅 WORKER 角色会注入到 prompt 的 {{workerSpecialty}}），
+     *                 用于让多个 Worker 有差异化专长；null/空 表示不注入。
+     */
+    public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry, String specialty) {
         this.name = name;
         this.role = role;
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
+        this.specialty = specialty;
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
+    }
+
+    /**
+     * 注入团队 Worker 名单与专长描述，供 PLANNER 角色在 prompt 的 {{teamWorkers}} 处使用，
+     * 让规划者知道有哪些 Worker 及其专长，从而在计划 JSON 的每个 step 指定 assignee。
+     */
+    public void setTeamWorkersContext(String teamWorkersContext) {
+        this.teamWorkersContext = teamWorkersContext;
+        refreshSystemPrompt();
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -86,6 +106,8 @@ public class SubAgent {
                 .projectMemoryContext(buildProjectMemoryContext())
                 .externalContext(buildExternalContext())
                 .skillIndex(buildSkillIndex())
+                .variable("workerSpecialty", specialty == null ? "" : specialty)
+                .variable("teamWorkers", teamWorkersContext == null ? "" : teamWorkersContext)
                 .toolsEnabled(llmClient == null || llmClient.supportsTools())
                 .build());
     }
@@ -436,6 +458,10 @@ public class SubAgent {
 
     public AgentRole getRole() {
         return role;
+    }
+
+    public String getSpecialty() {
+        return specialty;
     }
 
     /**

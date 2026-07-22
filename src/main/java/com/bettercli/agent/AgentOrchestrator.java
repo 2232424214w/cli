@@ -56,25 +56,27 @@ public class AgentOrchestrator {
     private Function<AgentRole, LlmClient> roleClientResolver;
     private com.bettercli.skill.SkillRegistry skillRegistry;
     private com.bettercli.skill.SkillContextBuffer skillContextBuffer;
+    private List<String> workerSpecialties;
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
-                                  List<String> dependencies, String result,
-                                  StepStatus status) {
-        static ExecutionStep pending(String id, String description, String type, List<String> dependencies) {
-            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING);
+                                  List<String> dependencies, String assignee,
+                                  String result, StepStatus status) {
+        static ExecutionStep pending(String id, String description, String type,
+                                     List<String> dependencies, String assignee) {
+            return new ExecutionStep(id, description, type, dependencies, assignee, null, StepStatus.PENDING);
         }
 
         ExecutionStep withResult(String result) {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.COMPLETED);
+            return new ExecutionStep(id, description, type, dependencies, assignee, result, StepStatus.COMPLETED);
         }
 
         ExecutionStep withFailed(String result) {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.FAILED);
+            return new ExecutionStep(id, description, type, dependencies, assignee, result, StepStatus.FAILED);
         }
 
         ExecutionStep started() {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING);
+            return new ExecutionStep(id, description, type, dependencies, assignee, result, StepStatus.RUNNING);
         }
     }
 
@@ -120,26 +122,66 @@ public class AgentOrchestrator {
     }
 
     /**
+     * 注入 Worker 专长列表（按 worker 顺序对应）。让多个 Worker 有差异化专长，并把
+     * 团队名单注入 Planner 的 prompt，使规划者能在每个 step 的 assignee 指定最合适的 Worker。
+     * 必须在 {@link #run(String)} 之前调用。null/空 则 Worker 无专长、Planner 不强调指派。
+     */
+    public void setWorkerSpecialties(List<String> specialties) {
+        this.workerSpecialties = specialties;
+        rebuildSubAgents();
+    }
+
+    /**
      * 重建四个 SubAgent（planner / 2 worker / reviewer），按当前 roleClientResolver 取模型，
      * 并重新下发已设置的外部上下文与 Skill 系统，保证 setter 重建后配置不丢。
      */
     private void rebuildSubAgents() {
         this.planner = new SubAgent("planner", AgentRole.PLANNER,
                 roleClientResolver.apply(AgentRole.PLANNER), toolRegistry);
-        this.workers = List.of(
-                new SubAgent("worker-1", AgentRole.WORKER,
-                        roleClientResolver.apply(AgentRole.WORKER), toolRegistry),
-                new SubAgent("worker-2", AgentRole.WORKER,
-                        roleClientResolver.apply(AgentRole.WORKER), toolRegistry)
-        );
+        this.workers = buildWorkers();
         this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
                 roleClientResolver.apply(AgentRole.REVIEWER), toolRegistry);
         // 重新下发已设置的外部上下文
         planner.setExternalContextSupplier(this.externalContextSupplier);
         workers.forEach(worker -> worker.setExternalContextSupplier(this.externalContextSupplier));
         reviewer.setExternalContextSupplier(this.externalContextSupplier);
+        // 把团队 Worker 名单 + 专长注入 Planner，让规划者能按专长指派 assignee
+        planner.setTeamWorkersContext(buildTeamWorkersContext());
         // 重新下发已设置的 Skill 系统
         applySkillSystem();
+    }
+
+    private List<SubAgent> buildWorkers() {
+        List<SubAgent> result = new ArrayList<>();
+        int count = 2;
+        for (int i = 0; i < count; i++) {
+            String name = "worker-" + (i + 1);
+            String specialty = (workerSpecialties != null && i < workerSpecialties.size())
+                    ? workerSpecialties.get(i) : null;
+            result.add(new SubAgent(name, AgentRole.WORKER,
+                    roleClientResolver.apply(AgentRole.WORKER), toolRegistry, specialty));
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * 构造注入 Planner prompt 的团队名单文本。即使没配专长，也列出 Worker 名字，
+     * 让规划者可以按步骤性质指派 assignee。
+     */
+    private String buildTeamWorkersContext() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("可用执行者（Worker）名单——请在每个 step 的 assignee 字段选择最匹配专长的一个：\n");
+        for (SubAgent worker : workers) {
+            sb.append("- ").append(worker.getName());
+            String specialty = worker.getSpecialty();
+            if (specialty != null && !specialty.isBlank()) {
+                sb.append("：").append(specialty.trim());
+            } else {
+                sb.append("：通用执行");
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
     }
 
     /**
@@ -243,11 +285,15 @@ public class AgentOrchestrator {
             if (executable.size() == 1) {
                 // 单步批次：直接串行流式输出，保持实时打字观感
                 ExecutionStep step = executable.get(0);
-                SubAgent worker = workers.get(singleStepCursor % workers.size());
+                SubAgent worker = pickWorker(step, singleStepCursor);
+                if (step.assignee() != null && worker != null && worker.getName().equals(step.assignee())) {
+                    out.println("🎯 步骤 [" + step.id() + "] 由 " + step.assignee() + " 执行（规划者指派）");
+                }
                 singleStepCursor++;
                 String context = buildStepContext(steps, step);
                 runStep(step, steps, retryCount, worker, reviewer, context, out);
-                worker.clearHistory();
+                // 持久记忆：不再每步 clearHistory，让 Worker 记得自己干过什么；
+                // 上下文超 window 时由 SubAgent.maybeCompactHistory 自动压缩早期消息。
             } else {
                 // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
                 out.println("⚡ 批次 #" + batchIndex + "：" + executable.size()
@@ -296,7 +342,7 @@ public class AgentOrchestrator {
             Map<String, String> idMapping = new HashMap<>();
             int stepIndex = 1;
 
-            // 第一遍：创建步骤（重编号）
+            // 第一遍：创建步骤（重编号 + 读取 assignee 指派）
             for (JsonNode stepNode : stepsNode) {
                 String originalId = stepNode.path("id").asText();
                 String newId = "step_" + stepIndex++;
@@ -304,7 +350,9 @@ public class AgentOrchestrator {
 
                 String description = stepNode.path("description").asText();
                 String type = stepNode.path("type").asText("COMMAND");
-                steps.add(ExecutionStep.pending(newId, description, type, new ArrayList<>()));
+                String assignee = stepNode.path("assignee").asText(null);
+                steps.add(ExecutionStep.pending(newId, description, type, new ArrayList<>(),
+                        normalizeAssignee(assignee)));
             }
 
             // 第二遍：建立依赖
@@ -318,12 +366,12 @@ public class AgentOrchestrator {
                         String mapped = idMapping.getOrDefault(dep.asText(), dep.asText());
                         deps.add(mapped);
                     }
-                    // 替换步骤的依赖
+                    // 替换步骤的依赖（保留 assignee）
                     int idx = stepIndex - 2;
                     if (idx >= 0 && idx < steps.size()) {
                         ExecutionStep old = steps.get(idx);
                         steps.set(idx, new ExecutionStep(old.id(), old.description(), old.type(),
-                                deps, old.result(), old.status()));
+                                deps, old.assignee(), old.result(), old.status()));
                     }
                 }
             }
@@ -349,6 +397,70 @@ public class AgentOrchestrator {
                 .filter(step -> step.dependencies().stream()
                         .allMatch(dep -> statusMap.get(dep) == StepStatus.COMPLETED))
                 .toList();
+    }
+
+    /**
+     * 串行单步路由：若规划者指定了 assignee 且该 worker 存在，就用它；否则按游标轮询。
+     */
+    private SubAgent pickWorker(ExecutionStep step, int singleStepCursor) {
+        SubAgent named = findWorker(step.assignee());
+        if (named != null) {
+            return named;
+        }
+        return workers.get(singleStepCursor % workers.size());
+    }
+
+    /**
+     * 并行批次路由：尽量取 assignee 指定的 worker；若已被同批次其他步骤占用或不存在，回退到任意空闲 worker。
+     */
+    private SubAgent takeWorker(BlockingQueue<SubAgent> pool, String assignee) throws InterruptedException {
+        if (assignee == null || assignee.isBlank()) {
+            return pool.take();
+        }
+        synchronized (pool) {
+            List<SubAgent> drained = new ArrayList<>();
+            SubAgent found = null;
+            SubAgent w;
+            while ((w = pool.poll()) != null) {
+                if (found == null && assignee.equals(w.getName())) {
+                    found = w;
+                } else {
+                    drained.add(w);
+                }
+            }
+            for (SubAgent d : drained) {
+                pool.offer(d);
+            }
+            if (found != null) {
+                return found;
+            }
+        }
+        // 指派的 worker 当前被占用，回退到任意空闲 worker
+        return pool.take();
+    }
+
+    private SubAgent findWorker(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        for (SubAgent worker : workers) {
+            if (name.equals(worker.getName())) {
+                return worker;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 规范化 assignee：仅当与某个已注册 worker 名字匹配时才保留，否则置 null（回退默认调度），
+     * 避免规划者幻觉出不存在的 worker 名导致步骤无法路由。
+     */
+    private String normalizeAssignee(String assignee) {
+        if (assignee == null || assignee.isBlank()) {
+            return null;
+        }
+        String trimmed = assignee.trim();
+        return findWorker(trimmed) != null ? trimmed : null;
     }
 
     /**
@@ -482,9 +594,13 @@ public class AgentOrchestrator {
             futures.add(executor.submit(() -> {
                 SubAgent worker = null;
                 SubAgent localReviewer = new SubAgent(
-                        "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
+                        "reviewer-" + step.id(), AgentRole.REVIEWER,
+                        roleClientResolver.apply(AgentRole.REVIEWER), toolRegistry);
                 try {
-                    worker = workerPool.take();
+                    worker = takeWorker(workerPool, step.assignee());
+                    if (step.assignee() != null && worker != null && worker.getName().equals(step.assignee())) {
+                        stepOut.println("🎯 步骤 [" + step.id() + "] 由 " + step.assignee() + " 执行（规划者指派）\n");
+                    }
                     runStep(step, steps, retryCount, worker, localReviewer, context, stepOut);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -496,7 +612,7 @@ public class AgentOrchestrator {
                     stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
                 } finally {
                     if (worker != null) {
-                        worker.clearHistory();
+                        // 持久记忆：不 clearHistory，Worker 跨步骤保留对话历史
                         workerPool.offer(worker);
                     }
                     stepOut.flush();

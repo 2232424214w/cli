@@ -1287,10 +1287,40 @@ public class Main {
         // 角色级模型分配：Planner / Reviewer 可按配置用不同模型，未配置则回退主模型（向后兼容）
         RoleModelResolver resolver = new RoleModelResolver(llmClient, config);
         orchestrator.setRoleClientResolver(resolver);
+        // Worker 专长分化：默认按能力维度分工（实现 vs 分析/验证），可用
+        // -Dbettercli.team.worker.specialties=a,b 或 BETTERCLI_TEAM_WORKER_SPECIALTIES=a,b 覆盖
+        orchestrator.setWorkerSpecialties(resolveWorkerSpecialties());
         out.println("   规划者模型: " + orchestrator.roleModelLabel(AgentRole.PLANNER)
                 + " | 执行者模型: " + orchestrator.roleModelLabel(AgentRole.WORKER)
                 + " | 检查者模型: " + orchestrator.roleModelLabel(AgentRole.REVIEWER) + "\n");
         return orchestrator;
+    }
+
+    private static java.util.List<String> resolveWorkerSpecialties() {
+        String sysProp = System.getProperty("bettercli.team.worker.specialties");
+        if (sysProp != null && !sysProp.isBlank()) {
+            return splitSpecialties(sysProp);
+        }
+        String env = System.getenv("BETTERCLI_TEAM_WORKER_SPECIALTIES");
+        if (env != null && !env.isBlank()) {
+            return splitSpecialties(env);
+        }
+        // 默认按能力维度分工：worker-1 偏实现，worker-2 偏分析/验证
+        return java.util.List.of(
+                "偏实现/编码（FILE_WRITE / COMMAND 类步骤优先）",
+                "偏分析/验证（ANALYSIS / VERIFICATION / FILE_READ 类步骤优先）"
+        );
+    }
+
+    private static java.util.List<String> splitSpecialties(String raw) {
+        java.util.List<String> result = new java.util.ArrayList<>();
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(trimmed);
+            }
+        }
+        return result;
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
