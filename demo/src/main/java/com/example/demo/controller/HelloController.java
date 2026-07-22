@@ -14,6 +14,6 @@ public class HelloController {
 
     @RequestMapping("/hello2ge")
     public String hello2ge() {
-        return "Hello, 二哥!";
+        return "Hello, BetterCLI!";
     }
 }

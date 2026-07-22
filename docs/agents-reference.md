@@ -10,7 +10,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### API Key
 
-1. `~/.paicli/config.json` 中对应 provider 的 `apiKey`
+1. `~/.bettercli/config.json` 中对应 provider 的 `apiKey`
 2. 环境变量：`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `FREELLMAPI_API_KEY` / `XFYUN_MAAS_API_KEY` / `AGNES_API_KEY`（Kimi 兼容 `MOONSHOT_API_KEY`，讯飞 MaaS 兼容 `XFYUN_API_KEY`）
 3. 仓库当前目录下的 `.env`
 4. 用户主目录下的 `.env`
@@ -19,16 +19,16 @@ For the primary entry point, see `/AGENTS.md`.
 
 | 数据 | 默认路径 | 覆盖方式 |
 |------|----------|----------|
-| 长期记忆 | `~/.paicli/memory/long_term_memory.json` | `-Dpaicli.memory.dir` |
-| 项目级记忆 | `PAI.md` / `.paicli/PAI.md` / `PAI.local.md` | 用户级稳定偏好：`~/.paicli/PAI.md` |
-| RAG 索引 | `~/.paicli/rag/codebase.db` | `-Dpaicli.rag.dir` |
-| 审计日志 | `~/.paicli/audit/audit-YYYY-MM-DD.jsonl` | `PAICLI_AUDIT_DIR` / `-Dpaicli.audit.dir` |
-| Side-Git 快照 | `~/.paicli/snapshots/<project_hash>/<worktree_hash>/.git` | `PAICLI_SNAPSHOT_DIR` / `-Dpaicli.snapshot.dir` |
-| 后台任务 | `~/.paicli/tasks/tasks.db` | — |
+| 长期记忆 | `~/.bettercli/memory/long_term_memory.json` | `-Dbettercli.memory.dir` |
+| 项目级记忆 | `BETTER.md` / `.bettercli/BETTER.md` / `BETTER.local.md` | 用户级稳定偏好：`~/.bettercli/BETTER.md` |
+| RAG 索引 | `~/.bettercli/rag/codebase.db` | `-Dbettercli.rag.dir` |
+| 审计日志 | `~/.bettercli/audit/audit-YYYY-MM-DD.jsonl` | `BETTERCLI_AUDIT_DIR` / `-Dbettercli.audit.dir` |
+| Side-Git 快照 | `~/.bettercli/snapshots/<project_hash>/<worktree_hash>/.git` | `BETTERCLI_SNAPSHOT_DIR` / `-Dbettercli.snapshot.dir` |
+| 后台任务 | `~/.bettercli/tasks/tasks.db` | — |
 
 ### Snapshot Config
 
-系统属性 > 环境变量 > 默认值：`paicli.snapshot.enabled`(true) / `paicli.snapshot.max`(50) / `paicli.snapshot.excludes`(.git,.paicli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `paicli.snapshot.dir`(~/.paicli/snapshots)
+系统属性 > 环境变量 > 默认值：`bettercli.snapshot.enabled`(true) / `bettercli.snapshot.max`(50) / `bettercli.snapshot.excludes`(.git,.bettercli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `bettercli.snapshot.dir`(~/.bettercli/snapshots)
 
 ### Embedding Config
 
@@ -36,17 +36,17 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Log Config
 
-系统属性 > 环境变量/.env > 默认值：`PAICLI_LOG_DIR`(~/.paicli/logs) / `PAICLI_LOG_LEVEL`(INFO) / `PAICLI_LOG_MAX_HISTORY`(7) / `PAICLI_LOG_MAX_FILE_SIZE`(10MB) / `PAICLI_LOG_TOTAL_SIZE_CAP`(100MB)
+系统属性 > 环境变量/.env > 默认值：`BETTERCLI_LOG_DIR`(~/.bettercli/logs) / `BETTERCLI_LOG_LEVEL`(INFO) / `BETTERCLI_LOG_MAX_HISTORY`(7) / `BETTERCLI_LOG_MAX_FILE_SIZE`(10MB) / `BETTERCLI_LOG_TOTAL_SIZE_CAP`(100MB)
 
 ### ReAct/SubAgent Budget Config
 
-系统属性 > 默认值：`paicli.react.token.budget`(Integer.MAX_VALUE) / `paicli.react.stagnation.window`(3) / `paicli.react.hard.max.iterations`(50)
+系统属性 > 默认值：`bettercli.react.token.budget`(Integer.MAX_VALUE) / `bettercli.react.stagnation.window`(3) / `bettercli.react.hard.max.iterations`(50)
 
 设计取舍：长上下文模型默认不再以 80% x window 为硬限。死循环防护由 stagnation 检测（连续 3 轮相同工具调用）和 hardMaxIterations（50 轮）兜底。Token 显示行 `📊 Token: 已用 X / Y` 的 Y 是软提示，不代表强制限制。
 
 ### LLM HTTP Timeout Config
 
-系统属性 > 默认值：`paicli.llm.connect.timeout.seconds`(60) / `paicli.llm.read.timeout.seconds`(300) / `paicli.llm.write.timeout.seconds`(60) / `paicli.llm.call.timeout.seconds`(600)
+系统属性 > 默认值：`bettercli.llm.connect.timeout.seconds`(60) / `bettercli.llm.read.timeout.seconds`(300) / `bettercli.llm.write.timeout.seconds`(60) / `bettercli.llm.call.timeout.seconds`(600)
 
 SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 reasoning 时可能长时间静默，所以放宽到 300 秒。
 DeepSeek 流式调用默认使用 HTTP/1.1，避免部分 HTTP/2 网关在长 SSE 响应中重置 stream，表现为 `stream was reset: INTERNAL_ERROR`。
@@ -66,8 +66,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### MCP Config
 
-1. 用户级：`~/.paicli/mcp.json`
-2. 项目级：`.paicli/mcp.json`
+1. 用户级：`~/.bettercli/mcp.json`
+2. 项目级：`.bettercli/mcp.json`
 3. 按 server 名 merge，项目级覆盖用户级
 
 格式兼容 Claude Code：`command` + `args` = stdio，`url` + `headers` = Streamable HTTP。内置变量：`${PROJECT_DIR}`、`${HOME}`；其他 `${VAR}` 从系统环境变量、系统属性、项目 `.env`、用户 `~/.env` 读取。
@@ -105,10 +105,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 长期记忆只通过 `/save` 或用户明确要求保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆管理命令：`/memory list`、`/memory search <关键词>`、`/memory delete <id>`、`/memory clear`
-- `PAI.md` 不是 `/save` 长期记忆：它是启动时注入 system prompt 的项目指令文件，适合团队共享、长期稳定、可进 git 的规则
-- 加载顺序：`~/.paicli/PAI.md` → `PAI.md` → `.paicli/PAI.md` → `PAI.local.md` → `.paicli/PAI.local.md`
-- `PAI.md` 中独占一行的 `@relative/path.md` 会被展开；导入路径必须留在用户配置目录或项目根内，总注入内容按预算截断
-- `/init` 生成精简 `PAI.md`，只写 commands / project positioning / architecture / pitfalls / don'ts；已有文件默认不覆盖，`/init --force` 重写
+- `BETTER.md` 不是 `/save` 长期记忆：它是启动时注入 system prompt 的项目指令文件，适合团队共享、长期稳定、可进 git 的规则
+- 加载顺序：`~/.bettercli/BETTER.md` → `BETTER.md` → `.bettercli/BETTER.md` → `BETTER.local.md` → `.bettercli/BETTER.local.md`
+- `BETTER.md` 中独占一行的 `@relative/path.md` 会被展开；导入路径必须留在用户配置目录或项目根内，总注入内容按预算截断
+- `/init` 生成精简 `BETTER.md`，只写 commands / project positioning / architecture / pitfalls / don'ts；已有文件默认不覆盖，`/init --force` 重写
 
 ### Multi-Agent
 
@@ -163,11 +163,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `/browser connect <port>`：旧式 CDP 端口路径
 - `/browser disconnect`：切回 isolated
 - 敏感页面策略：改写型工具必须单步 HITL，不复用全部放行
-- shared 模式 close_page 只允许关闭 PaiCLI 创建的 tab
+- shared 模式 close_page 只允许关闭 BetterCLI 创建的 tab
 
 ### Skill System
 
-- 三层加载：jar 内置 < 用户级 ~/.paicli/skills/ < 项目级 .paicli/skills/
+- 三层加载：jar 内置 < 用户级 ~/.bettercli/skills/ < 项目级 .bettercli/skills/
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer
@@ -176,16 +176,16 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### TUI (v16.1 Renderer Architecture)
 
 - 三个实现：InlineRenderer(默认) / LanternaRenderer / PlainRenderer
-- 环境变量：`PAICLI_RENDERER=inline|lanterna|plain`
-- `PAICLI_TUI=true`(旧) → lanterna + deprecation 提示
-- `PAICLI_NO_STATUSBAR=true`：禁用底部状态栏
+- 环境变量：`BETTERCLI_RENDERER=inline|lanterna|plain`
+- `BETTERCLI_TUI=true`(旧) → lanterna + deprecation 提示
+- `BETTERCLI_NO_STATUSBAR=true`：禁用底部状态栏
 - `NO_COLOR=1`：禁用 ANSI 颜色
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
 - InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`
 - BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd。关键字段可用 JLine `AttributedString` 做克制彩色高亮，但纯文本格式和列宽裁剪仍要稳定。`ctx` 只表示当前仍会带入下一轮请求的上下文估算，`in/out/cache` 表示最近任务调用统计。
 - `/clear` 清空当前 ReAct conversationHistory、shortTermMemory 和待注入 SkillContextBuffer，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留，后续只会按新查询重新检索注入。
 - `/compact` 手动压缩当前 ReAct conversationHistory，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空 shortTermMemory、长期记忆或待注入 SkillContextBuffer。
-- `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.paicli/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
+- `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.bettercli/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
 - 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
@@ -195,11 +195,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - write_file 成功后对 Java 文件做 JavaParser 语法诊断
 - 诊断作为合成 user message 注入下一轮 LLM 请求
-- `PAICLI_LSP_ENABLED=false` 关闭
+- `BETTERCLI_LSP_ENABLED=false` 关闭
 
 ### Git Side-History Snapshot (Phase 18)
 
-- side-git 在 ~/.paicli/snapshots/ 维护独立仓库（JGit，不依赖系统 git）
+- side-git 在 ~/.bettercli/snapshots/ 维护独立仓库（JGit，不依赖系统 git）
 - pre-turn 同步，post-turn 异步
 - revert_turn 纳入 HITL/AuditLog，恢复前先创建 pre-restore 快照
 
@@ -207,8 +207,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 组装顺序：base → personality → mode → approval → runtime_context → project_context → skills → context_mgmt → handoff
 - runtime_context 每轮注入当前日期和系统时区，供相对日期理解使用
-- project_context 顺序：`PAI.md` 项目记忆 → 相关长期记忆 → MCP resources 索引
-- 覆盖优先级：jar 内置 < 用户级 ~/.paicli/prompts/ < 项目级 .paicli/prompts/
+- project_context 顺序：`BETTER.md` 项目记忆 → 相关长期记忆 → MCP resources 索引
+- 覆盖优先级：jar 内置 < 用户级 ~/.bettercli/prompts/ < 项目级 .bettercli/prompts/
 - 必要校验：base.md 和最终 prompt 必须包含 `## Language`
 
 ### Async Tasks + Runtime API (Phase 20)
@@ -266,7 +266,7 @@ TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ 
 - StepClient：step-3.5-flash，可通过 STEP_BASE_URL 切通道
 - KimiClient：kimi-k2.6，thinking + tool calls 带回 reasoning_content
 - FreeLlmApiClient：auto，默认 http://localhost:5173/v1，OpenAI-compatible 本地网关；可用 `/config provider freellmapi ...` 写入配置后 `/model freellmapi` 切换
-- XfyunMaaSClient：Qwen3.6-35B-A3B，默认 https://maas-api.cn-huabei-1.xf-yun.com/v2，OpenAI-compatible 讯飞星辰 MaaS；可用 `/config provider xfyun ...` 写入配置后 `/model xfyun` 切换。`model` 必须使用 MaaS 服务管控页展示的 modelId；微调模型可配置 `--lora-id <resourceId>`，作为 HTTP header `lora_id` 发出；该 provider 不发送 PaiCLI 内置 tools。
+- XfyunMaaSClient：Qwen3.6-35B-A3B，默认 https://maas-api.cn-huabei-1.xf-yun.com/v2，OpenAI-compatible 讯飞星辰 MaaS；可用 `/config provider xfyun ...` 写入配置后 `/model xfyun` 切换。`model` 必须使用 MaaS 服务管控页展示的 modelId；微调模型可配置 `--lora-id <resourceId>`，作为 HTTP header `lora_id` 发出；该 provider 不发送 BetterCLI 内置 tools。
 - AgnesClient：agnes-2.0-flash，默认 https://apihub.agnes-ai.com/v1，OpenAI-compatible Agnes AI，默认 1M context window；可用 `/config provider agnes ...` 写入配置后 `/model agnes` 切换，支持流式输出和 tools。
 
 ---
@@ -300,16 +300,16 @@ EMBEDDING_PROVIDER=ollama
 EMBEDDING_MODEL=nomic-embed-text:latest
 EMBEDDING_BASE_URL=http://localhost:11434
 # EMBEDDING_API_KEY=your_api_key_here
-# PAICLI_LOG_LEVEL=INFO
-# PAICLI_LOG_DIR=/Users/yourname/.paicli/logs
-# PAICLI_LOG_MAX_HISTORY=7
-# PAICLI_LOG_MAX_FILE_SIZE=10MB
-# PAICLI_LOG_TOTAL_SIZE_CAP=100MB
-# PAICLI_SNAPSHOT_ENABLED=true
-# PAICLI_SNAPSHOT_MAX=50
-# PAICLI_SNAPSHOT_EXCLUDES=.git,.paicli/snapshots,target,node_modules,dist,.idea,*.class,*.jar
-# PAICLI_SNAPSHOT_DIR=/Users/yourname/.paicli/snapshots
-# PAICLI_TUI=true
+# BETTERCLI_LOG_LEVEL=INFO
+# BETTERCLI_LOG_DIR=/Users/yourname/.bettercli/logs
+# BETTERCLI_LOG_MAX_HISTORY=7
+# BETTERCLI_LOG_MAX_FILE_SIZE=10MB
+# BETTERCLI_LOG_TOTAL_SIZE_CAP=100MB
+# BETTERCLI_SNAPSHOT_ENABLED=true
+# BETTERCLI_SNAPSHOT_MAX=50
+# BETTERCLI_SNAPSHOT_EXCLUDES=.git,.bettercli/snapshots,target,node_modules,dist,.idea,*.class,*.jar
+# BETTERCLI_SNAPSHOT_DIR=/Users/yourname/.bettercli/snapshots
+# BETTERCLI_TUI=true
 # NO_TUI=true
 ```
 

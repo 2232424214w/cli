@@ -4,40 +4,40 @@
 
 ## 信息优先级
 
-1. 代码实际行为 > 2. `AGENTS.md` > 3. `PAI.md` > 4. `README.md` > 5. `ROADMAP.md` > 6. `CLAUDE.md`
+1. 代码实际行为 > 2. `AGENTS.md` > 3. `BETTER.md` > 4. `README.md` > 5. `ROADMAP.md` > 6. `CLAUDE.md`
 
 `ROADMAP.md` 代表演进方向，不代表已交付。
 
 ## 项目快照
 
-- 项目名：`PaiCLI`
+- 项目名：`BetterCLI`
 - 定位：面向商业使用的 Java Agent CLI 产品，对标 Claude Code
 - 已交付 23 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 通道文本 MVP）
-- `PAI.md` 是 PaiCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
+- `BETTER.md` 是 BetterCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强
-- Banner 版本：`v16.1.0`，Maven 产物：`paicli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
+- Banner 版本：`v16.1.0`，Maven 产物：`bettercli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
 
 ## 运行前提
 
 - Java 17+ / Maven
 - 可选：`ripgrep`（`grep_code` 会优先使用；未安装时自动回退 Java 扫描）
 - 至少一个 API Key：`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `FREELLMAPI_API_KEY` / `XFYUN_MAAS_API_KEY` / `AGNES_API_KEY`
-- 记忆后端（可选，默认 sqlite）：`PAICLI_MEMORY_BACKEND` / `-Dpaicli.memory.backend`，取值 `sqlite`（本地，已交付）/ `postgres`（云端，骨架预留，需要 PostgreSQL JDBC 驱动）
+- 记忆后端（可选，默认 sqlite）：`BETTERCLI_MEMORY_BACKEND` / `-Dbettercli.memory.backend`，取值 `sqlite`（本地，已交付）/ `postgres`（云端，骨架预留，需要 PostgreSQL JDBC 驱动）
 
 ## 常用命令
 
 ```bash
 cp .env.example .env
 mvn clean package        # 默认跳过测试，优先产出可手工验收 jar
-java -jar target/paicli-1.0-SNAPSHOT.jar
-java -jar target/paicli-1.0-SNAPSHOT.jar wechat setup   # 主动绑定微信 iLink 通道，默认不开启
-java -jar target/paicli-1.0-SNAPSHOT.jar wechat start   # 前台启动微信通道
+java -jar target/bettercli-1.0-SNAPSHOT.jar
+java -jar target/bettercli-1.0-SNAPSHOT.jar wechat setup   # 主动绑定微信 iLink 通道，默认不开启
+java -jar target/bettercli-1.0-SNAPSHOT.jar wechat start   # 前台启动微信通道
 /wechat                   # 交互式 CLI 内扫码绑定并后台启动微信通道
 mvn test -Pquick          # 常规回归
 mvn test -Pphase16-smoke  # TUI 相关
 mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
 mvn test -DskipTests=false                  # 全量回归
-/init                    # 生成精简项目级记忆 PAI.md；已有文件不覆盖，/init --force 可重写
+/init                    # 生成精简项目级记忆 BETTER.md；已有文件不覆盖，/init --force 可重写
 /export                  # 导出当前 ReAct 会话为 Markdown，包含完整 system prompt
 /agent-memory            # 查看 Agent 维护的事实记忆统计；/agent-memory list/search/stats/export/clear 管理视图
 ```
@@ -52,25 +52,25 @@ mvn test -DskipTests=false                  # 全量回归
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
 
-核心内置工具 18 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_pai_md` / `suggest_pai_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
+核心内置工具 18 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
-MCP 配置会合并用户级 `~/.paicli/mcp.json` 与项目级 `.paicli/mcp.json`；`${VAR}` 支持系统环境变量、系统属性、项目 `.env`、用户 `~/.env`。检测到 `STEP_API_KEY` 时会自动内置 `step_search` 远程 MCP（显式同名配置优先）。
+MCP 配置会合并用户级 `~/.bettercli/mcp.json` 与项目级 `.bettercli/mcp.json`；`${VAR}` 支持系统环境变量、系统属性、项目 `.env`、用户 `~/.env`。检测到 `STEP_API_KEY` 时会自动内置 `step_search` 远程 MCP（显式同名配置优先）。
 
 DeepSeek V4 / Kimi thinking 模式下，assistant tool-call 消息的 `reasoning_content` 必须随下一轮请求历史带回；其他 provider 默认只把 reasoning 写日志 / 展示。
 DeepSeek SSE 调用默认强制 HTTP/1.1，避免部分网络/网关下 HTTP/2 长流被远端重置成 `stream was reset: INTERNAL_ERROR`。
 DeepSeek 当前按文本 provider 处理：`supportsImageInput()` 返回 false，历史或工具回灌里的图片 `ContentPart` 会在请求序列化时替换为文本提示，不能把 `image_url` block 发给 DeepSeek API。
 
-讯飞星辰 MaaS provider 名为 `xfyun`，默认 Base URL 为 `https://maas-api.cn-huabei-1.xf-yun.com/v2`。`model` 必须使用服务管控页展示的 `modelId`；公开模型名 / Hugging Face 仓库名不一定可直接调用。微调模型用 `/config provider xfyun --lora-id <resourceId>` 配置服务卡片上的 resourceId，PaiCLI 会作为 HTTP header `lora_id` 发出。`xfyun` 当前按 MaaS 文档走纯对话请求，不向上游发送 PaiCLI 内置工具列表。
+讯飞星辰 MaaS provider 名为 `xfyun`，默认 Base URL 为 `https://maas-api.cn-huabei-1.xf-yun.com/v2`。`model` 必须使用服务管控页展示的 `modelId`；公开模型名 / Hugging Face 仓库名不一定可直接调用。微调模型用 `/config provider xfyun --lora-id <resourceId>` 配置服务卡片上的 resourceId，BetterCLI 会作为 HTTP header `lora_id` 发出。`xfyun` 当前按 MaaS 文档走纯对话请求，不向上游发送 BetterCLI 内置工具列表。
 Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com/v1`，默认模型 `agnes-2.0-flash`，走 OpenAI-compatible Chat Completions，默认 1M context window，支持流式输出和 tools。
 
 ## 仓库结构
 
 ```
-src/main/java/com/paicli/
+src/main/java/com/bettercli/
 ├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java
 ├── cli/         Main.java, CliCommandParser.java, PlanReviewInputParser.java
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
@@ -107,31 +107,31 @@ src/main/java/com/paicli/
 - Markdown 表格渲染要按当前终端列宽分配列宽；长内容在单元格内部换行，不能依赖终端自动折行把整行表格打散。
 - ReAct 正常结束后不再把 `📊 Token: ...` 打进正文区；token/cost/elapsed 会保留在底部强状态行，phase 回到 `idle`。
 - 默认 CLI 启动路径应尽早建立 `Terminal -> LineReader -> Renderer`，启动 Banner、模型加载、MCP 启动、Skill summary、ReAct 提示和退出提示都应走 `Renderer.stream()`；除 fatal bootstrap / runtime API / legacy TUI 降级外，不要在交互主路径新增裸 `System.out.println`。
-- 启动期 MCP 不得阻塞首屏：CLI 默认最多等待 8 秒（`PAICLI_MCP_STARTUP_WAIT_SECONDS` / `-Dpaicli.mcp.startup.wait.seconds` 可调），超时后保留未完成 server 为 `STARTING` 并后台继续初始化；`/mcp` 查看最新状态。
-- `LineReader` 使用 `PaiCliHighlighter` 做输入实时高亮：slash 命令、`@` 引用、`@image:`、`@clipboard`、敏感词和明显危险 shell 片段会在编辑阶段被标记；不要把这类视觉提示混入最终提交文本。
-- `LineReader` 使用 `PaiCliCompleter` 做上下文补全：`/model` provider、`/mcp` 子命令与 server、`/skill` 子命令与 skill name、`/task` / `/browser` / `/snapshot` 子命令、`@image:` 本地路径、本地 `@path` 和 MCP resource `@server:uri` 引用都应从同一个 completer 出口维护。
+- 启动期 MCP 不得阻塞首屏：CLI 默认最多等待 8 秒（`BETTERCLI_MCP_STARTUP_WAIT_SECONDS` / `-Dbettercli.mcp.startup.wait.seconds` 可调），超时后保留未完成 server 为 `STARTING` 并后台继续初始化；`/mcp` 查看最新状态。
+- `LineReader` 使用 `BetterCliHighlighter` 做输入实时高亮：slash 命令、`@` 引用、`@image:`、`@clipboard`、敏感词和明显危险 shell 片段会在编辑阶段被标记；不要把这类视觉提示混入最终提交文本。
+- `LineReader` 使用 `BetterCliCompleter` 做上下文补全：`/model` provider、`/mcp` 子命令与 server、`/skill` 子命令与 skill name、`/task` / `/browser` / `/snapshot` 子命令、`@image:` 本地路径、本地 `@path` 和 MCP resource `@server:uri` 引用都应从同一个 completer 出口维护。
 - 普通用户输入进入 Agent 前会先展开 MCP resource mention，再由 `LocalPathMentionExpander` 展开本地 `@path`：文件会内联为 `<file>` 块，目录会内联为 `<directory>` 列表；绝对路径或符号链接逃逸项目根时保持原文不展开。
-- `LineReader` 使用 `PaiCliHistory` 持久化输入历史到 `~/.paicli/history/input.history`；如果 `paicli.history.file` / `PAICLI_HISTORY_FILE` 指向目录，也会自动使用该目录下的 `input.history`，避免把目录当文件读；默认忽略空白、重复、明显密钥/Bearer、base64 图片和超长输入，用户可用 `/history clear` 清空本机输入历史。
-- 启动期会加载 `~/.paicli/PAI.md`、项目根 `PAI.md`、项目根 `.paicli/PAI.md`、`PAI.local.md`、`.paicli/PAI.local.md`，按此顺序注入 Project Context；`@relative/path.md` 可导入项目根内文件，总注入内容有字符预算，避免项目记忆变成 token 噪音。开启 `PAICLI_PAI_MD_RECURSIVE_DISCOVERY` 或 `-Dpaicli.pai_md.recursive_discovery=true` 后，`ProjectMemoryLoader` 会从项目根向上递归查找祖先目录的 `PAI.md`（对标 Claude Code CLAUDE.md 机制），按"从根到工作目录"顺序拼接。PAI.md 主体字符上限默认 2200（`PAICLI_PAI_MD_MAX_CHARS` / `-Dpaicli.pai_md.max_chars` 可调），超 80% 阈值时 `read_pai_md` 会提示整合，超上限时 `suggest_pai_md` 会拒绝追加。
-- `read_pai_md` 工具：Agent 主动读取当前已加载的 PAI.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要。建议在 `suggest_pai_md` 之前先调用，避免重复添加已有条目或超出容量上限。
-- `suggest_pai_md` 工具：Agent 向 PAI.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件（默认项目根 `PAI.md`，可通过 `target` 指定）。超容量上限时直接拒绝并提示先整合。属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
+- `LineReader` 使用 `BetterCliHistory` 持久化输入历史到 `~/.bettercli/history/input.history`；如果 `bettercli.history.file` / `BETTERCLI_HISTORY_FILE` 指向目录，也会自动使用该目录下的 `input.history`，避免把目录当文件读；默认忽略空白、重复、明显密钥/Bearer、base64 图片和超长输入，用户可用 `/history clear` 清空本机输入历史。
+- 启动期会加载 `~/.bettercli/BETTER.md`、项目根 `BETTER.md`、项目根 `.bettercli/BETTER.md`、`BETTER.local.md`、`.bettercli/BETTER.local.md`，按此顺序注入 Project Context；`@relative/path.md` 可导入项目根内文件，总注入内容有字符预算，避免项目记忆变成 token 噪音。开启 `BETTERCLI_PAI_MD_RECURSIVE_DISCOVERY` 或 `-Dbettercli.better_md.recursive_discovery=true` 后，`ProjectMemoryLoader` 会从项目根向上递归查找祖先目录的 `BETTER.md`（对标 Claude Code CLAUDE.md 机制），按"从根到工作目录"顺序拼接。BETTER.md 主体字符上限默认 2200（`BETTERCLI_PAI_MD_MAX_CHARS` / `-Dbettercli.better_md.max_chars` 可调），超 80% 阈值时 `read_better_md` 会提示整合，超上限时 `suggest_better_md` 会拒绝追加。
+- `read_better_md` 工具：Agent 主动读取当前已加载的 BETTER.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要。建议在 `suggest_better_md` 之前先调用，避免重复添加已有条目或超出容量上限。
+- `suggest_better_md` 工具：Agent 向 BETTER.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件（默认项目根 `BETTER.md`，可通过 `target` 指定）。超容量上限时直接拒绝并提示先整合。属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
 - Agent 维护的事实记忆（对标美团 1024 Agent `agent_memory` 表，与 `/save` 长期记忆分工不同）：
-  - 存储：SQLite FTS5（`~/.paicli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权（`final = -bm25 * (0.5 + confidence)`）+ user_vocabulary boost。
+  - 存储：SQLite FTS5（`~/.bettercli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权（`final = -bm25 * (0.5 + confidence)`）+ user_vocabulary boost。
   - `agent_memory_save`：Agent 自主保存事实/模式/调试经验/工作流；`confidence < 0.7` 不应调用；敏感词（API key/密码/Bearer）会被拦截；`keywords` 必须是 3-8 个专有名词。
   - `agent_memory_search`：BM25 检索，按当前项目作用域过滤（PROJECT + GLOBAL 都可见）。
   - `agent_memory_update` / `agent_memory_delete`：更新/删除单条记忆。
-  - 护栏：默认 1000 条上限（`PAICLI_MEMORY_MAX_ENTRIES` 可调），超限拒绝写入；`findSimilar` 基于 BM25 相似度（默认 0.85）自动去重；`MemoryMaintenanceScheduler` 后台定期清理 `expired` 状态条目。
-  - 启动注入：`Agent.buildProjectMemoryContext()` 在 PAI.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限），供 system prompt 引用。
-  - 迁移：启动时 `LongTermMemoryMigrator` 自动从 `~/.paicli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，写 `.migrated-to-sqlite` 标记，不删原文件）。
+  - 护栏：默认 1000 条上限（`BETTERCLI_MEMORY_MAX_ENTRIES` 可调），超限拒绝写入；`findSimilar` 基于 BM25 相似度（默认 0.85）自动去重；`MemoryMaintenanceScheduler` 后台定期清理 `expired` 状态条目。
+  - 启动注入：`Agent.buildProjectMemoryContext()` 在 BETTER.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限），供 system prompt 引用。
+  - 迁移：启动时 `LongTermMemoryMigrator` 自动从 `~/.bettercli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，写 `.migrated-to-sqlite` 标记，不删原文件）。
   - CLI 命令：`/agent-memory`（或 `/am`）查看统计；`/agent-memory list` 列出条目；`/agent-memory search <关键词>` BM25 检索；`/agent-memory stats` 查看统计；`/agent-memory export` 导出为 JSON；`/agent-memory clear` 清空。用户只读视图，写入由 Agent 通过工具自主完成。
 - 历史会话检索（对标美团 1024 Agent `session_messages` + `session_search`）：
-  - 存储：SQLite FTS5（`~/.paicli/memory/session_messages.db`），与 `agent_memory.db` 分开。
+  - 存储：SQLite FTS5（`~/.bettercli/memory/session_messages.db`），与 `agent_memory.db` 分开。
   - `session_search` 工具：BM25 全文检索 + 五阶段管道（检索 → 按 `conversation_id` 分组 → 加载完整会话 → 截断预览 → 返回）。默认当前项目作用域、回溯 30 天；可指定 `role_filter`（user/assistant）和 `days_back`（1-365）。
   - 异步索引：`SessionMessageIndexer` 在每轮 ReAct 结束后用独立线程池把新增消息增量索引到 SQLite，不阻塞主路径；跳过 `system` 消息和空内容；id = `conversationId-index` 保证幂等。
-  - 迁移：启动时 `SqliteSessionMessageStore.migrateFromJsonl` 自动从 `~/.paicli/history/session_*.jsonl` 迁移历史消息（幂等，写 `.session-messages-migrated` 标记，不删原文件）。
+  - 迁移：启动时 `SqliteSessionMessageStore.migrateFromJsonl` 自动从 `~/.bettercli/history/session_*.jsonl` 迁移历史消息（幂等，写 `.session-messages-migrated` 标记，不删原文件）。
   - 会话 ID：每次 CLI 启动由 `SessionMessageIndexer.generateConversationId()` 生成新会话 ID。
-- `/init` 会根据当前项目生成短 `PAI.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
-- `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.paicli/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
+- `/init` 会根据当前项目生成短 `BETTER.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
+- `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.bettercli/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
 - JLine 交互升级计划记录在 `docs/phase-22-jline-interaction-upgrade.md`。
 
 ## 关键行为约束（Agent 必读）
@@ -139,7 +139,7 @@ src/main/java/com/paicli/
 ### Memory
 
 - 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
-- `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
+- `BETTER.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `BETTER.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
 - Agent 维护的事实记忆（`agent_memory`）由 Agent 自主读写，不需要用户确认；`confidence < 0.7` 不应保存，敏感词（API key/密码/Bearer）会被拦截；默认 1000 条上限，超限拒绝写入；`findSimilar` 自动去重；`/agent-memory` 命令组提供用户只读视图（list/search/stats/export/clear）

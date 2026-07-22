@@ -1,13 +1,13 @@
-# PaiCLI 记忆系统设计文档
+# BetterCLI 记忆系统设计文档
 
 > 状态：**已交付（M1-M4 全部完成）** · 对标美团 1024 Agent 记忆方案 + Claude Code CLAUDE.md 体系
 > 实施分支：feat
 >
 > 交付清单：
-> - **M1 PAI.md 静态注入**：递归发现 + 容量管理 + `read_pai_md` / `suggest_pai_md` 工具
+> - **M1 BETTER.md 静态注入**：递归发现 + 容量管理 + `read_better_md` / `suggest_better_md` 工具
 > - **M2 Agent 事实记忆**：SQLite FTS5 + `agent_memory_search/save/update/delete` 工具 + `/agent-memory` CLI + 迁移
 > - **M3 会话历史检索**：`session_search` 工具 + 五阶段管道 + 异步索引 + jsonl 迁移
-> - **M4 可插拔后端**：`MemoryStoreFactory` + `PAICLI_MEMORY_BACKEND` 配置 + PostgreSQL 骨架
+> - **M4 可插拔后端**：`MemoryStoreFactory` + `BETTERCLI_MEMORY_BACKEND` 配置 + PostgreSQL 骨架
 >
 > 未交付（云端场景启用）：PostgreSQL JDBC 实现、SQLite→PostgreSQL 迁移工具完整逻辑
 
@@ -15,7 +15,7 @@
 
 ### 1.1 当前问题
 
-PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`）存在以下问题：
+BetterCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`）存在以下问题：
 
 - **被动注入**：每轮 ReAct 系统层自动检索注入，Agent 没有主动权
 - **检索粗糙**：jieba 分词 + 子串匹配，专有名词命中率低
@@ -26,10 +26,10 @@ PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`�
 
 ### 1.2 设计目标
 
-参考美团 1024 Agent 的三机制架构 + Claude Code 的 CLAUDE.md 体系，重构 PaiCLI 记忆系统：
+参考美团 1024 Agent 的三机制架构 + Claude Code 的 CLAUDE.md 体系，重构 BetterCLI 记忆系统：
 
 1. **Agentic RAG**：Agent 主动操作记忆，不是系统层被动注入
-2. **二分存储**：用户维护的 PAI.md + Agent 维护的事实记忆，职责隔离
+2. **二分存储**：用户维护的 BETTER.md + Agent 维护的事实记忆，职责隔离
 3. **BM25 检索**：用 SQLite FTS5 做全文检索，不依赖 embedding 服务
 4. **可插拔后端**：本地 SQLite / 云端 PostgreSQL 一键切换
 5. **护栏机制**：confidence + 敏感词 + 容量上限 + TTL，Agent 自主但不乱来
@@ -49,12 +49,12 @@ PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`�
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  第一块：PAI.md（用户维护，静态注入）                            │
+│  第一块：BETTER.md（用户维护，静态注入）                            │
 │  - Markdown 文件，用户完全控制                                    │
 │  - 启动时全量注入 system prompt                                   │
 │  - Agent 只能 suggest，不能直接写                                 │
 │  - 容量：2200 字符上限，超 80% 提示整合                           │
-│  - 工具：read_pai_md / suggest_pai_md                              │
+│  - 工具：read_better_md / suggest_better_md                              │
 ├──────────────────────────────────────────────────────────────────┤
 │  第二块：Agent 维护的事实记忆（Agent 自主，主动检索）            │
 │  - SQLite FTS5 存储（agent_memory.db）                             │
@@ -76,9 +76,9 @@ PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`�
 
 ### 2.2 与美团方案的对齐
 
-| 维度 | 美团 1024 Agent | PaiCLI 调整后 |
+| 维度 | 美团 1024 Agent | BetterCLI 调整后 |
 |------|----------------|--------------|
-| 静态注入 | MEMORY.md | **PAI.md**（保留命名） |
+| 静态注入 | MEMORY.md | **BETTER.md**（保留命名） |
 | 注入方式 | system prompt | system prompt |
 | 容量上限 | 2200 字符 | 2200 字符 |
 | Agent 维护方式 | edit/bash 文件工具 | **专门工具**（更语义化） |
@@ -89,9 +89,9 @@ PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`�
 
 ### 2.3 与 Claude Code 的对齐
 
-| 维度 | Claude Code | PaiCLI 调整后 |
+| 维度 | Claude Code | BetterCLI 调整后 |
 |------|------------|--------------|
-| 用户维护 | CLAUDE.md | PAI.md |
+| 用户维护 | CLAUDE.md | BETTER.md |
 | Agent 维护 | Auto Memory（MEMORY.md + topic 文件） | agent_memory.db（SQLite FTS5） |
 | Agent 能否改用户部分 | 能（write_file） | **否**（只能 suggest） |
 | 检索方式 | 启动全量 + 按需读文件 | 启动注入索引 + Agent 主动 search |
@@ -101,18 +101,18 @@ PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`�
 
 ## 三、数据模型
 
-### 3.1 PAI.md 文件层级（第一块）
+### 3.1 BETTER.md 文件层级（第一块）
 
 ```
-~/.paicli/PAI.md                    # 用户级（所有项目可见）
-<project>/PAI.md                    # 项目级（入 git，团队共享）
-<project>/.paicli/PAI.md            # 项目级备选位置
-<project>/PAI.local.md              # 本地覆盖（gitignore）
-<project>/.paicli/PAI.local.md      # 本地覆盖备选
+~/.bettercli/BETTER.md                    # 用户级（所有项目可见）
+<project>/BETTER.md                    # 项目级（入 git，团队共享）
+<project>/.bettercli/BETTER.md            # 项目级备选位置
+<project>/BETTER.local.md              # 本地覆盖（gitignore）
+<project>/.bettercli/BETTER.local.md      # 本地覆盖备选
 ```
 
 **加载机制**：
-- 启动时从当前工作目录**向上递归查找** PAI.md 和 PAI.local.md
+- 启动时从当前工作目录**向上递归查找** BETTER.md 和 BETTER.local.md
 - 所有发现的文件**拼接**（不覆盖），顺序：文件系统根 → 工作目录
 - 全量注入 system prompt 的 `## Project Context` 段
 - 硬上限：**2200 字符**，超 80%（1760 字符）时提示 Agent 主动整合
@@ -120,11 +120,11 @@ PaiCLI 现有的长期记忆（`LongTermMemory.java` + `long_term_memory.json`�
 **维护方式**：
 - 用户手动编辑（任何文本编辑器）
 - `/init` 命令生成初始模板
-- Agent 通过 `suggest_pai_md` 工具建议添加（用户确认后写入）
+- Agent 通过 `suggest_better_md` 工具建议添加（用户确认后写入）
 
 ### 3.2 agent_memory 表结构（第二块）
 
-SQLite 数据库：`~/.paicli/memory/agent_memory.db`
+SQLite 数据库：`~/.bettercli/memory/agent_memory.db`
 
 ```sql
 -- 主表：记忆条目
@@ -187,7 +187,7 @@ END;
 
 ### 3.3 session_messages 表结构（第三块）
 
-SQLite 数据库：`~/.paicli/memory/session_messages.db`
+SQLite 数据库：`~/.bettercli/memory/session_messages.db`
 
 ```sql
 -- 主表：历史会话消息
@@ -266,23 +266,23 @@ public interface MemoryStore extends AutoCloseable {
 }
 ```
 
-### 4.2 PAI.md 相关工具（第一块）
+### 4.2 BETTER.md 相关工具（第一块）
 
 ```java
-// 1. 读取 PAI.md（Agent 主动读取确认）
-tools.put("read_pai_md", new Tool(
-    "read_pai_md",
-    "读取用户维护的 PAI.md 完整内容。通常启动时已注入 system prompt，"
+// 1. 读取 BETTER.md（Agent 主动读取确认）
+tools.put("read_better_md", new Tool(
+    "read_better_md",
+    "读取用户维护的 BETTER.md 完整内容。通常启动时已注入 system prompt，"
     + "只在需要确认具体内容、或检查是否有更新时调用。",
     createParameters(),
     args -> paiMdLoader.readContent()
 ));
 
-// 2. 建议添加到 PAI.md（不能直接写，只能建议）
-tools.put("suggest_pai_md", new Tool(
-    "suggest_pai_md",
-    "建议把某条规则添加到用户维护的 PAI.md。用户会收到提示并决定是否采纳。"
-    + "Agent 不能直接修改 PAI.md，必须通过此工具建议。"
+// 2. 建议添加到 BETTER.md（不能直接写，只能建议）
+tools.put("suggest_better_md", new Tool(
+    "suggest_better_md",
+    "建议把某条规则添加到用户维护的 BETTER.md。用户会收到提示并决定是否采纳。"
+    + "Agent 不能直接修改 BETTER.md，必须通过此工具建议。"
     + "适用场景：发现项目约定、用户偏好、跨会话稳定规则时。",
     createParameters(
         new Param("content", "string", "建议添加的内容", true),
@@ -484,7 +484,7 @@ public static boolean containsSensitive(String content) {
 
 ### 6.3 容量上限
 
-- 默认 **1000 条**（可配 `PAICLI_AGENT_MEMORY_MAX`）
+- 默认 **1000 条**（可配 `BETTERCLI_AGENT_MEMORY_MAX`）
 - 超出时按 `access_count ASC, last_accessed_at ASC` 淘汰低价值记忆
 - 淘汰前检查 confidence，`confidence >= 0.9` 的不淘汰（用户显式保存的保护）
 
@@ -533,7 +533,7 @@ WHERE status = 'active'
 
 ### 7.1 从 long_term_memory.json 迁移到 SQLite
 
-启动时检测 `~/.paicli/memory/long_term_memory.json` 是否存在，自动迁移：
+启动时检测 `~/.bettercli/memory/long_term_memory.json` 是否存在，自动迁移：
 
 ```java
 public AgentMemoryStore(File memoryDir) {
@@ -572,7 +572,7 @@ private void migrateFromJson(File legacyJson) {
 
 ### 7.2 从 session_*.jsonl 迁移到 SQLite
 
-启动时检测 `~/.paicli/history/session_*.jsonl`，自动迁移到 `session_messages.db`：
+启动时检测 `~/.bettercli/history/session_*.jsonl`，自动迁移到 `session_messages.db`：
 
 ```java
 private void migrateFromJsonl(File historyDir) {
@@ -605,20 +605,20 @@ private void migrateFromJsonl(File historyDir) {
 
 ### 8.1 配置文件
 
-`~/.paicli/config.json` 或环境变量：
+`~/.bettercli/config.json` 或环境变量：
 
 ```json
 {
   "memory": {
     "backend": "sqlite",
     "sqlite": {
-      "agentMemoryPath": "~/.paicli/memory/agent_memory.db",
-      "sessionMessagesPath": "~/.paicli/memory/session_messages.db"
+      "agentMemoryPath": "~/.bettercli/memory/agent_memory.db",
+      "sessionMessagesPath": "~/.bettercli/memory/session_messages.db"
     },
     "postgres": {
-      "url": "jdbc:postgresql://localhost:5432/paicli",
-      "user": "paicli",
-      "password": "${PAICLI_PG_PASSWORD}"
+      "url": "jdbc:postgresql://localhost:5432/bettercli",
+      "user": "bettercli",
+      "password": "${BETTERCLI_PG_PASSWORD}"
     },
     "agentMemory": {
       "maxEntries": 1000,
@@ -639,31 +639,31 @@ private void migrateFromJsonl(File historyDir) {
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `PAICLI_MEMORY_BACKEND` | 后端类型 | `sqlite` |
-| `PAICLI_MEMORY_PG_URL` | PostgreSQL URL | - |
-| `PAICLI_MEMORY_PG_USER` | PostgreSQL 用户 | - |
-| `PAICLI_MEMORY_PG_PASSWORD` | PostgreSQL 密码 | - |
-| `PAICLI_AGENT_MEMORY_MAX` | Agent 记忆容量上限 | `1000` |
-| `PAICLI_AGENT_MEMORY_CONFIDENCE` | confidence 门槛 | `0.7` |
-| `PAICLI_AGENT_MEMORY_PENDING_TTL` | pending 记忆 TTL（天） | `7` |
-| `PAICLI_AGENT_MEMORY_CLEANUP_TTL` | 清理 TTL（天） | `90` |
-| `PAICLI_AGENT_MEMORY_RATE_LIMIT` | 每轮调用上限 | `5` |
-| `PAICLI_PAI_MD_MAX_CHARS` | PAI.md 字符上限 | `2200` |
+| `BETTERCLI_MEMORY_BACKEND` | 后端类型 | `sqlite` |
+| `BETTERCLI_MEMORY_PG_URL` | PostgreSQL URL | - |
+| `BETTERCLI_MEMORY_PG_USER` | PostgreSQL 用户 | - |
+| `BETTERCLI_MEMORY_PG_PASSWORD` | PostgreSQL 密码 | - |
+| `BETTERCLI_AGENT_MEMORY_MAX` | Agent 记忆容量上限 | `1000` |
+| `BETTERCLI_AGENT_MEMORY_CONFIDENCE` | confidence 门槛 | `0.7` |
+| `BETTERCLI_AGENT_MEMORY_PENDING_TTL` | pending 记忆 TTL（天） | `7` |
+| `BETTERCLI_AGENT_MEMORY_CLEANUP_TTL` | 清理 TTL（天） | `90` |
+| `BETTERCLI_AGENT_MEMORY_RATE_LIMIT` | 每轮调用上限 | `5` |
+| `BETTERCLI_PAI_MD_MAX_CHARS` | BETTER.md 字符上限 | `2200` |
 
 ### 8.3 切换体验
 
 ```bash
 # 本地开发（默认）
-java -jar paicli.jar
+java -jar bettercli.jar
 
 # 切到云端 PostgreSQL
-PAICLI_MEMORY_BACKEND=postgres \
-PAICLI_MEMORY_PG_URL=jdbc:postgresql://cloud:5432/paicli \
-PAICLI_MEMORY_PG_PASSWORD=$PG_PASSWORD \
-java -jar paicli.jar
+BETTERCLI_MEMORY_BACKEND=postgres \
+BETTERCLI_MEMORY_PG_URL=jdbc:postgresql://cloud:5432/bettercli \
+BETTERCLI_MEMORY_PG_PASSWORD=$PG_PASSWORD \
+java -jar bettercli.jar
 
 # 数据迁移
-paicli memory migrate --from sqlite --to postgres --url $PG_URL
+bettercli memory migrate --from sqlite --to postgres --url $PG_URL
 ```
 
 ---
@@ -687,7 +687,7 @@ paicli memory migrate --from sqlite --to postgres --url $PG_URL
 |--------|---------|
 | `AgentMemoryToolIntegrationTest` | 4 个 agent_memory_* 工具端到端 |
 | `SessionSearchToolIntegrationTest` | session_search 工具端到端 |
-| `PaiMdSuggestToolIntegrationTest` | suggest_pai_md 工具 + 用户确认 UI |
+| `PaiMdSuggestToolIntegrationTest` | suggest_better_md 工具 + 用户确认 UI |
 | `MemorySystemE2ETest` | 三块记忆协同工作 |
 
 ### 9.3 回归测试
@@ -702,20 +702,20 @@ paicli memory migrate --from sqlite --to postgres --url $PG_URL
 - 检查 `long_term_memory.json.migrated` 是否生成
 - 测试 `/agent-memory list` / `/agent-memory search` 命令
 - 测试 Agent 调用 `agent_memory_save` / `agent_memory_search` 工具
-- 测试 `suggest_pai_md` 工具的用户确认流程
+- 测试 `suggest_better_md` 工具的用户确认流程
 
 ---
 
 ## 十、实施计划
 
-### 10.1 Milestone 1：PAI.md 静态注入增强（约 2-3 天）✅ 已交付
+### 10.1 Milestone 1：BETTER.md 静态注入增强（约 2-3 天）✅ 已交付
 
-- M1.1 设计 PAI.md 文件层级 + 向上递归加载机制 ✅
+- M1.1 设计 BETTER.md 文件层级 + 向上递归加载机制 ✅
 - M1.2 实现 PaiMdLoader ✅
-- M1.3 实现 read_pai_md 工具 ✅
-- M1.4 实现 suggest_pai_md 工具 ✅
+- M1.3 实现 read_better_md 工具 ✅
+- M1.4 实现 suggest_better_md 工具 ✅
 - M1.5 实现容量管理（2200 字符上限）✅
-- M1.6 兼容现有 PAI.md 机制 ✅
+- M1.6 兼容现有 BETTER.md 机制 ✅
 - M1.7 测试 + 文档同步 ✅
 
 ### 10.2 Milestone 2：Agent 维护的事实记忆（约 5-7 天）✅ 已交付
@@ -795,7 +795,7 @@ M4（依赖 M2/M3 的实现，抽接口）
 - `SessionMessageStore` 接口（新）
 - `PaiMdLoader` 类（增强现有 `ProjectMemoryLoader`）
 - `MemoryStoreFactory` 工厂（新）
-- 6 个新工具：`read_pai_md` / `suggest_pai_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
+- 6 个新工具：`read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
 
 ### 12.3 文档同步
 
@@ -811,8 +811,8 @@ M4（依赖 M2/M3 的实现，抽接口）
 - 美团 1024 Agent 记忆功能方案（内部文档）
 - Claude Code Memory 官方文档：https://code.claude.com/docs/en/memory
 - SQLite FTS5 文档：https://www.sqlite.org/fts5.html
-- PaiCLI AGENTS.md
-- PaiCLI PAI.md
+- BetterCLI AGENTS.md
+- BetterCLI BETTER.md
 
 ---
 

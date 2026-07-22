@@ -1,9 +1,9 @@
 # 环境变量文件（包含敏感信息）
 .env
-.paicli/*
-!.paicli/
-!.paicli/PAI.md
-PAI.local.md
+.bettercli/*
+!.bettercli/
+!.bettercli/BETTER.md
+BETTER.local.md
 
 # 编译输出
 target/
@@ -22,3 +22,6 @@ target/
 Thumbs.db
 /reports
 temp_articles.json
+
+# CodeGraph 本地索引
+.codegraph/

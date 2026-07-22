@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>斜杠命令 — PaiCLI 学习中心</title>
+  <title>斜杠命令 — BetterCLI 学习中心</title>
   <style>
     :root {
       --bg-primary: #0a0a0f;
@@ -863,7 +863,7 @@
   <header class="site-header">
     <div class="header-inner">
       <div class="header-left">
-        <a href="#" class="logo">PaiCLI <span>.nagdy.me</span></a>
+        <a href="#" class="logo">BetterCLI <span>.nagdy.me</span></a>
         <nav class="nav-links">
           <a href="#">学习中心</a>
           <a href="#">实验场</a>
@@ -933,7 +933,7 @@
               <h1>斜杠命令</h1>
             </div>
             <p class="hero-description">
-              学习使用 PaiCLI 内置的斜杠命令，高效管理上下文、控制会话行为与调整配置。
+              学习使用 BetterCLI 内置的斜杠命令，高效管理上下文、控制会话行为与调整配置。
             </p>
             <div class="meta-tags">
               <span class="tag beginner">入门级</span>
@@ -945,7 +945,7 @@
           <div class="content">
             <div class="section">
               <p>
-                斜杠命令是在交互式会话中控制 PaiCLI 行为的最快方式。在任意提示符处输入 <code>/</code> 即可查看完整列表，或输入几个字母进行过滤。本模块涵盖了你每天都会用到的内置命令。
+                斜杠命令是在交互式会话中控制 BetterCLI 行为的最快方式。在任意提示符处输入 <code>/</code> 即可查看完整列表，或输入几个字母进行过滤。本模块涵盖了你每天都会用到的内置命令。
               </p>
 
               <h2>发现命令</h2>
@@ -953,7 +953,7 @@
                 在提示符处输入 <code>/</code>，会弹出一个包含所有可用命令的菜单。继续输入即可过滤 —— 例如 <code>/co</code> 会筛选出 <code>/compact</code>、<code>/color</code>、<code>/config</code>、<code>/context</code>、<code>/cost</code>、<code>/copy</code>。使用方向键导航，回车确认。对于当前环境不适用的命令会自动隐藏，只显示可用的选项。
               </p>
               <p>
-                如果你是 PaiCLI 的新手，可以试试 <code>/powerup</code> —— 它会运行交互式教程，通过动画演示带你快速掌握核心功能。
+                如果你是 BetterCLI 的新手，可以试试 <code>/powerup</code> —— 它会运行交互式教程，通过动画演示带你快速掌握核心功能。
               </p>
               <p>
                 部分命令可以直接接收参数：<code>/compact focus on the API layer</code>、<code>/model opus</code>、<code>/effort high</code>、<code>/rename auth-refactor</code>。而 <code>/context</code>、<code>/cost</code> 和 <code>/status</code> 这类命令则无需参数，直接运行即可。
@@ -968,7 +968,7 @@
                 内置命令按功能划分为几个类别。了解这些分类，有助于你在不刻意记忆所有命令的情况下，快速找到所需功能。
               </p>
 
-              <p><strong>上下文管理</strong> 控制 PaiCLI 在对话中可查看的内容范围。</p>
+              <p><strong>上下文管理</strong> 控制 BetterCLI 在对话中可查看的内容范围。</p>
               <ul>
                 <li><code>/context</code> — 以可视化网格展示当前上下文使用情况</li>
                 <li><code>/compact</code> — 压缩对话历史。可传入指令控制保留内容：<code>/compact keep the migration plan, drop the debugging</code></li>
@@ -985,11 +985,11 @@
                 <li><code>/recap</code> — 生成会话的单行摘要。当你离开终端一段时间后返回时，也会自动运行。</li>
               </ul>
 
-              <p><strong>配置</strong> 在会话中调整 PaiCLI 的行为。</p>
+              <p><strong>配置</strong> 在会话中调整 BetterCLI 的行为。</p>
               <ul>
                 <li><code>/model</code> — 在可用模型间切换，如 Sonnet、Opus、Haiku，或别名如 <code>best</code>、<code>opusplan</code></li>
                 <li><code>/effort</code> — 设置推理深度：<code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>、<code>max</code>（仅当前会话）或 <code>auto</code></li>
-                <li><code>/permissions</code> — 管理 PaiCLI 无需询问即可执行的操作</li>
+                <li><code>/permissions</code> — 管理 BetterCLI 无需询问即可执行的操作</li>
                 <li><code>/config</code> — 打开设置菜单</li>
                 <li><code>/theme</code>（v2.1.118 新增）— 创建并切换自定义主题。主题以 JSON 文件形式存储在 <code>~/.pai/themes/</code> 下，也可直接手动编辑。</li>
                 <li><code>/tui</code> — 在经典模式和无闪烁全屏渲染之间切换</li>
@@ -1003,7 +1003,7 @@
                 <li><code>/usage-credits</code>（v2.1.144 新增）— 查看和管理账户使用额度。原名 <code>/extra-usage</code>，旧名称仍可用。</li>
                 <li><code>/status</code> — 显示版本、模型和账户信息</li>
                 <li><code>/doctor</code> — 检查安装健康状况</li>
-                <li><code>/diff</code> — 打开交互式查看器查看未提交的更改，提交前预览 PaiCLI 的改动很有用</li>
+                <li><code>/diff</code> — 打开交互式查看器查看未提交的更改，提交前预览 BetterCLI 的改动很有用</li>
               </ul>
 
               <p><strong>发布前审查</strong> 在代码离开你的分支之前检查工作质量。</p>
@@ -1067,7 +1067,7 @@
                 <div class="terminal-dot"></div>
                 <div class="terminal-dot"></div>
               </div>
-              <span>PaiCLI — 引导教程</span>
+              <span>BetterCLI — 引导教程</span>
             </div>
             <div class="terminal-body" id="guidedOutput">
               <div>让我们先探索可用命令。点击 Run 查看 /help 输出。</div>
@@ -1086,10 +1086,10 @@
                 <div class="terminal-dot"></div>
                 <div class="terminal-dot"></div>
               </div>
-              <span>PaiCLI — 自由输入</span>
+              <span>BetterCLI — 自由输入</span>
             </div>
             <div class="terminal-body">
-              <div>欢迎使用 PaiCLI！输入命令或 /help 开始。</div>
+              <div>欢迎使用 BetterCLI！输入命令或 /help 开始。</div>
               <div class="terminal-input-line">
                 <span class="terminal-prompt">❯</span>
                 <input type="text" class="terminal-input" id="freeInput" placeholder="输入命令..." autocomplete="off">
@@ -1109,7 +1109,7 @@
             <div class="quiz-progress-bar">
               <div class="quiz-progress-fill" id="quizFill" style="width: 0%"></div>
             </div>
-            <div class="quiz-question" id="quizQuestion">在 PaiCLI 中运行 /compact 会发生什么？</div>
+            <div class="quiz-question" id="quizQuestion">在 BetterCLI 中运行 /compact 会发生什么？</div>
             <div class="quiz-options" id="quizOptions">
               <label class="quiz-option">
                 <input type="radio" name="quiz" value="0">
@@ -1137,7 +1137,7 @@
 
           <div class="template-card">
             <div class="template-title">聚焦与检查工作流</div>
-            <div class="template-desc">在开始实现之前，引导 PaiCLI 熟悉仓库的一组斜杠命令序列。</div>
+            <div class="template-desc">在开始实现之前，引导 BetterCLI 熟悉仓库的一组斜杠命令序列。</div>
             <div class="template-code">/context
 Read `README.md`, `CLAUDE.md`, and `package.json`, then summarize the project conventions before making changes.</div>
             <div class="template-actions">
@@ -1194,7 +1194,7 @@ Read `README.md`, `CLAUDE.md`, and `package.json`, then summarize the project co
   <footer class="site-footer">
     <div class="footer-inner">
       <div class="footer-brand">
-        <div class="footer-logo">PaiCLI</div>
+        <div class="footer-logo">BetterCLI</div>
         <p class="footer-desc">An interactive learning platform for Claude Code.</p>
       </div>
       <div class="footer-links">
@@ -1225,7 +1225,7 @@ Read `README.md`, `CLAUDE.md`, and `package.json`, then summarize the project co
       </div>
     </div>
     <div class="footer-bottom">
-      <span>© 2026 PaiCLI · v1.0.0</span>
+      <span>© 2026 BetterCLI · v1.0.0</span>
       <span>基于 claude.nagdy.me 灵感构建</span>
     </div>
   </footer>

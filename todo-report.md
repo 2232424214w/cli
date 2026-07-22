@@ -25,7 +25,7 @@
 src/
 demo/
 docs/
-.paicli/
+.bettercli/
 .qoder/
 target/
 ```

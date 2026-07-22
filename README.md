@@ -1,6 +1,6 @@
-# PaiCLI
+# BetterCLI
 
-一个成熟的 Java Agent CLI 产品，对标 Claude Code 作者为沉默王二，从第一期的 `ReAct` 单代理循环逐步演进到第十六期的 `TUI 产品化`。
+一个成熟的 Java Agent CLI 产品，对标 Claude Code，从第一期的 `ReAct` 单代理循环逐步演进到第十六期的 `TUI 产品化`。
 
 当前进度：已完成第 16.1 期 inline 流式 TUI 形态修正、第 17 期 `LSP 诊断注入` MVP、第 18 期 `Git Side-History 快照与回滚` MVP、第 19 期 `Prompt 分层架构` MVP、第 20 期 `异步后台任务 + Runtime API` MVP、第 21 期 `图片复制粘贴输入` MVP、第 23 期 `微信 iLink 通道` 文本 MVP。
 
@@ -42,7 +42,7 @@ mvn test -DskipTests=false
 
 - 短期记忆管理当前对话与工具结果
 - 长期记忆通过 `/save <事实>` 或用户明确说“记一下 / 记住”时的 `save_memory` 保存关键事实，默认项目级作用域，跨会话复用
-- 项目级记忆通过 `PAI.md` / `.paicli/PAI.md` 启动自动注入，适合提交到仓库的团队共享规则；`PAI.local.md` / `.paicli/PAI.local.md` 只做本地覆盖
+- 项目级记忆通过 `BETTER.md` / `.bettercli/BETTER.md` 启动自动注入，适合提交到仓库的团队共享规则；`BETTER.local.md` / `.bettercli/BETTER.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
 - 对话接近预算时自动做摘要压缩
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
@@ -67,8 +67,8 @@ mvn test -DskipTests=false
 
 ### 第六期：Human-in-the-Loop + 审批流
 
-- 危险操作静态规则识别：`write_file`、`execute_command`、`create_project`、`revert_turn`、`suggest_pai_md`
-- 三级危险等级：高危（`execute_command`）、中危（`write_file` / `create_project` / `suggest_pai_md`）
+- 危险操作静态规则识别：`write_file`、`execute_command`、`create_project`、`revert_turn`、`suggest_better_md`
+- 三级危险等级：高危（`execute_command`）、中危（`write_file` / `create_project` / `suggest_better_md`）
 - 审批决策：批准 / 全部放行 / 拒绝 / 跳过 / 修改参数后执行
 - HITL 默认关闭，通过 `/hitl on` 启用
 - 新增 `/hitl` CLI 命令，支持 `/hitl on`、`/hitl off`、`/hitl`（查看状态）
@@ -86,7 +86,7 @@ mvn test -DskipTests=false
 - `LlmClient` 接口抽象 + `AbstractOpenAiCompatibleClient` 模板基类
 - 内置 `GLMClient`、`DeepSeekClient`、`StepClient`、`KimiClient`、`FreeLlmApiClient`、`AgnesClient` 六个瘦实现
 - `/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model deepseek` / `/model step` / `/model kimi` / `/model freellmapi` / `/model agnes` 切 provider 并读取配置里的具体模型
-- 配置持久化到 `~/.paicli/config.json`，API Key 可从配置、环境变量或 `.env` 读取
+- 配置持久化到 `~/.bettercli/config.json`，API Key 可从配置、环境变量或 `.env` 读取
 
 ### 第九期：联网能力 + Web 工具
 
@@ -99,8 +99,8 @@ mvn test -DskipTests=false
 
 ### 第十期：MCP 协议核心
 
-- 新增 `com.paicli.mcp` 模块，支持 stdio 子进程 server 与 Streamable HTTP 远程 server
-- 启动时读取 `~/.paicli/mcp.json` 与 `.paicli/mcp.json`，项目级配置按 server 名覆盖用户级配置
+- 新增 `com.bettercli.mcp` 模块，支持 stdio 子进程 server 与 Streamable HTTP 远程 server
+- 启动时读取 `~/.bettercli/mcp.json` 与 `.bettercli/mcp.json`，项目级配置按 server 名覆盖用户级配置
 - MCP `${VAR}` 支持系统环境变量、系统属性、项目 `.env`、用户 `~/.env`；检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP，显式同名配置优先
 - MCP 工具自动注册为 `mcp__{server}__{tool}`，参数 schema 会清洗 `$ref` / `anyOf` / 超长 description，降低模型调用失败率
 - 所有 MCP 工具默认走 HITL 审批和审计，审计参数会脱敏 token / key / password / Authorization / Bearer 凭证
@@ -109,7 +109,7 @@ mvn test -DskipTests=false
 - 被动处理 `notifications/tools/list_changed`、`notifications/resources/list_changed`、`notifications/resources/updated`
 - 运行中输入 `/cancel` 并回车可请求取消当前 Agent run
 - CLI 命令：`/mcp`、`/mcp restart <name>`、`/mcp logs <name>`、`/mcp disable <name>`、`/mcp enable <name>`、`/mcp resources <name>`、`/mcp prompts <name>`
-- `~/.paicli/mcp.json` 不存在时会自动创建默认 chrome-devtools 配置；项目级 `.paicli/mcp.json` 仍可按 server 名覆盖
+- `~/.bettercli/mcp.json` 不存在时会自动创建默认 chrome-devtools 配置；项目级 `.bettercli/mcp.json` 仍可按 server 名覆盖
 
 ### 第十二期：长上下文工程
 
@@ -125,7 +125,7 @@ mvn test -DskipTests=false
 ### 第十三期：Chrome DevTools MCP
 
 - 默认接入 Google 官方 `chrome-devtools-mcp@latest`，注册为 `mcp__chrome-devtools__navigate_page`、`take_snapshot`、`click`、`fill_form` 等浏览器工具
-- `~/.paicli/mcp.json` 不存在时启动自动创建模板，默认使用 `--isolated=true` 临时浏览器 profile
+- `~/.bettercli/mcp.json` 不存在时启动自动创建模板，默认使用 `--isolated=true` 临时浏览器 profile
 - 用于处理 SPA / JS 渲染 / 防爬墙 / 表单交互页面；微信公众号文章、知乎专栏、推特、小红书等 `web_fetch` 失败站点会引导走浏览器 MCP
 - HITL 的“全部放行”支持 MCP server 维度，连续浏览器操作可对 `chrome-devtools` 一次确认
 - `image` 类型结果会作为图片输入附加到下一轮；文本 fallback 仍保留，用于日志、人类可读摘要，以及 DeepSeek 等不接受图片块的 provider 自动降级上下文
@@ -138,7 +138,7 @@ mvn test -DskipTests=false
 - Agent 遇到登录页、权限不足或明确需要登录态页面时，会先调用 `browser_connect` 自动切到 shared；公开页面如微信公众号文章不提前切换
 - `/browser connect <port>` 保留旧式 CDP 端口兼容路径：先探活 `127.0.0.1:<port>/json/version`，成功后切到 `--browser-url=http://127.0.0.1:<port>`；失败时不会改 MCP 启动参数，并输出 macOS / Windows / Linux 的 Chrome 启动命令
 - 切换 shared / isolated 模式都会清空 `chrome-devtools` 的 server 维度全部放行，避免旧信任跨模式延续
-- shared 模式下 `close_page` 只能关闭 PaiCLI 自己创建的 tab；无法证明是 PaiCLI 创建的 tab 会被策略层拒绝
+- shared 模式下 `close_page` 只能关闭 BetterCLI 自己创建的 tab；无法证明是 BetterCLI 创建的 tab 会被策略层拒绝
 - 敏感页面命中规则后，`click` / `fill_form` / `evaluate_script` 等改写型浏览器工具必须单步 HITL 审批，不复用全部放行；读型工具如 `take_snapshot` 仍可继续使用
 - 审计日志为 chrome-devtools 工具追加可选浏览器 metadata：`browser_mode`、`sensitive`、`target_url`，旧格式 JSONL 仍可读取
 
@@ -146,16 +146,16 @@ mvn test -DskipTests=false
 
 把"Agent 该怎么思考"从硬编码 system prompt 抽出，沉淀成可复用单元。每个 Skill 是一个目录：`SKILL.md`（决策手册）+ `references/`（按需读取）+ 可选 `scripts/`（可执行依赖）。
 
-- 三层加载位置（按优先级，后者整体覆盖同名 skill）：jar 内置 < 用户级 `~/.paicli/skills/<name>/` < 项目级 `<project>/.paicli/skills/<name>/`
+- 三层加载位置（按优先级，后者整体覆盖同名 skill）：jar 内置 < 用户级 `~/.bettercli/skills/<name>/` < 项目级 `<project>/.bettercli/skills/<name>/`
 - 启动期把启用 skill 的 `name` + `description` 注入三处 Agent 系统提示词索引段（启用上限 20 个，索引段 ≤ 4KB）
-- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，PaiCLI 把 SKILL.md 正文（5KB 截断）写入 `SkillContextBuffer`，下一轮 user message 自动前置注入
+- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，BetterCLI 把 SKILL.md 正文（5KB 截断）写入 `SkillContextBuffer`，下一轮 user message 自动前置注入
 - 内置 web-access skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
 - frontmatter 走手写 YAML 子集解析，不引 SnakeYAML；解析失败 stderr 警告但不阻塞启动
 - CLI 命令：`/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill reload`
-- 启用状态持久化：`~/.paicli/skills.json` 的 `disabled` 列表，默认全启用
+- 启用状态持久化：`~/.bettercli/skills.json` 的 `disabled` 列表，默认全启用
 - 与 HITL 协同：Skill 内调用 `execute_command` 等危险工具仍走既有 HITL 审批，沿用 `execute_command` 工具维度全放行；不给 Skill 单独审批维度
 
-设计意图：从「写工具」演进到「打包专家手册」。当工具堆成山（PaiCLI 当前内置 9 个 + MCP 60+ 工具），用 Skill 给 LLM 一份按场景展开的"专家手册"，比往 system prompt 里塞更多规则更可扩展。
+设计意图：从「写工具」演进到「打包专家手册」。当工具堆成山（BetterCLI 当前内置 9 个 + MCP 60+ 工具），用 Skill 给 LLM 一份按场景展开的"专家手册"，比往 system prompt 里塞更多规则更可扩展。
 
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
@@ -163,16 +163,16 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 | 形态 | 启用方式 | 视觉风格 |
 |---|---|---|
-| **inline 流式 TUI**（默认） | 直接运行 / `PAICLI_RENDERER=inline` | Claude Code / Qoder 风格：π 主题彩色开屏、主屏直出、transcript 当前位置的 `* ` 输入提示、JLine `Status` 托管的底部 dock（YOLO/HITL、MCP、Skill、model、ctx、token、cwd 等关键字段带克制彩色高亮；ctx 是当前上下文估算，in/out/cache 是调用统计）、右侧输入提示、行内可折叠工具块（`Read 3 files (ctrl+o to expand)`）、行内 git diff、HITL 单字符 `[y/n/a/s/m]` 提示 |
-| **lanterna 全屏 TUI** | `PAICLI_RENDERER=lanterna`（或兼容旧 `PAICLI_TUI=true`） | v16 三栏全屏：文件树 + 对话流 + 状态栏 + 底部输入栏，HITL 模态弹窗 |
-| **plain 兜底** | `PAICLI_RENDERER=plain` | 纯 println，无折叠 / 状态栏，等价 v15 行为 |
+| **inline 流式 TUI**（默认） | 直接运行 / `BETTERCLI_RENDERER=inline` | Claude Code / Qoder 风格：π 主题彩色开屏、主屏直出、transcript 当前位置的 `* ` 输入提示、JLine `Status` 托管的底部 dock（YOLO/HITL、MCP、Skill、model、ctx、token、cwd 等关键字段带克制彩色高亮；ctx 是当前上下文估算，in/out/cache 是调用统计）、右侧输入提示、行内可折叠工具块（`Read 3 files (ctrl+o to expand)`）、行内 git diff、HITL 单字符 `[y/n/a/s/m]` 提示 |
+| **lanterna 全屏 TUI** | `BETTERCLI_RENDERER=lanterna`（或兼容旧 `BETTERCLI_TUI=true`） | v16 三栏全屏：文件树 + 对话流 + 状态栏 + 底部输入栏，HITL 模态弹窗 |
+| **plain 兜底** | `BETTERCLI_RENDERER=plain` | 纯 println，无折叠 / 状态栏，等价 v15 行为 |
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
 - 普通输入走 ReAct；`/plan <任务>` 走 Plan-and-Execute；`/team <任务>` 走 Multi-Agent；`/cancel` 可取消运行中任务
 - 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/agent-memory`、`/export`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
-- 对话历史保存到 `~/.paicli/history/session_*.jsonl`
-- 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）
-- `PAICLI_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
+- 对话历史保存到 `~/.bettercli/history/session_*.jsonl`
+- 兼容旧设置：`BETTERCLI_TUI=true` 自动映射为 `BETTERCLI_RENDERER=lanterna`（已 deprecated）
+- `BETTERCLI_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
 - `NO_COLOR=1` 禁用所有 ANSI 颜色，保留布局
 
 ### 第十七期：LSP 诊断注入（MVP）
@@ -181,36 +181,36 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - 当前 MVP 对 Java 文件使用 JavaParser 做轻量语法诊断，不依赖本机安装 JDT LS
 - ReAct、Plan-and-Execute、Multi-Agent 三条路径都会在下一轮 LLM 请求前注入 pending 诊断
 - 诊断按 error / warning / info、文件、行列号、message 格式化，默认最多注入 20 条
-- 配置：`PAICLI_LSP_ENABLED=false` 可关闭，`PAICLI_LSP_MAX_DIAGNOSTICS=20` 可调整注入上限
+- 配置：`BETTERCLI_LSP_ENABLED=false` 可关闭，`BETTERCLI_LSP_MAX_DIAGNOSTICS=20` 可调整注入上限
 - 后续增强：接入 JDT LS / rust-analyzer / pyright / gopls 的 stdio JSON-RPC transport
 
 ### 第十八期：Git Side-History 快照与回滚（MVP）
 
 - 每个 ReAct / Plan / Team turn 开始前创建 `pre-turn` 快照，结束后异步创建 `post-turn` 快照
-- 快照仓库使用 JGit 纯 Java 实现，默认位于 `~/.paicli/snapshots/<project_hash>/<worktree_hash>/.git`，不写用户项目 `.git`
+- 快照仓库使用 JGit 纯 Java 实现，默认位于 `~/.bettercli/snapshots/<project_hash>/<worktree_hash>/.git`，不写用户项目 `.git`
 - `/snapshot` 查看最近快照，`/snapshot status` 查看配置与 side-git 目录，`/snapshot clean` 清理当前项目快照目录
 - `/restore <N>` 恢复到最近第 N 个 `pre-turn` 快照；恢复前会先创建 `pre-restore` 快照
 - Agent 内置 `revert_turn` 工具，纳入 HITL 与 AuditLog 危险工具链
-- 配置：`PAICLI_SNAPSHOT_ENABLED=false` 可关闭，`PAICLI_SNAPSHOT_MAX=50`、`PAICLI_SNAPSHOT_EXCLUDES=...`、`PAICLI_SNAPSHOT_DIR=...` 可调整策略
+- 配置：`BETTERCLI_SNAPSHOT_ENABLED=false` 可关闭，`BETTERCLI_SNAPSHOT_MAX=50`、`BETTERCLI_SNAPSHOT_EXCLUDES=...`、`BETTERCLI_SNAPSHOT_DIR=...` 可调整策略
 
 ### 第十九期：Prompt 分层架构（MVP）
 
 - ReAct、Plan task executor、Multi-Agent 三角色、Planner 的 system prompt 已从 Java 硬编码抽离到 `src/main/resources/prompts/`
 - `PromptAssembler` 按 `base -> personality -> mode -> approval -> runtime_context -> project_context -> skills -> context_mgmt -> handoff` 组装；`runtime_context` 注入当前日期/时区，动态项目上下文靠后注入
-- `project_context` 会先注入 `PAI.md` 项目记忆，再注入 `/save` 检索到的相关长期记忆和 MCP resource 索引
-- 支持用户级覆盖 `~/.paicli/prompts/...`，支持项目级覆盖 `.paicli/prompts/...`，项目级优先级最高
+- `project_context` 会先注入 `BETTER.md` 项目记忆，再注入 `/save` 检索到的相关长期记忆和 MCP resource 索引
+- 支持用户级覆盖 `~/.bettercli/prompts/...`，支持项目级覆盖 `.bettercli/prompts/...`，项目级优先级最高
 - 覆盖是整文件替换；`base.md` 和最终 prompt 必须包含 `## Language`
 - Prompt 改动审计模板见 `docs/prompt-analysis-template.md`
 
 ### 第二十期：异步后台任务 + Runtime API（MVP）
 
-- `DurableTaskManager` 使用 SQLite 持久化后台任务队列，默认位置 `~/.paicli/tasks/tasks.db`
+- `DurableTaskManager` 使用 SQLite 持久化后台任务队列，默认位置 `~/.bettercli/tasks/tasks.db`
 - 任务生命周期：`enqueued -> running -> completed / failed / canceled`
 - `/task`、`/task add <任务内容>`、`/task cancel <task_id>`、`/task log <task_id>` 提供 CLI 闭环
-- Worker Pool 默认 2 个后台 worker，可通过 `PAICLI_TASK_WORKERS` 调整
-- `java -jar target/paicli-1.0-SNAPSHOT.jar serve --http --port 8080` 启动 localhost Runtime API
+- Worker Pool 默认 2 个后台 worker，可通过 `BETTERCLI_TASK_WORKERS` 调整
+- `java -jar target/bettercli-1.0-SNAPSHOT.jar serve --http --port 8080` 启动 localhost Runtime API
 - Runtime API 端点：`POST /v1/threads`、`POST /v1/threads/{id}/turns`、`GET /v1/threads/{id}/events`
-- Runtime API 强制要求 `PAICLI_RUNTIME_API_KEY` 或 `-Dpaicli.runtime.api.key`
+- Runtime API 强制要求 `BETTERCLI_RUNTIME_API_KEY` 或 `-Dbettercli.runtime.api.key`
 - 详细文档见 `docs/phase-20-runtime-api.md`
 
 ### 第二十一期：图片复制粘贴输入（MVP）
@@ -229,27 +229,27 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 ### 第二十三期：微信 iLink 通道（文本 MVP）
 
-- 新增进程级入口：`paicli wechat setup`、`paicli wechat start`、`paicli wechat status`、`paicli wechat daemon start|stop|restart|status|logs`
-- 新增交互式入口：在 PaiCLI 主界面输入 `/wechat` 可扫码绑定并在当前进程后台启动微信通道；`/wechat setup` 重新扫码绑定，`/wechat status` 查看状态，`/wechat stop` 停止通道
+- 新增进程级入口：`bettercli wechat setup`、`bettercli wechat start`、`bettercli wechat status`、`bettercli wechat daemon start|stop|restart|status|logs`
+- 新增交互式入口：在 BetterCLI 主界面输入 `/wechat` 可扫码绑定并在当前进程后台启动微信通道；`/wechat setup` 重新扫码绑定，`/wechat status` 查看状态，`/wechat stop` 停止通道
 - 默认不开启微信通道；用户必须主动执行 `setup` 并扫码确认完成绑定
 - 支持在 Warp / iTerm2 / WezTerm 等兼容终端内直接显示 260px PNG 二维码；不支持终端图片协议时回退为字符二维码和链接
 - 微信侧使用 iLink `getupdates` 长轮询收消息、`sendmessage` 分片回消息，不依赖 SSE；这是独立通道，不是 Skill，也不是 Runtime API
 - 运行时只接受绑定用户私聊；普通消息单并发排队，`/help`、`/status`、`/pause`、`/resume`、`/stop` 走队列外控制路径
-- 微信侧用户消息会回显到 PaiCLI 终端 transcript；PaiCLI 终端继续显示 thinking / 工具调用过程，微信侧只接收 assistant 正文。iLink 协议层仍是 `text_item.text` 文本消息，没有显式 Markdown parse mode；PaiCLI 会保留 ClawBot 稳定支持的 Markdown 子集（列表、引用、粗体、行内代码、真实代码块），把标题转成粗体标题、把表格转成移动端更稳的键值/列表，并过滤图片 Markdown / H5-H6 / 中文斜体等兼容性差的标记；非代码类 fenced block（流程说明、长中文箭头链）会解包并换行，避免微信侧出现横向滚动代码块。iLink 不提供真正 SSE 或改单条消息能力。
+- 微信侧用户消息会回显到 BetterCLI 终端 transcript；BetterCLI 终端继续显示 thinking / 工具调用过程，微信侧只接收 assistant 正文。iLink 协议层仍是 `text_item.text` 文本消息，没有显式 Markdown parse mode；BetterCLI 会保留 ClawBot 稳定支持的 Markdown 子集（列表、引用、粗体、行内代码、真实代码块），把标题转成粗体标题、把表格转成移动端更稳的键值/列表，并过滤图片 Markdown / H5-H6 / 中文斜体等兼容性差的标记；非代码类 fenced block（流程说明、长中文箭头链）会解包并换行，避免微信侧出现横向滚动代码块。iLink 不提供真正 SSE 或改单条消息能力。
 - 微信通道使用非交互式默认拒绝策略：只读工具默认允许，`write_file` / `create_project` 继续受 workspace PathGuard 限制，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝
 - 当前文本 MVP 会保留图片 / 文件消息的媒体元数据提示，但 CDN 下载解密、图片块输入和 `/send` 文件推送仍待后续媒体链路补齐
 
 ### 第六期 HITL 增强（路径围栏 / 命令快速拒绝 / 操作审计）
 
-`com.paicli.policy` 包，作为 HITL 之外的辅助层（不是沙箱、不提供进程隔离）：
+`com.bettercli.policy` 包，作为 HITL 之外的辅助层（不是沙箱、不提供进程隔离）：
 
 - `PathGuard` 路径围栏：文件类工具强制限定在项目根之内，拦截绝对路径外逃 / `..` 穿越 / 符号链接逃逸
 - `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` / `find /` / `chmod 777 /` / `shutdown`），减少 HITL 弹窗骚扰
-- `AuditLog` 结构化审计：危险工具调用按天写 JSONL 到 `~/.paicli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`；`revert_turn` 也纳入危险工具链
+- `AuditLog` 结构化审计：危险工具调用按天写 JSONL 到 `~/.bettercli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`；`revert_turn` 也纳入危险工具链
 - `write_file` 单文件 5MB 上限
 - CLI 命令：`/policy` 查看安全策略状态、`/audit [N]` 看最近 N 条审计
 
-**为什么不叫沙箱**：本地 Agent CLI（参考 Claude Code / Cursor / Aider）默认都不做容器/VM 沙箱——沙箱削弱 Agent 能力、给虚假安全感、体验更差。生产级 Agent 沙箱实际是 microVM-level（Devin / Modal / Anthropic Computer Use 用 Firecracker / gVisor）。PaiCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离。
+**为什么不叫沙箱**：本地 Agent CLI（参考 Claude Code / Cursor / Aider）默认都不做容器/VM 沙箱——沙箱削弱 Agent 能力、给虚假安全感、体验更差。生产级 Agent 沙箱实际是 microVM-level（Devin / Modal / Anthropic Computer Use 用 Firecracker / gVisor）。BetterCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离。
 
 ## 启动界面
 
@@ -258,7 +258,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 当前启动输出以命令行实际产物为准：
 
 ```text
-   ████████    PaiCLI π  v16.1.0
+   ████████    BetterCLI π  v16.1.0
      ██  ██    Model step-3.5-flash-2603 (step)
      ██  ██    MCP 4/4 · 61 tools · 2/2 skills · ReAct
      ██  ██    ReAct · Plan · MCP · Browser · Image
@@ -312,7 +312,7 @@ Tips for getting started:
 
 ### 第六期
 
-- 🔒 危险操作静态规则识别（`write_file` / `execute_command` / `create_project` / `revert_turn` / `suggest_pai_md`）
+- 🔒 危险操作静态规则识别（`write_file` / `execute_command` / `create_project` / `revert_turn` / `suggest_better_md`）
 - ⚠️ 三级危险等级展示（高危 / 中危 / 安全）
 - ✅ 审批决策：批准、全部放行、拒绝、跳过、修改参数后执行
 - 🔓 HITL 默认关闭，`/hitl on` 启用、`/hitl off` 关闭
@@ -328,7 +328,7 @@ Tips for getting started:
 
 - 🔄 GLM-5.1、GLM-5V-Turbo、DeepSeek V4、阶跃星辰 StepFun、Kimi K2.6、FreeLLMAPI 与 Agnes 2.0 Flash 多模型，`/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型，`/model deepseek` / `/model step` / `/model kimi` / `/model freellmapi` / `/model agnes` 读取配置模型
 - 🧱 `LlmClient` 接口 + 模板方法基类，新增 provider 只需 ~20 行
-- 💾 默认模型持久化到 `~/.paicli/config.json`
+- 💾 默认模型持久化到 `~/.bettercli/config.json`
 
 ### 第九期
 
@@ -342,7 +342,7 @@ Tips for getting started:
 - 🛡️ 路径围栏：文件类工具强制限定在项目根之内，绝对路径外逃 / `..` 穿越 / 符号链接逃逸全部拦截
 - 🧯 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` / `find /` / `chmod 777 /` / `shutdown`），减少 HITL 弹窗骚扰
 - 📦 资源上限：`write_file` 5MB；`execute_command` 60 秒超时 + 8KB 输出截断
-- 📋 结构化审计：危险工具调用按天写一行 JSONL 到 `~/.paicli/audit/`，可通过 `/audit [N]` 查看
+- 📋 结构化审计：危险工具调用按天写一行 JSONL 到 `~/.bettercli/audit/`，可通过 `/audit [N]` 查看
 - 🧱 定位：HITL 之外的辅助层，不是沙箱、不提供进程隔离
 
 ## 快速开始
@@ -376,7 +376,7 @@ export AGNES_MODEL=agnes-2.0-flash
 export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 ```
 
-也可以在 PaiCLI 内用命令写入 `~/.paicli/config.json`，不会覆盖 Kimi 配置：
+也可以在 BetterCLI 内用命令写入 `~/.bettercli/config.json`，不会覆盖 Kimi 配置：
 
 ```text
 /config provider freellmapi --base-url http://localhost:5173/v1 --api-key <key> --model auto
@@ -385,91 +385,91 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 /model agnes
 ```
 
-长期记忆默认保存在用户目录下的 `~/.paicli/memory/long_term_memory.json`。
+长期记忆默认保存在用户目录下的 `~/.bettercli/memory/long_term_memory.json`。
 长期记忆只保存显式保存意图下的稳定事实：`/save <事实>`，或用户在自然语言里明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`。默认保存为当前项目作用域；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。它不应包含一次性任务请求或临时文件名/目录名。
 可用 `/memory list` 查看长期记忆，`/memory search <关键词>` 搜索当前项目可见记忆，`/memory delete <id>` 删除单条记忆。
 
-Agent 维护的事实记忆保存在 `~/.paicli/memory/agent_memory.db`（SQLite FTS5），由 Agent 通过 `agent_memory_*` 工具自主读写，与 `/save` 长期记忆分工不同：`/save` 是用户显式保存的稳定偏好，`agent_memory` 是 Agent 在协作中积累的事实/模式/调试经验/工作流。启动时会自动从 `long_term_memory.json` 迁移到 SQLite（幂等，不删原文件）。
+Agent 维护的事实记忆保存在 `~/.bettercli/memory/agent_memory.db`（SQLite FTS5），由 Agent 通过 `agent_memory_*` 工具自主读写，与 `/save` 长期记忆分工不同：`/save` 是用户显式保存的稳定偏好，`agent_memory` 是 Agent 在协作中积累的事实/模式/调试经验/工作流。启动时会自动从 `long_term_memory.json` 迁移到 SQLite（幂等，不删原文件）。
 
 项目级记忆使用 Markdown 文件维护，和 `/save` 的长期记忆分工不同：
 
-- `~/.paicli/PAI.md`：用户级稳定偏好，所有项目可见。
-- `PAI.md` / `.paicli/PAI.md`：项目级团队规则，建议提交到 git。
-- `PAI.local.md` / `.paicli/PAI.local.md`：本地覆盖，适合个人调试约定，建议加入 `.gitignore`。
-- `@relative/path.md`：在 `PAI.md` 中导入项目根内的相对文件；越靠后的文件越接近本地覆盖，优先级越高。
-- 向上递归发现：开启 `PAICLI_PAI_MD_RECURSIVE_DISCOVERY=true` 或 `-Dpaicli.pai_md.recursive_discovery=true` 后，`ProjectMemoryLoader` 会从项目根向上查找祖先目录的 `PAI.md`（对标 Claude Code `CLAUDE.md` 机制），按"从根到工作目录"顺序拼接。
+- `~/.bettercli/BETTER.md`：用户级稳定偏好，所有项目可见。
+- `BETTER.md` / `.bettercli/BETTER.md`：项目级团队规则，建议提交到 git。
+- `BETTER.local.md` / `.bettercli/BETTER.local.md`：本地覆盖，适合个人调试约定，建议加入 `.gitignore`。
+- `@relative/path.md`：在 `BETTER.md` 中导入项目根内的相对文件；越靠后的文件越接近本地覆盖，优先级越高。
+- 向上递归发现：开启 `BETTERCLI_PAI_MD_RECURSIVE_DISCOVERY=true` 或 `-Dbettercli.better_md.recursive_discovery=true` 后，`ProjectMemoryLoader` 会从项目根向上查找祖先目录的 `BETTER.md`（对标 Claude Code `CLAUDE.md` 机制），按"从根到工作目录"顺序拼接。
 
-可用 `/init` 为当前项目生成一份短 `PAI.md`。该命令默认不覆盖已有文件；确认需要重建时使用 `/init --force`。
+可用 `/init` 为当前项目生成一份短 `BETTER.md`。该命令默认不覆盖已有文件；确认需要重建时使用 `/init --force`。
 
-PAI.md 主体容量管理（对标美团 1024 Agent MEMORY.md）：
+BETTER.md 主体容量管理（对标美团 1024 Agent MEMORY.md）：
 
-- 主体字符上限默认 2200（`PAICLI_PAI_MD_MAX_CHARS` / `-Dpaicli.pai_md.max_chars` 可调）。
-- 超 80% 阈值时 `read_pai_md` 会提示"建议整合后再添加新条目"。
-- 超上限时 `suggest_pai_md` 会直接拒绝追加，提示先整合已有条目。
-- `read_pai_md` 工具：Agent 主动读取当前已加载的 PAI.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要。
-- `suggest_pai_md` 工具：Agent 向 PAI.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件；属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
+- 主体字符上限默认 2200（`BETTERCLI_PAI_MD_MAX_CHARS` / `-Dbettercli.better_md.max_chars` 可调）。
+- 超 80% 阈值时 `read_better_md` 会提示"建议整合后再添加新条目"。
+- 超上限时 `suggest_better_md` 会直接拒绝追加，提示先整合已有条目。
+- `read_better_md` 工具：Agent 主动读取当前已加载的 BETTER.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要。
+- `suggest_better_md` 工具：Agent 向 BETTER.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件；属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
 
 Agent 维护的事实记忆（对标美团 1024 Agent `agent_memory` 表，与 `/save` 长期记忆分工不同）：
 
-- 存储：SQLite FTS5（`~/.paicli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权 + user_vocabulary boost。
+- 存储：SQLite FTS5（`~/.bettercli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权 + user_vocabulary boost。
 - `agent_memory_save`：Agent 自主判断保存事实/模式/调试经验/工作流；`confidence < 0.7` 不应调用；敏感词（API key/密码/Bearer）会被拦截。
 - `agent_memory_search`：BM25 检索，按当前项目作用域过滤（PROJECT + GLOBAL 都可见）。
 - `agent_memory_update` / `agent_memory_delete`：更新/删除单条记忆。
 - 护栏：默认 1000 条上限，超限拒绝写入；`findSimilar` 基于 BM25 相似度自动去重；`MemoryMaintenanceScheduler` 后台定期清理 `expired` 条目。
-- 启动注入：`Agent.buildProjectMemoryContext()` 在 PAI.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限）。
-- 迁移：启动时自动从 `~/.paicli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，不删原文件）。
+- 启动注入：`Agent.buildProjectMemoryContext()` 在 BETTER.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限）。
+- 迁移：启动时自动从 `~/.bettercli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，不删原文件）。
 - CLI 命令：`/agent-memory`（或 `/am`）查看统计；`/agent-memory list` 列出条目；`/agent-memory search <关键词>` BM25 检索；`/agent-memory stats` 查看统计；`/agent-memory export` 导出为 JSON；`/agent-memory clear` 清空。用户只读视图，写入由 Agent 通过工具自主完成。
 
 历史会话检索（对标美团 1024 Agent `session_messages` + `session_search`）：
 
-- 存储：SQLite FTS5（`~/.paicli/memory/session_messages.db`），与 `agent_memory.db` 分开。
+- 存储：SQLite FTS5（`~/.bettercli/memory/session_messages.db`），与 `agent_memory.db` 分开。
 - `session_search` 工具：BM25 全文检索 + 五阶段管道（检索 → 按 `conversation_id` 分组 → 加载完整会话 → 截断预览 → 返回）。默认当前项目作用域、回溯 30 天；可指定 `role_filter`（user/assistant）和 `days_back`（1-365）。
 - 异步索引：每轮 ReAct 结束后用独立线程池把新增消息增量索引到 SQLite，不阻塞主路径；跳过 `system` 消息和空内容。
-- 迁移：启动时自动从 `~/.paicli/history/session_*.jsonl` 迁移历史消息（幂等，不删原文件）。
+- 迁移：启动时自动从 `~/.bettercli/history/session_*.jsonl` 迁移历史消息（幂等，不删原文件）。
 
 可插拔记忆后端（对标美团 1024 Agent 本地/云端切换）：
 
-- 配置：`PAICLI_MEMORY_BACKEND` 环境变量 或 `-Dpaicli.memory.backend` 系统属性，取值 `sqlite`（默认，已交付）/ `postgres`（云端，骨架预留）。
+- 配置：`BETTERCLI_MEMORY_BACKEND` 环境变量 或 `-Dbettercli.memory.backend` 系统属性，取值 `sqlite`（默认，已交付）/ `postgres`（云端，骨架预留）。
 - `MemoryStoreFactory` 根据 `backend` 创建对应的 `AgentMemoryStore` 和 `SessionMessageStore`。
-- `sqlite`：本地 SQLite FTS5（`~/.paicli/memory/agent_memory.db` + `session_messages.db`），已完整交付。
+- `sqlite`：本地 SQLite FTS5（`~/.bettercli/memory/agent_memory.db` + `session_messages.db`），已完整交付。
 - `postgres`：云端 PostgreSQL FTS（`PostgresAgentMemoryStore` + `PostgresSessionMessageStore`），骨架已就位，需要 PostgreSQL JDBC 驱动 + 云端配置后启用。
-- `MemoryMigrator`：SQLite → PostgreSQL 数据迁移工具骨架（`paicli memory migrate --from sqlite --to postgres`），待 PostgreSQL 后端就绪后实现。
+- `MemoryMigrator`：SQLite → PostgreSQL 数据迁移工具骨架（`bettercli memory migrate --from sqlite --to postgres`），待 PostgreSQL 后端就绪后实现。
 
-代码索引默认保存在 `~/.paicli/rag/codebase.db`。
-调试日志默认滚动写入 `~/.paicli/logs/paicli.log`，旧日志会按保留天数和总容量自动清理。
+代码索引默认保存在 `~/.bettercli/rag/codebase.db`。
+调试日志默认滚动写入 `~/.bettercli/logs/bettercli.log`，旧日志会按保留天数和总容量自动清理。
 ReAct / Plan task / SubAgent / Planner 的模型 `reasoning_content` 会以 `LLM reasoning [...]` 形式写入该日志，便于排查模型为什么选择某个工具或路径。
 
 如果你想为某次运行指定单独目录，可以额外传入：
 
 ```bash
 # 指定记忆目录
-java -Dpaicli.memory.dir=/tmp/paicli-memory -jar target/paicli-1.0-SNAPSHOT.jar
+java -Dbettercli.memory.dir=/tmp/bettercli-memory -jar target/bettercli-1.0-SNAPSHOT.jar
 
 # 指定 RAG 索引目录
-java -Dpaicli.rag.dir=/tmp/paicli-rag -jar target/paicli-1.0-SNAPSHOT.jar
+java -Dbettercli.rag.dir=/tmp/bettercli-rag -jar target/bettercli-1.0-SNAPSHOT.jar
 
 # 指定日志目录与保留策略
-java -Dpaicli.log.dir=/tmp/paicli-logs \
-     -Dpaicli.log.level=DEBUG \
-     -Dpaicli.log.maxHistory=3 \
-     -Dpaicli.log.maxFileSize=5MB \
-     -Dpaicli.log.totalSizeCap=20MB \
-     -jar target/paicli-1.0-SNAPSHOT.jar
+java -Dbettercli.log.dir=/tmp/bettercli-logs \
+     -Dbettercli.log.level=DEBUG \
+     -Dbettercli.log.maxHistory=3 \
+     -Dbettercli.log.maxFileSize=5MB \
+     -Dbettercli.log.totalSizeCap=20MB \
+     -jar target/bettercli-1.0-SNAPSHOT.jar
 ```
 
 也可以放到 `.env` 或环境变量中：
 
 ```bash
-PAICLI_LOG_LEVEL=DEBUG
-PAICLI_LOG_DIR=/Users/yourname/.paicli/logs
-PAICLI_LOG_MAX_HISTORY=7
-PAICLI_LOG_MAX_FILE_SIZE=10MB
-PAICLI_LOG_TOTAL_SIZE_CAP=100MB
+BETTERCLI_LOG_LEVEL=DEBUG
+BETTERCLI_LOG_DIR=/Users/yourname/.bettercli/logs
+BETTERCLI_LOG_MAX_HISTORY=7
+BETTERCLI_LOG_MAX_FILE_SIZE=10MB
+BETTERCLI_LOG_TOTAL_SIZE_CAP=100MB
 ```
 
 ### 2. 可选：配置 MCP server
 
-MCP 子系统默认开启。`~/.paicli/mcp.json` 不存在时，PaiCLI 会自动创建默认 chrome-devtools 配置：
+MCP 子系统默认开启。`~/.bettercli/mcp.json` 不存在时，BetterCLI 会自动创建默认 chrome-devtools 配置：
 
 ```json
 {
@@ -482,7 +482,7 @@ MCP 子系统默认开启。`~/.paicli/mcp.json` 不存在时，PaiCLI 会自动
 }
 ```
 
-需要继续接入其他 server 时，可编辑 `~/.paicli/mcp.json` 或项目内 `.paicli/mcp.json`：
+需要继续接入其他 server 时，可编辑 `~/.bettercli/mcp.json` 或项目内 `.bettercli/mcp.json`：
 
 ```json
 {
@@ -509,22 +509,22 @@ MCP 子系统默认开启。`~/.paicli/mcp.json` 不存在时，PaiCLI 会自动
 
 `command` 表示 stdio server，`url` 表示 Streamable HTTP server。`${PROJECT_DIR}` / `${HOME}` 是内置变量，其他 `${VAR}` 从环境变量读取；缺失会在启动时直接提示。
 
-`step_search` 是约定名称：如果项目 `.env`、用户 `~/.env` 或系统环境变量里存在 `STEP_API_KEY`，PaiCLI 会自动内置这个远程 MCP；上面的手写配置只用于覆盖默认地址或自定义鉴权。当前模型为 `step-3.7-flash*` 时，内置 `web_search` / `web_fetch` 会优先代理到该 MCP server。
+`step_search` 是约定名称：如果项目 `.env`、用户 `~/.env` 或系统环境变量里存在 `STEP_API_KEY`，BetterCLI 会自动内置这个远程 MCP；上面的手写配置只用于覆盖默认地址或自定义鉴权。当前模型为 `step-3.7-flash*` 时，内置 `web_search` / `web_fetch` 会优先代理到该 MCP server。
 
 需要复用当前登录态时，Chrome 144+ 推荐打开 `chrome://inspect/#remote-debugging` 并勾选 `Allow remote debugging for this browser instance`。旧版本或需要显式 CDP 端口时，可以启动带远程调试端口和独立 user-data-dir 的 Chrome，并在这个调试 Chrome 中完成登录：
 
 ```bash
 # macOS
-open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/tmp/paicli-chrome-profile
+open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/tmp/bettercli-chrome-profile
 
 # Windows
-start chrome.exe --remote-debugging-port=9222 --user-data-dir=%TEMP%\paicli-chrome-profile
+start chrome.exe --remote-debugging-port=9222 --user-data-dir=%TEMP%\bettercli-chrome-profile
 
 # Linux
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/paicli-chrome-profile
+google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/bettercli-chrome-profile
 ```
 
-通常不需要用户预先切换；Agent 如果遇到登录页会自己调用 `browser_connect`。手工调试时也可以在 PaiCLI 内执行：
+通常不需要用户预先切换；Agent 如果遇到登录页会自己调用 `browser_connect`。手工调试时也可以在 BetterCLI 内执行：
 
 ```text
 /browser status
@@ -533,7 +533,7 @@ google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/paicli-chrome-pr
 /browser disconnect
 ```
 
-`/browser connect` 只在当前进程内把 `chrome-devtools` 切到 shared 模式，不会改写 `~/.paicli/mcp.json`。如果希望启动后默认 shared，可手动把 args 改为：
+`/browser connect` 只在当前进程内把 `chrome-devtools` 切到 shared 模式，不会改写 `~/.bettercli/mcp.json`。如果希望启动后默认 shared，可手动把 args 改为：
 
 ```json
 ["-y", "chrome-devtools-mcp@latest", "--autoConnect"]
@@ -570,13 +570,13 @@ OAuth 和 `sampling/createMessage` 当前未实现；远程 server 需要鉴权�
 mvn clean package
 
 # 运行（需要本地 Ollama 已启动且拉取了 nomic-embed-text；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
-java -jar target/paicli-1.0-SNAPSHOT.jar
+java -jar target/bettercli-1.0-SNAPSHOT.jar
 ```
 
 或者直接运行：
 
 ```bash
-mvn clean compile exec:java -Dexec.mainClass="com.paicli.cli.Main"
+mvn clean compile exec:java -Dexec.mainClass="com.bettercli.cli.Main"
 ```
 
 ### 4. 如何进入 Plan 模式
@@ -671,8 +671,8 @@ I
 - `web_search` - 搜索互联网获取实时信息
 - `web_fetch` - 抓取已知 URL 并提取正文 Markdown
 - `revert_turn` - 恢复到最近第 N 个 pre-turn 快照（走 HITL 与审计）
-- `read_pai_md` - 读取当前已加载的 PAI.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要
-- `suggest_pai_md` - 向 PAI.md 提议新条目，经 HITL 用户确认后追加到目标文件；超容量上限时拒绝（走 HITL 与审计）
+- `read_better_md` - 读取当前已加载的 BETTER.md 完整内容 + 容量状态 + 已加载文件列表；`summary=true` 时只返回容量摘要
+- `suggest_better_md` - 向 BETTER.md 提议新条目，经 HITL 用户确认后追加到目标文件；超容量上限时拒绝（走 HITL 与审计）
 - `agent_memory_search` - BM25 检索 Agent 维护的事实记忆，按当前项目作用域过滤
 - `agent_memory_save` - Agent 自主保存事实/模式/调试经验/工作流到长期记忆；confidence < 0.7 不应调用，敏感词会被拦截
 - `agent_memory_update` - 更新单条 Agent 记忆（content / keywords / confidence / status）
@@ -681,7 +681,7 @@ I
 - `mcp__{server}__{tool}` - MCP server 动态提供的外部工具
 - `mcp__{server}__list_resources` / `mcp__{server}__read_resource` - 支持 resources 的 MCP server 自动注册的虚拟工具
 
-同一轮模型返回多个工具调用时，PaiCLI 会并行执行这些工具；如果工具之间有依赖关系，模型应分多轮调用。
+同一轮模型返回多个工具调用时，BetterCLI 会并行执行这些工具；如果工具之间有依赖关系，模型应分多轮调用。
 
 文件类与代码检索工具（`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝；`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
 
@@ -689,17 +689,17 @@ I
 
 进程级入口：
 
-- `paicli wechat setup` - 绑定微信 iLink 通道，选择 workspace 并完成扫码确认
-- `paicli wechat start` - 前台启动微信通道
-- `paicli wechat status` - 查看绑定状态和 daemon pid
-- `paicli wechat daemon start|stop|restart|status|logs` - 管理本机微信通道后台进程
+- `bettercli wechat setup` - 绑定微信 iLink 通道，选择 workspace 并完成扫码确认
+- `bettercli wechat start` - 前台启动微信通道
+- `bettercli wechat status` - 查看绑定状态和 daemon pid
+- `bettercli wechat daemon start|stop|restart|status|logs` - 管理本机微信通道后台进程
 
 交互式斜杠命令：
 
 - `/wechat` - 扫码绑定并启动微信 iLink 通道；已绑定时直接启动
 - `/wechat setup` - 重新扫码绑定并启动微信通道
-- `/wechat status` - 查看当前 PaiCLI 进程内微信通道状态
-- `/wechat stop` - 停止当前 PaiCLI 进程内微信通道
+- `/wechat status` - 查看当前 BetterCLI 进程内微信通道状态
+- `/wechat stop` - 停止当前 BetterCLI 进程内微信通道
 - `/plan` - 下一条任务使用 Plan-and-Execute 模式
 - `/plan <任务>` - 直接用 Plan-and-Execute 模式执行这条任务
 - `/team` - 下一条任务使用 Multi-Agent 协作模式
@@ -732,10 +732,10 @@ I
 - `/agent-memory list` - 列出 Agent 记忆条目（用户只读视图）
 - `/agent-memory search <关键词>` - BM25 检索 Agent 记忆
 - `/agent-memory stats` - 查看统计（总数 / 作用域 / token / 置信度）
-- `/agent-memory export` - 导出为 JSON 到 `~/.paicli/exports/agent-memory-*.json`
+- `/agent-memory export` - 导出为 JSON 到 `~/.bettercli/exports/agent-memory-*.json`
 - `/agent-memory clear` - 清空所有 Agent 记忆
-- `/init` - 生成精简项目级记忆 `PAI.md`；已存在时不覆盖，`/init --force` 可重写
-- `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.paicli/exports/session-*.md`
+- `/init` - 生成精简项目级记忆 `BETTER.md`；已存在时不覆盖，`/init --force` 可重写
+- `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.bettercli/exports/session-*.md`
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
@@ -764,7 +764,7 @@ I
 ### 第三期：当前运行效果
 
 ```text
-   ████████    PaiCLI π  v16.1.0
+   ████████    BetterCLI π  v16.1.0
      ██  ██    Model glm-5.1 (glm)
      ██  ██    MCP 4/4 · 61 tools · 2/2 skills · ReAct
      ██  ██    ReAct · Plan · MCP · Browser · Image
@@ -804,7 +804,7 @@ Tips for getting started:
 ## 项目结构
 
 ```
-src/main/java/com/paicli
+src/main/java/com/bettercli
 ├── agent/
 │   ├── Agent.java              # ReAct Agent
 │   ├── PlanExecuteAgent.java   # Plan-and-Execute Agent
