@@ -2,7 +2,9 @@ package com.bettercli.cli;
 
 import com.bettercli.agent.Agent;
 import com.bettercli.agent.AgentOrchestrator;
+import com.bettercli.agent.AgentRole;
 import com.bettercli.agent.PlanExecuteAgent;
+import com.bettercli.agent.RoleModelResolver;
 import com.bettercli.browser.BrowserAuditMetadata;
 import com.bettercli.browser.BrowserConnectivityCheck;
 import com.bettercli.browser.BrowserGuard;
@@ -997,7 +999,7 @@ public class Main {
                     snapshotMode = "team";
                     LlmClient activeClient = llmClient;
                     runTask = () -> {
-                        AgentOrchestrator orchestrator = createTeamAgent(activeClient, reactAgent, ui);
+                        AgentOrchestrator orchestrator = createTeamAgent(activeClient, reactAgent, ui, config);
                         orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
                         orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
                         return orchestrator.run(taskInput);
@@ -1277,9 +1279,18 @@ public class Main {
         );
     }
 
-    private static AgentOrchestrator createTeamAgent(LlmClient llmClient, Agent reactAgent, PrintStream out) {
-        out.println("👥 使用 Multi-Agent 协作模式\n");
-        return new AgentOrchestrator(llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+    private static AgentOrchestrator createTeamAgent(LlmClient llmClient, Agent reactAgent, PrintStream out,
+                                                       BetterCliConfig config) {
+        out.println("👥 使用 Multi-Agent 协作模式");
+        AgentOrchestrator orchestrator = new AgentOrchestrator(
+                llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+        // 角色级模型分配：Planner / Reviewer 可按配置用不同模型，未配置则回退主模型（向后兼容）
+        RoleModelResolver resolver = new RoleModelResolver(llmClient, config);
+        orchestrator.setRoleClientResolver(resolver);
+        out.println("   规划者模型: " + orchestrator.roleModelLabel(AgentRole.PLANNER)
+                + " | 执行者模型: " + orchestrator.roleModelLabel(AgentRole.WORKER)
+                + " | 检查者模型: " + orchestrator.roleModelLabel(AgentRole.REVIEWER) + "\n");
+        return orchestrator;
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {

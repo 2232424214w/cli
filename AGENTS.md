@@ -53,6 +53,7 @@ mvn test -DskipTests=false                  # 全量回归
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
 
 Multi-Agent 角色工具白名单（`AgentRole.allowedTools()`）：PLANNER 只读+调研（`read_file`/`glob_files`/`grep_code`/`list_dir`/`web_search`/`web_fetch`），REVIEWER 纯只读（`read_file`/`glob_files`/`grep_code`/`list_dir`，不联网不写不执行），WORKER 返回 `null` 表示不限制（全量内置 + MCP）。白名单两处生效：`ToolRegistry.getToolDefinitions(whitelist)` 只把白名单内工具 schema 下发给 LLM；`executeTools(invocations, whitelist)` 在执行层拦截越权调用（含 mcp__*），防御 LLM 幻觉出白名单外工具名。`SubAgent` 不再用 `shouldUseTools()` 布尔，改用 `role.allowedTools()`；`team-planner.md` / `team-reviewer.md` 已声明可用只读工具并要求规划/审查前先核实代码。
+Multi-Agent 角色级模型分配（`RoleModelResolver`）：`AgentOrchestrator.setRoleClientResolver(Function<AgentRole, LlmClient>)` 让 Planner / Reviewer / Worker 用不同模型，配置走 `bettercli.team.<role>.provider` 系统属性或 `BETTERCLI_TEAM_<ROLE>_PROVIDER` 环境变量，未配或建不出来时回退主模型（向后兼容）。`/team` 启动时打印三角色模型标签；`roleModelLabel(role)` 供状态展示与 ablation 记录。`setRoleClientResolver` 会重建 SubAgent 并重新下发已设置的 Skill 系统与外部上下文。
 
 核心内置工具 18 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
 

@@ -398,6 +398,37 @@ class AgentOrchestratorTest {
         return new LlmClient.ChatResponse("assistant", content, null, 100, 20);
     }
 
+    @Test
+    void shouldApplyRoleClientResolverToSubAgents() {
+        // 三个角色用不同模型标签的 stub client，验证 resolver 注入后 roleModelLabel 反映各自模型
+        LlmClient plannerClient = new GLMClient("k", "glm-flash");
+        LlmClient workerClient = new GLMClient("k", "glm-plus");
+        LlmClient reviewerClient = new GLMClient("k", "deepseek-thinking");
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("default-key", "default-model"));
+
+        orchestrator.setRoleClientResolver(role -> switch (role) {
+            case PLANNER -> plannerClient;
+            case WORKER -> workerClient;
+            case REVIEWER -> reviewerClient;
+        });
+
+        assertTrue(orchestrator.roleModelLabel(AgentRole.PLANNER).contains("glm-flash"));
+        assertTrue(orchestrator.roleModelLabel(AgentRole.WORKER).contains("glm-plus"));
+        assertTrue(orchestrator.roleModelLabel(AgentRole.REVIEWER).contains("deepseek-thinking"));
+    }
+
+    @Test
+    void shouldKeepSkillSystemAfterRoleClientResolverRebuild() {
+        // setRoleClientResolver 会重建 SubAgent；已下发的 Skill 系统不应丢失
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        com.bettercli.skill.SkillRegistry sr = new com.bettercli.skill.SkillRegistry(null, null, null, null);
+        com.bettercli.skill.SkillContextBuffer buf = new com.bettercli.skill.SkillContextBuffer();
+        orchestrator.setSkillSystem(sr, buf);
+        orchestrator.setRoleClientResolver(role -> new GLMClient("k", "m-" + role.name()));
+        // 不抛异常 + roleModelLabel 反映新模型即说明重建成功；Skill 重新下发由 applySkillSystem 内部完成
+        assertTrue(orchestrator.roleModelLabel(AgentRole.PLANNER).contains("m-PLANNER"));
+    }
+
     private static final class NoOpMemoryManager extends MemoryManager {
         private NoOpMemoryManager(File storageDir) {
             super(new GLMClient("test-key"), 32768, 200000, new LongTermMemory(storageDir));

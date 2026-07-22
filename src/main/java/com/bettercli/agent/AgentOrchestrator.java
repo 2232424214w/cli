@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
+import java.util.function.Function;
 
 /**
  * Agent 编排器 - Multi-Agent 系统的"主"
@@ -45,13 +46,16 @@ public class AgentOrchestrator {
     private static final int MAX_RETRIES_PER_STEP = 2;
 
     private final LlmClient llmClient;
-    private final SubAgent planner;
-    private final List<SubAgent> workers;
-    private final SubAgent reviewer;
+    private SubAgent planner;
+    private List<SubAgent> workers;
+    private SubAgent reviewer;
     private final MemoryManager memoryManager;
     private final ToolRegistry toolRegistry;
     private final PrintStream out;
     private Supplier<String> externalContextSupplier = () -> "";
+    private Function<AgentRole, LlmClient> roleClientResolver;
+    private com.bettercli.skill.SkillRegistry skillRegistry;
+    private com.bettercli.skill.SkillContextBuffer skillContextBuffer;
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -99,13 +103,54 @@ public class AgentOrchestrator {
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
-        this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
-        this.workers = List.of(
-                new SubAgent("worker-1", AgentRole.WORKER, llmClient, toolRegistry),
-                new SubAgent("worker-2", AgentRole.WORKER, llmClient, toolRegistry)
-        );
-        this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry);
+        // 默认所有角色共用主模型；可通过 setRoleClientResolver 注入角色级模型分配
+        this.roleClientResolver = role -> llmClient;
         this.memoryManager = memoryManager;
+        rebuildSubAgents();
+    }
+
+    /**
+     * 注入角色级模型分配器（{@link RoleModelResolver}），让 Planner / Reviewer / Worker
+     * 用不同模型。必须在 {@link #run(String)} 之前调用——会重建所有 SubAgent 并重新下发
+     * 已设置的外部上下文 / Skill 系统。
+     */
+    public void setRoleClientResolver(Function<AgentRole, LlmClient> resolver) {
+        this.roleClientResolver = resolver == null ? role -> llmClient : resolver;
+        rebuildSubAgents();
+    }
+
+    /**
+     * 重建四个 SubAgent（planner / 2 worker / reviewer），按当前 roleClientResolver 取模型，
+     * 并重新下发已设置的外部上下文与 Skill 系统，保证 setter 重建后配置不丢。
+     */
+    private void rebuildSubAgents() {
+        this.planner = new SubAgent("planner", AgentRole.PLANNER,
+                roleClientResolver.apply(AgentRole.PLANNER), toolRegistry);
+        this.workers = List.of(
+                new SubAgent("worker-1", AgentRole.WORKER,
+                        roleClientResolver.apply(AgentRole.WORKER), toolRegistry),
+                new SubAgent("worker-2", AgentRole.WORKER,
+                        roleClientResolver.apply(AgentRole.WORKER), toolRegistry)
+        );
+        this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
+                roleClientResolver.apply(AgentRole.REVIEWER), toolRegistry);
+        // 重新下发已设置的外部上下文
+        planner.setExternalContextSupplier(this.externalContextSupplier);
+        workers.forEach(worker -> worker.setExternalContextSupplier(this.externalContextSupplier));
+        reviewer.setExternalContextSupplier(this.externalContextSupplier);
+        // 重新下发已设置的 Skill 系统
+        applySkillSystem();
+    }
+
+    /**
+     * 返回某角色当前实际使用的模型标签（provider/model），供 /team 状态展示与 ablation 记录。
+     */
+    public String roleModelLabel(AgentRole role) {
+        LlmClient client = roleClientResolver.apply(role);
+        if (client == null) {
+            return "(no model)";
+        }
+        return client.getProviderName() + "/" + client.getModelName();
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -122,6 +167,15 @@ public class AgentOrchestrator {
      */
     public void setSkillSystem(com.bettercli.skill.SkillRegistry skillRegistry,
                                com.bettercli.skill.SkillContextBuffer skillContextBuffer) {
+        this.skillRegistry = skillRegistry;
+        this.skillContextBuffer = skillContextBuffer;
+        applySkillSystem();
+    }
+
+    private void applySkillSystem() {
+        if (skillRegistry == null && skillContextBuffer == null) {
+            return;
+        }
         planner.setSkillRegistry(skillRegistry);
         planner.setSkillContextBuffer(skillContextBuffer);
         for (SubAgent worker : workers) {
