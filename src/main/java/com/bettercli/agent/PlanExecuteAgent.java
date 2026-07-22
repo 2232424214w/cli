@@ -326,7 +326,11 @@ public class PlanExecuteAgent {
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
             plan.markFailed();
-            return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
+            List<String> blocked = plan.getAllTasks().stream()
+                    .filter(t -> t.getStatus() == Task.TaskStatus.PENDING)
+                    .map(Task::getId)
+                    .toList();
+            return "⚠️ 计划未能继续推进，存在未满足依赖的任务: " + String.join(", ", blocked);
         }
 
         String planSummary = finalResult.isEmpty()

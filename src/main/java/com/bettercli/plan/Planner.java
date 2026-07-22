@@ -49,6 +49,13 @@ public class Planner {
      * 为复杂任务创建执行计划
      */
     public ExecutionPlan createPlan(String goal) throws IOException {
+        return createPlan(goal, null);
+    }
+
+    /**
+     * 创建执行计划，可附带额外上下文（用于 replan：保留原目标，只把失败上下文作为补充）。
+     */
+    ExecutionPlan createPlan(String goal, String extraContext) throws IOException {
         out.println("📋 正在规划任务: " + goal + "\n");
 
         if (isSimpleGoal(goal)) {
@@ -56,11 +63,15 @@ public class Planner {
         }
 
         // 构建规划请求
+        String userMessage = "请为以下任务制定执行计划：\n" + goal;
+        if (extraContext != null && !extraContext.isBlank()) {
+            userMessage += "\n\n" + extraContext;
+        }
         List<LlmClient.Message> messages = Arrays.asList(
                 LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
                         .projectMemoryContext(buildProjectMemoryContext())
                         .build())),
-                LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
+                LlmClient.Message.user(userMessage)
         );
 
         // 调用LLM生成计划
@@ -116,7 +127,7 @@ public class Planner {
             plan.addTask(new Task(newId, description, type));
         }
 
-        // 第二遍：建立依赖和被依赖关系
+        // 第二遍：建立依赖和被依赖关系（解析期自动修复 LLM 不可靠输出）
         taskIndex = 1;
         for (JsonNode taskNode : tasksNode) {
             String newId = "task_" + taskIndex++;
@@ -127,18 +138,28 @@ public class Planner {
                 for (JsonNode depNode : depsNode) {
                     String originalDepId = depNode.asText();
                     String newDepId = idMapping.getOrDefault(originalDepId, originalDepId);
-                    Task dep = plan.getTask(newDepId);
-                    if (dep != null) {
-                        task.addDependency(newDepId);
-                        dep.addDependent(task.getId());
+                    // 自依赖：可恢复，直接丢弃并告警
+                    if (newDepId.equals(newId)) {
+                        log.warn("Plan task {} self-depends on {}, dropping", newId, newDepId);
+                        continue;
                     }
+                    Task dep = plan.getTask(newDepId);
+                    // 悬空依赖：指向不存在的任务，可恢复，丢弃并告警，避免静默丢边
+                    if (dep == null) {
+                        log.warn("Plan task {} depends on unknown task {}, dropping dangling dependency",
+                                newId, newDepId);
+                        continue;
+                    }
+                    task.addDependency(newDepId);
+                    dep.addDependent(task.getId());
                 }
             }
         }
 
-        // 计算执行顺序
+        // 计算执行顺序；若仍有环，给出可定位的诊断（而非"存在循环依赖"）
         if (!plan.computeExecutionOrder()) {
-            throw new IOException("计划中存在循环依赖");
+            List<String> cycle = plan.detectCycle();
+            throw new IOException("计划中存在循环依赖: " + String.join(" -> ", cycle));
         }
 
         return plan;
@@ -166,14 +187,14 @@ public class Planner {
     }
 
     /**
-     * 根据执行结果重新规划
+     * 根据执行结果重新规划。保留原计划目标（不让失败上下文变成新目标），
+     * 把已完成任务和失败原因作为额外上下文带给规划者。
      */
     public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason) throws IOException {
         out.println("🔄 重新规划，原因: " + failureReason + "\n");
 
         StringBuilder context = new StringBuilder();
-        context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
-        context.append("失败原因: ").append(failureReason).append("\n");
+        context.append("上次执行失败，原因: ").append(failureReason).append("\n");
         context.append("已完成的任务:\n");
 
         for (Task task : failedPlan.getAllTasks()) {
@@ -184,9 +205,9 @@ public class Planner {
             }
         }
 
-        context.append("\n请制定新的执行计划，避开之前的问题。");
+        context.append("\n请制定新的执行计划，避开之前的问题，不要重复已完成的任务。");
 
-        return createPlan(context.toString());
+        return createPlan(failedPlan.getGoal(), context.toString());
     }
 
     private boolean isSimpleGoal(String goal) {
@@ -248,8 +269,10 @@ public class Planner {
 
     private Task.TaskType inferSimpleTaskType(String goal) {
         String normalized = goal == null ? "" : goal.trim();
-        if (normalized.contains("读取") || normalized.contains("打开") || normalized.contains("查看")
-                && normalized.contains("文件")) {
+        // 修复运算符优先级 bug：原 contains("查看") && contains("文件") 因 && 优先级高于 ||，
+        // 导致"读取X"/"打开X"被判 FILE_READ 而"查看X"只有同时含"文件"才判 FILE_READ，三者不一致。
+        // 现统一：任一读取类动词即 FILE_READ。
+        if (normalized.contains("读取") || normalized.contains("打开") || normalized.contains("查看")) {
             return Task.TaskType.FILE_READ;
         }
         if (normalized.contains("写入") || normalized.contains("修改") || normalized.contains("创建文件")) {

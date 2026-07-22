@@ -107,6 +107,78 @@ public class ExecutionPlan {
         return true;
     }
 
+    /**
+     * 检测并返回构成环的任务 id 路径（按依赖方向），无环返回空列表。
+     * 用于把"存在循环依赖"这种不可定位的报错升级为"task_1 -> task_2 -> task_1"。
+     */
+    public List<String> detectCycle() {
+        Set<String> visited = new HashSet<>();
+        Set<String> onStack = new HashSet<>();
+        List<String> path = new ArrayList<>();
+        for (Task task : tasks.values()) {
+            if (!visited.contains(task.getId())) {
+                List<String> cycle = dfsCycle(task.getId(), visited, onStack, path);
+                if (!cycle.isEmpty()) {
+                    return cycle;
+                }
+            }
+        }
+        return List.of();
+    }
+
+    private List<String> dfsCycle(String id, Set<String> visited, Set<String> onStack, List<String> path) {
+        if (onStack.contains(id)) {
+            int start = path.indexOf(id);
+            return new ArrayList<>(path.subList(start, path.size()));
+        }
+        if (visited.contains(id)) {
+            return List.of();
+        }
+        visited.add(id);
+        onStack.add(id);
+        path.add(id);
+        Task task = tasks.get(id);
+        if (task != null) {
+            for (String depId : task.getDependencies()) {
+                // 自依赖由 validate() 单独报告为 selfDependencies，不在这里误判为环
+                if (depId.equals(id)) {
+                    continue;
+                }
+                // 只沿已知任务追边，悬空依赖由 validate() 单独报告，不在这里误判为环
+                if (tasks.containsKey(depId)) {
+                    List<String> cycle = dfsCycle(depId, visited, onStack, path);
+                    if (!cycle.isEmpty()) {
+                        return cycle;
+                    }
+                }
+            }
+        }
+        path.remove(path.size() - 1);
+        onStack.remove(id);
+        return List.of();
+    }
+
+    /**
+     * 校验 DAG：悬空依赖、自依赖、环。{@link Planner} 解析后调用，可恢复项自动修复，
+     * 不可恢复项（环）由调用方据 {@link #cycle()} 抛带路径的诊断异常。
+     */
+    public PlanValidationResult validate() {
+        List<String> dangling = new ArrayList<>();
+        List<String> selfDeps = new ArrayList<>();
+        for (Task task : tasks.values()) {
+            for (String depId : task.getDependencies()) {
+                if (!tasks.containsKey(depId)) {
+                    dangling.add(task.getId() + " -> " + depId);
+                } else if (depId.equals(task.getId())) {
+                    selfDeps.add(task.getId());
+                }
+            }
+        }
+        List<String> cycle = detectCycle();
+        boolean valid = dangling.isEmpty() && selfDeps.isEmpty() && cycle.isEmpty();
+        return new PlanValidationResult(valid, dangling, selfDeps, cycle);
+    }
+
     private boolean topologicalSort(Task task, Set<String> visited, Set<String> visiting) {
         String id = task.getId();
 
