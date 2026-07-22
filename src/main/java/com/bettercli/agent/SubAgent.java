@@ -206,7 +206,7 @@ public class SubAgent {
             try {
                 LlmClient.ChatResponse response = llmClient.chat(
                         conversationHistory,
-                        shouldUseTools() && llmClient.supportsTools() ? toolRegistry.getToolDefinitions() : null,
+                        llmClient.supportsTools() ? toolRegistry.getToolDefinitions(role.allowedTools()) : null,
                         streamRenderer
                 );
                 LlmTraceLogger.logReasoning(log,
@@ -311,11 +311,15 @@ public class SubAgent {
     }
 
     /**
-     * 只有执行者需要工具；规划者和检查者都只输出分析结果。
+     * 角色工具白名单说明：
+     * - WORKER   返回 null  → 不限制，全部内置工具 + MCP 工具可用
+     * - PLANNER  返回只读+调研集合 → 只能读/查，不能写/执行/联网改状态
+     * - REVIEWER 返回只读集合 → 只能读代码核实，不能联网/写/执行
+     *
+     * 白名单在两处生效：
+     * 1. {@code getToolDefinitions(whitelist)} 只把白名单内工具的 schema 下发给 LLM
+     * 2. {@code executeTools(invocations, whitelist)} 在执行层拦截越权调用（防御 LLM 幻觉出白名单外的工具名）
      */
-    private boolean shouldUseTools() {
-        return role == AgentRole.WORKER;
-    }
 
     private void injectPendingLspDiagnostics(PrintStream out) {
         LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
@@ -340,7 +344,7 @@ public class SubAgent {
         if (invocations.size() > 1) {
             log.info("[{}] executing {} tool calls in parallel", name, invocations.size());
         }
-        return toolRegistry.executeTools(invocations);
+        return toolRegistry.executeTools(invocations, role.allowedTools());
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {

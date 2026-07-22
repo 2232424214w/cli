@@ -52,6 +52,8 @@ mvn test -DskipTests=false                  # 全量回归
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
 
+Multi-Agent 角色工具白名单（`AgentRole.allowedTools()`）：PLANNER 只读+调研（`read_file`/`glob_files`/`grep_code`/`list_dir`/`web_search`/`web_fetch`），REVIEWER 纯只读（`read_file`/`glob_files`/`grep_code`/`list_dir`，不联网不写不执行），WORKER 返回 `null` 表示不限制（全量内置 + MCP）。白名单两处生效：`ToolRegistry.getToolDefinitions(whitelist)` 只把白名单内工具 schema 下发给 LLM；`executeTools(invocations, whitelist)` 在执行层拦截越权调用（含 mcp__*），防御 LLM 幻觉出白名单外工具名。`SubAgent` 不再用 `shouldUseTools()` 布尔，改用 `role.allowedTools()`；`team-planner.md` / `team-reviewer.md` 已声明可用只读工具并要求规划/审查前先核实代码。
+
 核心内置工具 18 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。

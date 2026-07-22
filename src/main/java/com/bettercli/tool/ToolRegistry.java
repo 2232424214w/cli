@@ -1609,7 +1609,19 @@ public class ToolRegistry {
      * 获取所有工具定义（用于LLM）
      */
     public List<com.bettercli.llm.LlmClient.Tool> getToolDefinitions() {
+        return getToolDefinitions(null);
+    }
+
+    /**
+     * 按白名单获取工具定义（用于LLM）。
+     *
+     * @param whitelist 允许的工具名集合；{@code null} 表示不限制（返回全部，含 MCP 动态工具）。
+     *                  非空时只返回白名单内的内置工具，MCP 工具（mcp__*）一律不暴露——
+     *                  非 WORKER 角色不应直接调用 MCP，避免越权。
+     */
+    public List<com.bettercli.llm.LlmClient.Tool> getToolDefinitions(Set<String> whitelist) {
         return tools.values().stream()
+                .filter(t -> whitelist == null || whitelist.contains(t.name()))
                 .map(t -> new com.bettercli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }
@@ -1778,6 +1790,20 @@ public class ToolRegistry {
      * 如果某个工具超过批次超时仍未返回，会取消任务并返回超时结果；已完成工具不受影响。
      */
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
+        return executeTools(invocations, null);
+    }
+
+    /**
+     * 并行执行同一轮 LLM 返回的多个工具调用，可按白名单拦截越权调用。
+     *
+     * @param invocations 工具调用列表
+     * @param whitelist   允许的工具名集合；{@code null} 表示不限制。非空时，不在白名单内的调用
+     *                    （含 mcp__*）直接返回拒绝结果，不进入执行路径。
+     *
+     * 结果按传入顺序返回，调用方可以安全地按原 tool_call 顺序回灌消息历史。
+     * 如果某个工具超过批次超时仍未返回，会取消任务并返回超时结果；已完成工具不受影响。
+     */
+    public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations, Set<String> whitelist) {
         if (invocations == null || invocations.isEmpty()) {
             return List.of();
         }
@@ -1785,6 +1811,43 @@ public class ToolRegistry {
             return invocations.stream()
                     .map(invocation -> ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"))
                     .toList();
+        }
+        // 白名单预检：把越权调用直接转成失败结果，避免占用线程池或触发副作用工具
+        if (whitelist != null) {
+            List<ToolExecutionResult> results = new ArrayList<>();
+            boolean anyBlocked = false;
+            for (ToolInvocation invocation : invocations) {
+                String denyReason = whitelistDenyReason(invocation.name(), whitelist);
+                if (denyReason != null) {
+                    anyBlocked = true;
+                    results.add(ToolExecutionResult.failed(invocation, denyReason));
+                } else {
+                    results.add(null);
+                }
+            }
+            if (anyBlocked) {
+                // 仅对未越权的调用继续执行，越权的已落盘为 failed
+                List<ToolInvocation> allowed = new ArrayList<>();
+                List<Integer> allowedIndexes = new ArrayList<>();
+                for (int i = 0; i < invocations.size(); i++) {
+                    if (results.get(i) == null) {
+                        allowed.add(invocations.get(i));
+                        allowedIndexes.add(i);
+                    }
+                }
+                List<ToolExecutionResult> allowedResults = executeToolsUnrestricted(allowed);
+                for (int j = 0; j < allowedResults.size(); j++) {
+                    results.set(allowedIndexes.get(j), allowedResults.get(j));
+                }
+                return results;
+            }
+        }
+        return executeToolsUnrestricted(invocations);
+    }
+
+    private List<ToolExecutionResult> executeToolsUnrestricted(List<ToolInvocation> invocations) {
+        if (invocations == null || invocations.isEmpty()) {
+            return List.of();
         }
         if (invocations.size() == 1) {
             ToolInvocation invocation = invocations.get(0);
@@ -1846,6 +1909,19 @@ public class ToolRegistry {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    /**
+     * 返回非 null 表示该工具被白名单拒绝，附带拒绝原因；返回 null 表示放行。
+     */
+    private static String whitelistDenyReason(String toolName, Set<String> whitelist) {
+        if (whitelist == null) {
+            return null;
+        }
+        if (toolName == null || !whitelist.contains(toolName)) {
+            return "🛡️ 角色权限拒绝: " + toolName + " 不在当前角色工具白名单内";
+        }
+        return null;
     }
 
     private long elapsedMillis(long startedAtNanos) {

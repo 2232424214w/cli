@@ -8,24 +8,71 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Consumer;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SubAgentTest {
 
     @Test
-    void shouldOnlyEnableToolsForWorker() throws Exception {
-        assertFalse(invokeShouldUseTools(new SubAgent("planner", AgentRole.PLANNER,
-                new GLMClient("test-key"), new ToolRegistry())));
-        assertTrue(invokeShouldUseTools(new SubAgent("worker", AgentRole.WORKER,
-                new GLMClient("test-key"), new ToolRegistry())));
-        assertFalse(invokeShouldUseTools(new SubAgent("reviewer", AgentRole.REVIEWER,
-                new GLMClient("test-key"), new ToolRegistry())));
+    void shouldEnforceRoleToolWhitelist() {
+        // PLANNER：只读+调研，不含写/执行/记忆工具
+        var plannerTools = AgentRole.PLANNER.allowedTools();
+        assertTrue(plannerTools.contains("read_file"));
+        assertTrue(plannerTools.contains("grep_code"));
+        assertTrue(plannerTools.contains("web_search"));
+        assertFalse(plannerTools.contains("write_file"));
+        assertFalse(plannerTools.contains("execute_command"));
+        assertFalse(plannerTools.contains("save_memory"));
+
+        // REVIEWER：纯只读，不能联网/写/执行
+        var reviewerTools = AgentRole.REVIEWER.allowedTools();
+        assertTrue(reviewerTools.contains("read_file"));
+        assertTrue(reviewerTools.contains("glob_files"));
+        assertFalse(reviewerTools.contains("web_search"));
+        assertFalse(reviewerTools.contains("write_file"));
+        assertFalse(reviewerTools.contains("execute_command"));
+
+        // WORKER：不限制（返回 null = 全量）
+        assertNull(AgentRole.WORKER.allowedTools());
+    }
+
+    @Test
+    void shouldOnlyExposeWhitelistedToolsToLlm() {
+        ToolRegistry registry = new ToolRegistry();
+        // 全量里一定有 write_file / execute_command
+        var allDefs = registry.getToolDefinitions();
+        assertTrue(allDefs.stream().anyMatch(t -> "write_file".equals(t.name())));
+        assertTrue(allDefs.stream().anyMatch(t -> "execute_command".equals(t.name())));
+
+        // REVIEWER 白名单下发的 schema 不应包含 write_file / execute_command
+        var reviewerDefs = registry.getToolDefinitions(AgentRole.REVIEWER.allowedTools());
+        assertFalse(reviewerDefs.stream().anyMatch(t -> "write_file".equals(t.name())));
+        assertFalse(reviewerDefs.stream().anyMatch(t -> "execute_command".equals(t.name())));
+        assertTrue(reviewerDefs.stream().anyMatch(t -> "read_file".equals(t.name())));
+
+        // WORKER 传 null = 全量，含 write_file
+        var workerDefs = registry.getToolDefinitions(AgentRole.WORKER.allowedTools());
+        assertTrue(workerDefs.stream().anyMatch(t -> "write_file".equals(t.name())));
+    }
+
+    @Test
+    void shouldRejectOutOfWhitelistToolCallsAtExecution() {
+        ToolRegistry registry = new ToolRegistry();
+        // REVIEWER 尝试调 write_file —— 应被白名单拦截，返回失败结果，不真正写文件
+        var results = registry.executeTools(
+                List.of(new ToolRegistry.ToolInvocation("call_1", "write_file",
+                        "{\"path\":\"scoped.txt\",\"content\":\"x\"}")),
+                AgentRole.REVIEWER.allowedTools());
+
+        assertEquals(1, results.size());
+        assertTrue(results.get(0).result().contains("角色权限拒绝"),
+                "out-of-whitelist call should be rejected: " + results.get(0).result());
     }
 
     @Test
@@ -136,12 +183,6 @@ class SubAgentTest {
                 "whitespace-only reasoning should not produce an empty reasoning heading: " + output);
         assertTrue(output.contains("执行输出"), "content heading should still appear");
         assertTrue(output.contains("答案"), "content should still appear");
-    }
-
-    private boolean invokeShouldUseTools(SubAgent agent) throws Exception {
-        Method method = SubAgent.class.getDeclaredMethod("shouldUseTools");
-        method.setAccessible(true);
-        return (boolean) method.invoke(agent);
     }
 
     /**
