@@ -163,7 +163,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 | 形态 | 启用方式 | 视觉风格 |
 |---|---|---|
-| **inline 流式 TUI**（默认） | 直接运行 / `BETTERCLI_RENDERER=inline` | Claude Code / Qoder 风格：π 主题彩色开屏、主屏直出、transcript 当前位置的 `* ` 输入提示、JLine `Status` 托管的底部 dock（YOLO/HITL、MCP、Skill、model、ctx、token、cwd 等关键字段带克制彩色高亮；ctx 是当前上下文估算，in/out/cache 是调用统计）、右侧输入提示、行内可折叠工具块（`Read 3 files (ctrl+o to expand)`）、行内 git diff、HITL 单字符 `[y/n/a/s/m]` 提示 |
+| **inline 流式 TUI**（默认） | 直接运行 / `BETTERCLI_RENDERER=inline` | Claude Code / Qoder 风格：**BETTER AGENT** ASCII 字标开屏、主屏直出、transcript 当前位置的 `* ` 输入提示、JLine `Status` 托管的底部 dock（YOLO/HITL、MCP、Skill、model、ctx、token、cwd 等关键字段带克制彩色高亮；ctx 是当前上下文估算，in/out/cache 是调用统计）、右侧输入提示、行内可折叠工具块（`Read 3 files (ctrl+o to expand)`）、行内 git diff、HITL 单字符 `[y/n/a/s/m]` 提示 |
 | **lanterna 全屏 TUI** | `BETTERCLI_RENDERER=lanterna`（或兼容旧 `BETTERCLI_TUI=true`） | v16 三栏全屏：文件树 + 对话流 + 状态栏 + 底部输入栏，HITL 模态弹窗 |
 | **plain 兜底** | `BETTERCLI_RENDERER=plain` | 纯 println，无折叠 / 状态栏，等价 v15 行为 |
 
@@ -239,6 +239,15 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - 微信通道使用非交互式默认拒绝策略：只读工具默认允许，`write_file` / `create_project` 继续受 workspace PathGuard 限制，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝
 - 当前文本 MVP 会保留图片 / 文件消息的媒体元数据提示，但 CDN 下载解密、图片块输入和 `/send` 文件推送仍待后续媒体链路补齐
 
+### 架构增强：Multi-Agent 角色工具白名单 + ReAct 轻量规划
+
+- Multi-Agent 角色工具白名单：`AgentRole.allowedTools()` 为 PLANNER / WORKER / REVIEWER 三角色定义工具白名单；`ToolRegistry.getToolDefinitions(Set<String>)` + `executeTools` 白名单拦截；`SubAgent` 用 `allowedTools` 替换原 `shouldUseTools` 布尔，避免越权调用
+- ReAct 轻量规划（对标 Claude Code TodoWrite）：新增 `update_plan` 工具 + `PlanStore`（Agent 会话级内存态）+ `ReActPlan`（id/content/status）；replace 语义，markdown checkbox 编码（`[ ]`/`[~]`/`[x]`）；多步骤复杂任务才用，简单任务不强制；`/clear` 同步清空；不在 SubAgent 角色白名单内，仅 ReAct 主 Agent 可用
+- Multi-Agent 共享黑板（对标 2026 Blackboard 架构）：新增 `SharedState`（`AgentOrchestrator` 每次 run 重建）；字段所有权契约（goal/plan/artifacts/reviews/routingLog 各自只允许特定角色写，越权抛异常）；worker/reviewer 产物双写进黑板，`buildStepContext` 优先从黑板读；routing 派活决策入 `routingLog` 供审计。为后续 p2p / workflow 阶段打地基
+- Multi-Agent peer-to-peer 留言（对标 Claude Code agent teams）：新增 `ask_peer` 工具，worker 间可在共享黑板上互相留言（异步单向，不阻塞）；`AgentOrchestrator` 派活时注入当前 worker 名并把同事留言注入 worker context；`ask_peer` 仅 Multi-Agent 模式暴露（`sharedState` 未注入时 schema 过滤），主 ReAct 不可见
+- Dynamic Workflow（对标 Claude Code 2026.6 Dynamic Workflow：AI 写脚本编排 agent）：新增 `WorkflowScript` + `WorkflowRuntime`，支持顺序/并行/条件/循环控制流；脚本驱动不调 LLM，中间结果存共享黑板不灌 LLM context，可扩到上千步不爆 context；`LoopStep` 强制 maxIterations 硬上限防死循环。是现有 Plan-and-Execute（静态 DAG）的"带控制流"演进形态
+- A2A 跨服务 agent（对标 Google A2A 协议：agent↔agent，与 MCP 的 agent↔tool 互补）：新增 `a2a/` 包，`AgentCard` 能力发现 + `A2AClient`（JSON-RPC 2.0 over HTTP，轮询到终态带 2 分钟硬上限）+ `RemoteAgent` 适配为本地可调用 worker；提取 `Worker` 接口让 `SubAgent` + `RemoteAgent` 共同实现，`MixedWorkerPool` 统一调度本地+远程 worker。本轮交付 A2A 客户端层 + 混编池（独立可测），orchestrator worker 池迁移到 `List<Worker>` 留作后续
+
 ### 第六期 HITL 增强（路径围栏 / 命令快速拒绝 / 操作审计）
 
 `com.bettercli.policy` 包，作为 HITL 之外的辅助层（不是沙箱、不提供进程隔离）：
@@ -258,17 +267,20 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 当前启动输出以命令行实际产物为准：
 
 ```text
-   ████████    BetterCLI π  v16.1.0
-     ██  ██    Model step-3.5-flash-2603 (step)
-     ██  ██    MCP 4/4 · 61 tools · 2/2 skills · ReAct
-     ██  ██    ReAct · Plan · MCP · Browser · Image
-     ██  ██
+  ██████╗ ███████╗████████╗████████╗███████╗██████╗
+  ██╔══██╗██╔════╝╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
+  ██████╔╝█████╗     ██║      ██║   █████╗  ██████╔╝   AGENT  v16.1.0
+  ██╔══██╗██╔══╝     ██║      ██║   ██╔══╝  ██╔══██╗   Model step-3.5-flash-2603 (step)
+  ██████╔╝███████╗   ██║      ██║   ███████╗██║  ██║   MCP 4/4 · 61 tools · 2/2 skills · ReAct
+  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝   ReAct · Plan · MCP · Browser · Image
 
-Tips for getting started:
-1. Type / for commands and Tab completion
-2. Ask coding questions, edit code or run commands
-3. Attach context with @path or @image:
+入门提示：
+1. 输入 / 查看命令，用 Tab 补全
+2. 直接提问、改代码或执行命令
+3. 用 @path 或 @image: 附加上下文
 ```
+
+界面语言默认中文；可用 `/lang zh` / `/lang en` 切换（同时影响 Banner、状态栏与模型回复语言）。
 
 ## 功能
 
@@ -573,6 +585,29 @@ mvn clean package
 java -jar target/bettercli-1.0-SNAPSHOT.jar
 ```
 
+#### 全局命令（对标 Claude Code）
+
+安装一次后，任意目录可直接敲 `bettercli`：
+
+```powershell
+# Windows
+.\scripts\install.ps1
+bettercli
+```
+
+```bash
+# macOS / Linux
+./scripts/install.sh
+# 按提示把 ~/.bettercli/bin 加入 PATH 后：
+bettercli
+```
+
+安装布局：`~/.bettercli/bin/bettercli(.cmd)` + `~/.bettercli/lib/bettercli.jar`。  
+可用 `BETTERCLI_JAR` 覆盖 jar 路径，`BETTERCLI_JAVA_OPTS` / `JAVA_OPTS` 传 JVM 参数。  
+Windows 安装脚本默认把 `%USERPROFILE%\.bettercli\bin` 写入用户 PATH；Unix 需手动加 PATH。
+
+Windows + Java 22+：启动器会加 `--enable-native-access=ALL-UNNAMED`，并在 `TERM=dumb`（IDE 常见）时改用 `windows-vtp`，避免误退回 plain。若仍看到「终端不支持 ANSI」，请用 Windows Terminal / 新开外部 PowerShell 再试，并确认跑的是 `bettercli` 而不是裸 `java -jar`。
+
 或者直接运行：
 
 ```bash
@@ -678,6 +713,7 @@ I
 - `agent_memory_update` - 更新单条 Agent 记忆（content / keywords / confidence / status）
 - `agent_memory_delete` - 删除单条 Agent 记忆
 - `session_search` - BM25 检索历史会话消息，五阶段管道（检索→按会话分组→加载完整→截断预览→返回）；默认当前项目作用域、回溯 30 天
+- `update_plan` - 更新当前 ReAct 会话的任务计划（对标 Claude Code TodoWrite）；replace 语义，传完整任务列表（markdown checkbox 编码 `[ ]`/`[~]`/`[x]`）；多步骤复杂任务才用，简单任务不强制；会话级内存态，`/clear` 会清空
 - `mcp__{server}__{tool}` - MCP server 动态提供的外部工具
 - `mcp__{server}__list_resources` / `mcp__{server}__read_resource` - 支持 resources 的 MCP server 自动注册的虚拟工具
 
@@ -764,11 +800,12 @@ I
 ### 第三期：当前运行效果
 
 ```text
-   ████████    BetterCLI π  v16.1.0
-     ██  ██    Model glm-5.1 (glm)
-     ██  ██    MCP 4/4 · 61 tools · 2/2 skills · ReAct
-     ██  ██    ReAct · Plan · MCP · Browser · Image
-     ██  ██
+  ██████╗ ███████╗████████╗████████╗███████╗██████╗
+  ██╔══██╗██╔════╝╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗
+  ██████╔╝█████╗     ██║      ██║   █████╗  ██████╔╝   AGENT  v16.1.0
+  ██╔══██╗██╔══╝     ██║      ██║   ██╔══╝  ██╔══██╗   Model glm-5.1 (glm)
+  ██████╔╝███████╗   ██║      ██║   ███████╗██║  ██║   MCP 4/4 · 61 tools · 2/2 skills · ReAct
+  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝   ReAct · Plan · MCP · Browser · Image
 
 Tips for getting started:
 1. Type / for commands and Tab completion

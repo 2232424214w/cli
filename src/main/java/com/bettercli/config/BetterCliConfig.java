@@ -21,6 +21,8 @@ public class BetterCliConfig {
     private static final ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
     private String defaultProvider = "glm";
+    /** UI / LLM 界面语言：zh（默认）或 en。 */
+    private String uiLanguage = "zh";
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -56,6 +58,8 @@ public class BetterCliConfig {
 
     public String getDefaultProvider() { return defaultProvider; }
     public void setDefaultProvider(String defaultProvider) { this.defaultProvider = defaultProvider; }
+    public String getUiLanguage() { return uiLanguage; }
+    public void setUiLanguage(String uiLanguage) { this.uiLanguage = uiLanguage; }
     public Map<String, ProviderConfig> getProviders() { return providers; }
     public void setProviders(Map<String, ProviderConfig> providers) { this.providers = providers; }
 

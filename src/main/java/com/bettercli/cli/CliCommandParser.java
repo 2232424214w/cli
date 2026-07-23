@@ -50,6 +50,7 @@ final class CliCommandParser {
         SKILL_OFF,
         SKILL_RELOAD,
         CONFIG,
+        LANG,
         EXPORT
     }
 
@@ -236,6 +237,18 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/config ", 0, 8)) {
             return new ParsedCommand(CommandType.CONFIG, trimmed.substring(8).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/lang") || trimmed.equalsIgnoreCase("/language")) {
+            return new ParsedCommand(CommandType.LANG, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/lang ", 0, 6)) {
+            return new ParsedCommand(CommandType.LANG, trimmed.substring(6).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/language ", 0, 10)) {
+            return new ParsedCommand(CommandType.LANG, trimmed.substring(10).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/audit")) {

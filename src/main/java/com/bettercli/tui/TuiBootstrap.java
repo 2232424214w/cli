@@ -9,7 +9,6 @@ import com.bettercli.tui.config.TuiConfigPanel;
 import com.bettercli.util.AnsiStyle;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
-import org.jline.terminal.TerminalBuilder;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -51,7 +50,7 @@ public final class TuiBootstrap {
         if (!isTuiRequested()) {
             return false;
         }
-        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
+        try (Terminal terminal = com.bettercli.cli.SystemTerminalFactory.create()) {
             return shouldUseTui(terminal);
         } catch (IOException e) {
             System.err.println("⚠️ 已显式启用 TUI，但终端检测失败，降级到 CLI 模式: " + e.getMessage());

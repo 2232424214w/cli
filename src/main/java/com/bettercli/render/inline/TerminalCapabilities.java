@@ -3,6 +3,8 @@ package com.bettercli.render.inline;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 
+import java.util.Locale;
+
 /**
  * 终端能力探测：决定 inline 渲染器的各项特性是否可启用。
  *
@@ -19,8 +21,16 @@ public final class TerminalCapabilities {
             return false;
         }
         String type = terminal.getType();
-        if (type != null && type.equalsIgnoreCase("dumb")) {
-            return false;
+        if (type != null) {
+            String normalized = type.toLowerCase(Locale.ROOT);
+            if (normalized.equals("dumb") || normalized.startsWith("dumb-color")) {
+                return false;
+            }
+            // Real Windows VT console (windows / windows-vtp). IDEs often export TERM=dumb;
+            // that must not demote a working native terminal to plain mode.
+            if (normalized.contains("windows")) {
+                return true;
+            }
         }
         if (System.getenv("NO_COLOR") != null) {
             // NO_COLOR 只影响样式，不影响光标控制——保留 true，颜色由 AnsiStyle 自己关

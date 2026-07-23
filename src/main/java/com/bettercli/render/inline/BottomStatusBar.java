@@ -1,5 +1,6 @@
 package com.bettercli.render.inline;
 
+import com.bettercli.i18n.UiText;
 import com.bettercli.render.StatusInfo;
 import com.bettercli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
@@ -160,7 +161,7 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static String formatStatusLine(StatusInfo info, int cols) {
-        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for YOLO" : "YOLO Ctrl+Y to enable HITL";
+        String mode = UiText.hitlMode(info.hitlEnabled());
         String right = environmentSummary(info);
         if (right.isBlank()) {
             return fitToColumns(" " + mode, cols);
@@ -171,8 +172,8 @@ public final class BottomStatusBar implements AutoCloseable {
 
     static String formatFooterLine(StatusInfo info, int cols) {
         String model = info.model() == null || info.model().isBlank() ? "Auto Model" : info.model().trim();
-        String phase = info.phase() == null || info.phase().isBlank() ? "idle" : info.phase().trim();
-        StringBuilder sb = new StringBuilder(" Auto Model · ");
+        String phase = UiText.phaseLabel(info.phase());
+        StringBuilder sb = new StringBuilder(UiText.autoModelPrefix());
         sb.append(model);
         appendField(sb, phase);
         appendField(sb, contextSegment(info));
@@ -223,7 +224,7 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static AttributedString formatStatusLineAttributed(StatusInfo info, int cols) {
-        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for YOLO" : "YOLO Ctrl+Y to enable HITL";
+        String mode = UiText.hitlMode(info.hitlEnabled());
         String right = environmentSummary(info);
         AttributedStringBuilder builder = new AttributedStringBuilder(Math.max(0, cols));
         builder.append(" ", BASE_STYLE);
@@ -239,13 +240,14 @@ public final class BottomStatusBar implements AutoCloseable {
 
     static AttributedString formatFooterLineAttributed(StatusInfo info, int cols) {
         String model = info.model() == null || info.model().isBlank() ? "Auto Model" : info.model().trim();
-        String phase = info.phase() == null || info.phase().isBlank() ? "idle" : info.phase().trim();
+        String rawPhase = info.phase() == null || info.phase().isBlank() ? "idle" : info.phase().trim();
+        String phase = UiText.phaseLabel(rawPhase);
         AttributedStringBuilder builder = new AttributedStringBuilder(Math.max(0, cols));
         builder.append(" ", BASE_STYLE);
-        builder.append("Auto Model", BRAND_STYLE);
+        builder.append(UiText.isChinese() ? "当前模型" : "Auto Model", BRAND_STYLE);
         builder.append(" · ", BASE_STYLE);
         builder.append(model, MODEL_STYLE);
-        appendStyledField(builder, phase, "idle".equalsIgnoreCase(phase) ? PHASE_IDLE_STYLE : PHASE_ACTIVE_STYLE);
+        appendStyledField(builder, phase, "idle".equalsIgnoreCase(rawPhase) ? PHASE_IDLE_STYLE : PHASE_ACTIVE_STYLE);
         appendContextField(builder, info);
         if (info.inputTokens() > 0 || info.outputTokens() > 0 || info.cachedInputTokens() > 0) {
             appendUsageField(builder, info);

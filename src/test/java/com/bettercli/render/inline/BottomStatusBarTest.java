@@ -1,10 +1,14 @@
 package com.bettercli.render.inline;
 
+import com.bettercli.i18n.UiLang;
+import com.bettercli.i18n.UiText;
 import com.bettercli.render.StatusInfo;
 import com.bettercli.util.AnsiStyle;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.jline.utils.AttributedStyle;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -18,6 +22,16 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BottomStatusBarTest {
+
+    @BeforeEach
+    void useEnglishForStableAssertions() {
+        UiText.setLang(UiLang.EN);
+    }
+
+    @AfterEach
+    void restoreChineseDefault() {
+        UiText.setLang(UiLang.ZH);
+    }
 
     @Test
     void formatStatusLineIncludesAllFields() {

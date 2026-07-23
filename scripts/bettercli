@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# BetterCLI launcher — run from repo (scripts/) or after install (~/.bettercli/bin).
+set -euo pipefail
+
+resolve_jar() {
+  if [[ -n "${BETTERCLI_JAR:-}" ]]; then
+    echo "$BETTERCLI_JAR"
+    return
+  fi
+
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  local candidates=(
+    "$here/../lib/bettercli.jar"
+    "${HOME}/.bettercli/lib/bettercli.jar"
+    "$here/../target/bettercli-1.0-SNAPSHOT.jar"
+  )
+
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -f "$c" ]]; then
+      if command -v realpath >/dev/null 2>&1; then
+        realpath "$c"
+      else
+        (cd "$(dirname "$c")" && echo "$(pwd)/$(basename "$c")")
+      fi
+      return
+    fi
+  done
+
+  echo "❌ BetterCLI jar not found." >&2
+  echo "   Tried:" >&2
+  for c in "${candidates[@]}"; do
+    echo "     - $c" >&2
+  done
+  echo "   Fix: run ./scripts/install.sh  (or set BETTERCLI_JAR=/path/to/bettercli.jar)" >&2
+  exit 1
+}
+
+if ! command -v java >/dev/null 2>&1; then
+  echo "❌ Java not found. BetterCLI requires Java 17+." >&2
+  exit 1
+fi
+
+# On Windows (Git Bash / MSYS), IDE-exported TERM=dumb forces JLine DumbTerminal.
+if [[ "${OS:-}" == "Windows_NT" || "$(uname -s 2>/dev/null || true)" == MINGW* || "$(uname -s 2>/dev/null || true)" == MSYS* ]]; then
+  if [[ "${TERM:-}" == "dumb" || "${TERM:-}" == dumb-color* ]]; then
+    unset TERM
+  fi
+fi
+
+JAR="$(resolve_jar)"
+
+# Java 22+: enable JLine JNI/FFM native access for real terminals.
+NATIVE_ACCESS=()
+java_major="$(java -version 2>&1 | head -n1 | sed -E 's/.*"([0-9]+).*/\1/')"
+if [[ "${java_major:-0}" -ge 22 ]]; then
+  NATIVE_ACCESS=(--enable-native-access=ALL-UNNAMED)
+fi
+
+# shellcheck disable=SC2086
+exec java "${NATIVE_ACCESS[@]}" ${BETTERCLI_JAVA_OPTS:-${JAVA_OPTS:-}} -jar "$JAR" "$@"

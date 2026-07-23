@@ -58,6 +58,12 @@ public class Agent {
     private boolean returnFinalResponseWhenStreamed;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private SessionMessageIndexer sessionMessageIndexer;
+    // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。会话级内存态，不持久化；
+    // 每次 Agent 实例独立持有，通过 toolRegistry 注入给 update_plan 工具读写。
+    private final PlanStore planStore = new PlanStore();
+    // 工具失败反思服务（阶段1：轻量反思，不额外调 LLM）。会话级有状态，持有反螺旋计数器。
+    // 在 executeToolCalls 之后检测失败并注入反思提示，连续反思超阈值后停止，交给 budget 兜底。
+    private final ReflectionService reflectionService = new ReflectionService();
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -73,6 +79,7 @@ public class Agent {
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
+        this.toolRegistry.setPlanStore(this.planStore);
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
     }
 
@@ -82,6 +89,11 @@ public class Agent {
         this.historyCompactor.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+    }
+
+    /** 暴露 ReAct 规划存储，供渲染层/状态栏展示进度；不应被外部修改。 */
+    public PlanStore getPlanStore() {
+        return planStore;
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -229,6 +241,8 @@ public class Agent {
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);
+                    // 工具失败反思：本轮若有失败/拒绝/超时，注入反思提示引导 LLM 复述原因 + 改换策略
+                    maybeInjectReflection(toolResults, iteration);
                     pushStatus(budget, startNanos, "running");
 
                     // 继续循环，让 LLM 根据工具结果继续思考
@@ -289,6 +303,24 @@ public class Agent {
         memoryManager.clearShortTerm();
         if (skillContextBuffer != null) {
             skillContextBuffer.clear();
+        }
+        // 清空 ReAct 规划（对标 /clear 清空其它会话级状态）
+        planStore.clear();
+    }
+
+    /**
+     * 切换 UI/LLM 语言后重建首条 system prompt，使 Language 策略立即生效。
+     */
+    public void refreshSystemPrompt() {
+        LlmClient.Message system = LlmClient.Message.system(buildSystemPrompt(""));
+        if (conversationHistory.isEmpty()) {
+            conversationHistory.add(system);
+            return;
+        }
+        if ("system".equalsIgnoreCase(conversationHistory.get(0).role())) {
+            conversationHistory.set(0, system);
+        } else {
+            conversationHistory.add(0, system);
         }
     }
 
@@ -379,6 +411,25 @@ public class Agent {
         conversationHistory.add(LlmClient.Message.user(report.promptText()));
         renderer().stream().println(report.displayText());
         log.info("Injected LSP diagnostics into ReAct conversation");
+    }
+
+    /**
+     * 工具失败反思注入（阶段1：轻量，不额外调 LLM）。
+     *
+     * <p>检测本轮工具结果，若出现失败/拒绝/超时，由 {@link ReflectionService}
+     * 构造反思提示并注入 conversationHistory（作为 user message），引导 LLM
+     * 复述错误原因 + 改换策略，而非原样重试。反螺旋由 ReflectionService 内部计数器
+     * 控制，超阈值后返回 null 不注入，交给 AgentBudget stagnation 兜底。
+     */
+    private void maybeInjectReflection(List<ToolExecutionResult> toolResults, int iteration) {
+        String prompt = reflectionService.buildReflectionPrompt(toolResults, iteration);
+        if (prompt == null || prompt.isBlank()) {
+            return;
+        }
+        conversationHistory.add(LlmClient.Message.user(prompt));
+        renderer().stream().println(AnsiStyle.subtle("  ↻ " + prompt.split("\n", 2)[0]));
+        log.info("Injected reflection prompt at iteration={} (consecutive={})",
+                iteration, reflectionService.consecutiveReflections());
     }
 
     private String buildSkillIndex() {
@@ -890,7 +941,7 @@ public class Agent {
 
         private void beginThinking() {
             if (hasThinkingPanel()) {
-                renderer.beginThinking("Thinking");
+                renderer.beginThinking(com.bettercli.i18n.UiText.thinkingLabel());
             }
         }
 
@@ -1109,7 +1160,7 @@ public class Agent {
             if (reasoning.isEmpty()) {
                 return;
             }
-            out().println(AnsiStyle.thinking("Thinking..."));
+            out().println(AnsiStyle.thinking(com.bettercli.i18n.UiText.thinkingDots()));
             for (String line : reasoning.split("\\R+")) {
                 String normalized = line.replaceAll("\\s+", " ").trim();
                 if (!normalized.isEmpty()) {

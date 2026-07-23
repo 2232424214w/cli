@@ -115,6 +115,13 @@ public class ToolRegistry {
     private ProjectMemoryLoader projectMemoryLoader = ProjectMemoryLoader.createDefault(Path.of(projectPath));
     private AgentMemoryStore agentMemoryStore;
     private SessionMessageStore sessionMessageStore;
+    // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。由 Agent 在构造后注入；
+    // 未注入时 update_plan 工具返回未初始化提示，不影响其它工具。
+    private com.bettercli.agent.PlanStore planStore;
+    // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
+    // 未注入时 ask_peer 工具返回未初始化提示。主 ReAct Agent 不注入，故 ask_peer 对 ReAct 不可用。
+    private com.bettercli.agent.SharedState sharedState;
+    private volatile String currentWorkerName = "";
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
 
@@ -142,6 +149,8 @@ public class ToolRegistry {
         registerPaiMdTools();
         registerAgentMemoryTools();
         registerSessionSearchTool();
+        registerPlanTool();
+        registerPeerTool();
     }
 
     /**
@@ -276,6 +285,35 @@ public class ToolRegistry {
 
     public SessionMessageStore getSessionMessageStore() {
         return sessionMessageStore;
+    }
+
+    /**
+     * 注入 ReAct 轻量规划存储。由 Agent 在构造后调用，使 update_plan 工具
+     * 能读写当前会话的 plan。未注入时 update_plan 返回未初始化提示。
+     */
+    public void setPlanStore(com.bettercli.agent.PlanStore planStore) {
+        this.planStore = planStore;
+    }
+
+    public com.bettercli.agent.PlanStore getPlanStore() {
+        return planStore;
+    }
+
+    /**
+     * 注入 Multi-Agent 共享黑板与当前 worker 名（阶段D p2p）。
+     * 由 AgentOrchestrator 在派活时调用：每派一个 worker 执行前 setSharedState + setCurrentWorkerName，
+     * 使该 worker 的 ask_peer 工具能读写黑板 peer 通道。主 ReAct Agent 不调用，故 ask_peer 对 ReAct 不可用。
+     */
+    public void setSharedState(com.bettercli.agent.SharedState sharedState) {
+        this.sharedState = sharedState;
+    }
+
+    public void setCurrentWorkerName(String name) {
+        this.currentWorkerName = name == null ? "" : name;
+    }
+
+    public com.bettercli.agent.SharedState getSharedState() {
+        return sharedState;
     }
 
     /**
@@ -1106,6 +1144,138 @@ public class ToolRegistry {
         ));
     }
 
+    /**
+     * 注册 ReAct 轻量规划工具 update_plan（对标 Claude Code TodoWrite）。
+     *
+     * <p>设计要点：
+     * <ul>
+     *   <li>replace 语义：每次调用传完整任务列表，整体覆盖 store，避免漏状态。</li>
+     *   <li>tasks 用 markdown checkbox 字符串编码（换行分隔），因为内置工具的
+     *       Map&lt;String,String&gt; 入口不支持 JSON 数组（asText 会拍扁结构）。</li>
+     *   <li>状态标记：{@code [ ]} 待办 / {@code [~]} 进行中 / {@code [x]} 已完成。
+     *       空字符串或纯空白 = 清空计划。</li>
+     *   <li>低危工具：只写 Agent 内存态，不走 HITL 审批；落盘由 Agent 层负责。</li>
+     * </ul>
+     */
+    private void registerPlanTool() {
+        tools.put("update_plan", new Tool(
+                "update_plan",
+                "更新当前 ReAct 会话的任务计划（对标 Claude Code TodoWrite）。"
+                        + "遇到多步骤复杂任务时，先用本工具列出步骤，逐步执行并在每步完成后更新状态；"
+                        + "简单单步任务不需要调用本工具。"
+                        + "每次传入完整任务列表（replace 语义，不是增量）。",
+                createParameters(
+                        new Param("tasks", "string",
+                                "完整任务列表，换行分隔，每行格式 '[状态] 任务描述'。"
+                                        + "状态：[ ] 待办 / [~] 进行中 / [x] 已完成。"
+                                        + "例：'[ ] 读取 auth 模块\\n[~] 重构 token 校验\\n[x] 补测试'。"
+                                        + "空字符串表示清空计划。", true)
+                ),
+                args -> updatePlan(args)
+        ));
+    }
+
+    private String updatePlan(Map<String, String> args) {
+        if (planStore == null) {
+            return "update_plan 失败: PlanStore 未初始化（ReAct 规划存储未注入）";
+        }
+        String tasks = args.get("tasks");
+        if (tasks == null || tasks.isBlank()) {
+            planStore.clear();
+            return "已清空当前计划。";
+        }
+        java.util.List<com.bettercli.agent.ReActPlan> parsed = parsePlanTasks(tasks);
+        planStore.replace(parsed);
+        return "计划已更新。\n" + planStore.formatView();
+    }
+
+    /**
+     * 注册 peer-to-peer 留言工具 ask_peer（对标 Claude Code agent teams：worker 间直接消息）。
+     *
+     * <p>设计要点：
+     * <ul>
+     *   <li>仅 Multi-Agent 模式可用：AgentOrchestrator 派活时注入 {@code sharedState} + {@code currentWorkerName}；
+     *       主 ReAct Agent 不注入，故 ask_peer 对 ReAct 不可用（schema 不暴露——见 getToolDefinitions 白名单）。</li>
+     *   <li>异步留言：消息存黑板 {@code peerMessages}，对方 worker 下次执行前由 orchestrator 注入 inbox。</li>
+     *   <li>不阻塞、不等回复：对标 2026 共识"p2p 难调试"，保持单向留言语义，避免实时对话的死锁/时序问题。</li>
+     *   <li>低危：只写黑板内存态，不走 HITL 审批。</li>
+     * </ul>
+     */
+    private void registerPeerTool() {
+        tools.put("ask_peer", new Tool(
+                "ask_peer",
+                "在 Multi-Agent 协作中向另一个 worker 发留言（peer-to-peer，异步）。"
+                        + "用于跨步骤协调：例如向负责某模块的同事确认接口、索取已生成的产物摘要。"
+                        + "消息存共享黑板，对方下次执行前会看到；不会立即收到回复，不要为此阻塞。",
+                createParameters(
+                        new Param("to", "string", "目标 worker 名；留空表示广播给所有 worker", false),
+                        new Param("message", "string", "留言内容：问题或请求，简明扼要", true)
+                ),
+                args -> askPeer(args)
+        ));
+    }
+
+    private String askPeer(Map<String, String> args) {
+        if (sharedState == null) {
+            return "ask_peer 失败: 共享黑板未初始化（仅 Multi-Agent 模式可用）";
+        }
+        String from = currentWorkerName;
+        if (from == null || from.isBlank()) {
+            return "ask_peer 失败: 当前 worker 名未设置";
+        }
+        String to = args.get("to");
+        String message = args.get("message");
+        if (message == null || message.isBlank()) {
+            return "ask_peer 失败: message 不能为空";
+        }
+        sharedState.postPeerMessage(from, to, message);
+        String target = (to == null || to.isBlank()) ? "所有 worker" : to;
+        return "已向 " + target + " 发送留言: " + message;
+    }
+
+    /**
+     * 解析 markdown checkbox 格式的任务列表为 ReActPlan。
+     * 每行格式 '[状态] 内容'，状态标记：[ ] / [~] / [x]（大小写不敏感）。
+     * 无标记行视为 pending。空行跳过。id 由 store 自动分配。
+     */
+    private java.util.List<com.bettercli.agent.ReActPlan> parsePlanTasks(String tasks) {
+        java.util.List<com.bettercli.agent.ReActPlan> result = new java.util.ArrayList<>();
+        for (String line : tasks.split("\\r?\\n")) {
+            String trimmed = line.strip();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            java.util.regex.Matcher m = PLAN_LINE_PATTERN.matcher(trimmed);
+            com.bettercli.agent.ReActPlan.Status status = com.bettercli.agent.ReActPlan.Status.PENDING;
+            String content = trimmed;
+            if (m.matches()) {
+                status = parsePlanStatus(m.group(1));
+                content = m.group(2).strip();
+            }
+            if (content.isEmpty()) {
+                continue;
+            }
+            // id 留空，由 PlanStore.replace 自动分配稳定序号
+            result.add(new com.bettercli.agent.ReActPlan(null, content, status, System.currentTimeMillis()));
+        }
+        return result;
+    }
+
+    private static final java.util.regex.Pattern PLAN_LINE_PATTERN =
+            java.util.regex.Pattern.compile("^\\[([^\\]]*)\\]\\s*(.*)$");
+
+    private com.bettercli.agent.ReActPlan.Status parsePlanStatus(String marker) {
+        if (marker == null) {
+            return com.bettercli.agent.ReActPlan.Status.PENDING;
+        }
+        String s = marker.trim().toLowerCase(Locale.ROOT);
+        return switch (s) {
+            case "x", "✓", "done", "completed" -> com.bettercli.agent.ReActPlan.Status.COMPLETED;
+            case "~", ">", "doing", "in_progress", "in-progress", "wip" -> com.bettercli.agent.ReActPlan.Status.IN_PROGRESS;
+            default -> com.bettercli.agent.ReActPlan.Status.PENDING;
+        };
+    }
+
     private String agentMemorySearch(Map<String, String> args) {
         if (agentMemoryStore == null) {
             return "agent_memory_search 失败: Agent 记忆存储未初始化";
@@ -1622,6 +1792,9 @@ public class ToolRegistry {
     public List<com.bettercli.llm.LlmClient.Tool> getToolDefinitions(Set<String> whitelist) {
         return tools.values().stream()
                 .filter(t -> whitelist == null || whitelist.contains(t.name()))
+                // ask_peer 仅 Multi-Agent 模式可用：sharedState 未注入时（主 ReAct / 未 run 的 orchestrator）
+                // 不暴露给 LLM，避免调用即失败的工具污染 schema。
+                .filter(t -> !("ask_peer".equals(t.name()) && sharedState == null))
                 .map(t -> new com.bettercli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }

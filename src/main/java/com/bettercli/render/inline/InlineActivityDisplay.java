@@ -37,7 +37,7 @@ final class InlineActivityDisplay implements AutoCloseable {
     private ScheduledFuture<?> tickTask;
     private boolean active;
     private boolean closed;
-    private String label = "Thinking";
+    private String label = com.bettercli.i18n.UiText.thinkingLabel();
     private boolean showCancelHint = true;
     private long startedNanos;
     private int frame;
@@ -75,7 +75,7 @@ final class InlineActivityDisplay implements AutoCloseable {
         }
         clearLocked();
         reasoning.setLength(0);
-        this.label = (label == null || label.isBlank()) ? "Thinking" : label.trim();
+        this.label = (label == null || label.isBlank()) ? com.bettercli.i18n.UiText.thinkingLabel() : label.trim();
         this.showCancelHint = true;
         this.startedNanos = System.nanoTime();
         this.frame = 0;
@@ -108,7 +108,7 @@ final class InlineActivityDisplay implements AutoCloseable {
             return;
         }
         if (!active) {
-            this.label = "Thinking";
+            this.label = com.bettercli.i18n.UiText.thinkingLabel();
             this.showCancelHint = true;
             this.startedNanos = System.nanoTime();
             this.frame = 0;

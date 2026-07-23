@@ -12,6 +12,8 @@ import com.bettercli.browser.BrowserMode;
 import com.bettercli.browser.BrowserSession;
 import com.bettercli.browser.SensitivePagePolicy;
 import com.bettercli.config.BetterCliConfig;
+import com.bettercli.i18n.UiLang;
+import com.bettercli.i18n.UiText;
 import com.bettercli.hitl.HitlHandler;
 import com.bettercli.hitl.HitlToolRegistry;
 import com.bettercli.hitl.SwitchableHitlHandler;
@@ -57,7 +59,6 @@ import com.bettercli.wechat.WechatLoginResult;
 import com.bettercli.wechat.WechatMessageLoop;
 import com.bettercli.wechat.WechatQrLogin;
 import org.jline.terminal.Terminal;
-import org.jline.terminal.TerminalBuilder;
 import org.jline.terminal.Attributes;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
@@ -219,6 +220,7 @@ public class Main {
         configureLogging();
 
         BetterCliConfig config = BetterCliConfig.load();
+        UiText.setLang(UiLang.resolve(config.getUiLanguage()));
         LlmClient llmClient = LlmClientFactory.createFromConfig(config);
         if (llmClient == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
@@ -227,7 +229,7 @@ public class Main {
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
 
-        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
+        try (Terminal terminal = SystemTerminalFactory.create()) {
             refreshTerminalColumns(terminal);
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
@@ -803,6 +805,11 @@ public class Main {
                             ui.println(handleConfigCommand(config, command.payload()));
                             renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         }
+                        continue;
+                    }
+                    case LANG -> {
+                        ui.println(handleLangCommand(config, command.payload(), reactAgent));
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case AUDIT_TAIL -> {
@@ -1756,6 +1763,9 @@ public class Main {
                 new SlashCommandHint("/config provider freellmapi ", "/config provider freellmapi <选项>", "配置本地 FreeLLMAPI provider"),
                 new SlashCommandHint("/config provider xfyun ", "/config provider xfyun <选项>", "配置讯飞星辰 MaaS provider"),
                 new SlashCommandHint("/config provider agnes ", "/config provider agnes <选项>", "配置 Agnes provider"),
+                new SlashCommandHint("/lang", "/lang", "查看当前界面语言"),
+                new SlashCommandHint("/lang zh", "/lang zh", "切换为中文界面与回复"),
+                new SlashCommandHint("/lang en", "/lang en", "切换为英文界面与回复"),
                 new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan-and-Execute 模式"),
                 new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用计划模式执行这条任务"),
                 new SlashCommandHint("/team", "/team", "下一条任务使用 Multi-Agent 协作模式"),
@@ -1908,6 +1918,33 @@ public class Main {
      * /config 命令处理：用 renderer.openPalette 展示当前配置项列表。
      * 当前是只读视图——选中一项后提示对应的 CLI 命令，由用户自己执行。
      */
+    private static String handleLangCommand(BetterCliConfig config, String payload, Agent reactAgent) {
+        if (payload == null || payload.isBlank()) {
+            return UiText.langStatusLine() + "\n" + UiText.langUsage();
+        }
+        String raw = payload.trim();
+        if ("help".equalsIgnoreCase(raw) || "-h".equalsIgnoreCase(raw) || "--help".equalsIgnoreCase(raw)) {
+            return UiText.langUsage();
+        }
+        UiLang next = UiLang.parse(raw);
+        // Reject unknown tokens that parse() would silently map to ZH
+        String normalized = raw.toLowerCase(java.util.Locale.ROOT);
+        boolean known = normalized.equals("zh") || normalized.equals("zh-cn") || normalized.equals("zh_cn")
+                || normalized.equals("cn") || normalized.equals("chinese") || normalized.equals("中文")
+                || normalized.equals("en") || normalized.equals("english") || normalized.equals("en-us")
+                || normalized.equals("en_us");
+        if (!known) {
+            return "❌ 未知语言: " + raw + "\n" + UiText.langUsage();
+        }
+        UiText.setLang(next);
+        config.setUiLanguage(next.code());
+        config.save();
+        if (reactAgent != null) {
+            reactAgent.refreshSystemPrompt();
+        }
+        return UiText.langSwitched(next);
+    }
+
     private static void handleConfigPalette(Renderer renderer,
                                             BetterCliConfig config,
                                             LlmClient llmClient,
@@ -1916,6 +1953,7 @@ public class Main {
         var items = java.util.List.of(
                 "模型: " + (llmClient == null ? "(none)" : llmClient.getModelName() + " / " + llmClient.getProviderName()),
                 "默认 Provider: " + (config == null ? "(none)" : config.getDefaultProvider()),
+                "界面语言: " + UiText.lang().displayName() + " (/lang zh|en)",
                 "HITL: " + (hitlHandler.isEnabled() ? "ON" : "OFF"),
                 "Skill 启用数: " + (skillRegistry == null ? 0 : skillRegistry.enabledSkills().size()),
                 "渲染器: " + renderer.getClass().getSimpleName(),
@@ -1928,10 +1966,11 @@ public class Main {
         }
         String hint = switch (selected) {
             case 0, 1 -> "💡 GLM: /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|step|kimi|freellmapi|xfyun|agnes 读取配置模型";
-            case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
-            case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
-            case 4 -> "💡 切换渲染器（重启后生效）: BETTERCLI_RENDERER=inline|lanterna|plain";
-            case 5 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
+            case 2 -> "💡 切换语言: /lang zh  |  /lang en";
+            case 3 -> "💡 切换 HITL: /hitl on / /hitl off";
+            case 4 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
+            case 5 -> "💡 切换渲染器（重启后生效）: BETTERCLI_RENDERER=inline|lanterna|plain";
+            case 6 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
             default -> "(unknown)";
         };
         renderer.stream().println(hint);
@@ -3048,17 +3087,25 @@ public class Main {
         String ready = "Model " + model + " (" + provider + ")";
         String capabilities = "ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG";
         String state = mcp + " · " + skills + " · ReAct";
+        // Open layout (no right border): wordmark + status. Keep ASCII-only glyphs for CJK-safe width.
         List<String> lines = new ArrayList<>(List.of(
-                "   " + AnsiStyle.section("██████████") + "    " + AnsiStyle.emphasis("BetterCLI") + " " + AnsiStyle.section("π") + "  " + AnsiStyle.subtle("v" + VERSION),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(ready),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(state),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(capabilities),
-                "   " + AnsiStyle.section("  ██  ██"),
+                "  " + AnsiStyle.section("██████╗ ███████╗████████╗████████╗███████╗██████╗"),
+                "  " + AnsiStyle.section("██╔══██╗██╔════╝╚══██╔══╝╚══██╔══╝██╔════╝██╔══██╗"),
+                "  " + AnsiStyle.section("██████╔╝█████╗     ██║      ██║   █████╗  ██████╔╝")
+                        + "   " + AnsiStyle.emphasis("AGENT") + "  " + AnsiStyle.subtle("v" + VERSION),
+                "  " + AnsiStyle.section("██╔══██╗██╔══╝     ██║      ██║   ██╔══╝  ██╔══██╗")
+                        + "   " + AnsiStyle.subtle(ready),
+                "  " + AnsiStyle.section("██████╔╝███████╗   ██║      ██║   ███████╗██║  ██║")
+                        + "   " + AnsiStyle.subtle(state),
+                "  " + AnsiStyle.section("╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═╝")
+                        + "   " + AnsiStyle.subtle(capabilities),
                 "",
-                "Tips for getting started:",
-                "1. Type " + AnsiStyle.emphasis("/") + " for commands and Tab completion",
-                "2. Ask coding questions, edit code or run commands",
-                "3. Attach context with " + AnsiStyle.emphasis("@path") + " or " + AnsiStyle.emphasis("@image:")
+                UiText.tipsTitle(),
+                UiText.tipCommands().replace("{{/}}", AnsiStyle.emphasis("/")),
+                UiText.tipAsk(),
+                UiText.tipAttach()
+                        .replace("{{@path}}", AnsiStyle.emphasis("@path"))
+                        .replace("{{@image:}}", AnsiStyle.emphasis("@image:"))
         ));
         if (info.note() != null && !info.note().isBlank()) {
             lines.add("");

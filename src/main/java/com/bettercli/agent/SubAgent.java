@@ -38,7 +38,7 @@ import java.util.function.Supplier;
  * 每个 SubAgent 有独立的角色、系统提示词和对话历史，
  * 但共享 LLM 客户端和工具注册表。
  */
-public class SubAgent {
+public class SubAgent implements Worker {
     private static final Logger log = LoggerFactory.getLogger(SubAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
@@ -54,6 +54,7 @@ public class SubAgent {
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private SubAgentResult lastResult;
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this(name, role, llmClient, toolRegistry, null);
@@ -216,6 +217,7 @@ public class SubAgent {
                 log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
                         name, exitReason, budget.iteration(),
                         budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
+                storeLastResult(description, true, description, budget, true);
                 return AgentMessage.error(name, role, description);
             }
 
@@ -264,14 +266,111 @@ public class SubAgent {
 
                 streamRenderer.finish();
 
+                storeLastResult(response.content(), false, null, budget, false);
                 return AgentMessage.result(name, role, response.content());
 
             } catch (IOException e) {
                 log.error("[{}] LLM call failed", name, e);
                 streamRenderer.finish();
-                return AgentMessage.error(name, role, "LLM 调用失败: " + e.getMessage());
+                String errorMsg = "LLM 调用失败: " + e.getMessage();
+                storeLastResult(errorMsg, true, errorMsg, budget, false);
+                return AgentMessage.error(name, role, errorMsg);
             }
         }
+    }
+
+    /**
+     * 从运行轨迹确定性派生结构化交接信封并存为 {@link #lastResult}。
+     * 取舍：不依赖 LLM 自报 JSON，而从工具调用参数 / 退出状态客观派生，可观测且抗自证偏差。
+     */
+    private void storeLastResult(String summary, boolean error, String errorMsg,
+                                 AgentBudget budget, boolean exhausted) {
+        List<String> artifacts = collectArtifacts();
+        List<String> issues = error
+                ? List.of(errorMsg == null ? "执行出错" : errorMsg)
+                : collectIssues();
+        double confidence = error ? 0.2 : exhausted ? 0.5 : 0.85;
+        this.lastResult = new SubAgentResult(name, role, summary, artifacts, issues, confidence,
+                exhausted, budget.iteration(), budget.totalInputTokens(), budget.totalOutputTokens(),
+                error, error ? errorMsg : null);
+        log.info("[{}] produced envelope: {}", name, lastResult.oneLineSummary());
+    }
+
+    /**
+     * 从对话历史里提取 Worker 触发改动的文件/项目（write_file 的 path / create_project 的 name）。
+     */
+    private List<String> collectArtifacts() {
+        List<String> artifacts = new java.util.ArrayList<>();
+        for (LlmClient.Message msg : conversationHistory) {
+            if (msg.toolCalls() == null) continue;
+            for (LlmClient.ToolCall tc : msg.toolCalls()) {
+                String toolName = tc.function().name();
+                String args = tc.function().arguments();
+                String key = switch (toolName) {
+                    case "write_file" -> "path";
+                    case "create_project" -> "name";
+                    default -> null;
+                };
+                if (key == null) continue;
+                try {
+                    String value = JSON_MAPPER.readTree(args).path(key).asText("");
+                    if (!value.isBlank() && !artifacts.contains(value)) {
+                        artifacts.add(value);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return List.copyOf(artifacts);
+    }
+
+    /**
+     * 从对话历史里提取工具结果中的错误信号（启发式：含 ❌/失败/错误/error）。
+     */
+    private List<String> collectIssues() {
+        List<String> issues = new java.util.ArrayList<>();
+        for (LlmClient.Message msg : conversationHistory) {
+            if (!"tool".equals(msg.role()) || msg.content() == null) continue;
+            String c = msg.content();
+            if (c.contains("❌") || c.contains("失败") || c.contains("错误")
+                    || c.toLowerCase().contains("error")) {
+                String snippet = c.length() > 120 ? c.substring(0, 117) + "..." : c;
+                if (!issues.contains(snippet)) {
+                    issues.add(snippet);
+                }
+            }
+        }
+        return List.copyOf(issues);
+    }
+
+    /**
+     * 返回最近一次 {@link #execute} 产出的结构化交接信封；未执行过返回 null。
+     */
+    public SubAgentResult lastRunResult() {
+        return lastResult;
+    }
+
+    /**
+     * 带评分标准（rubric）的对抗式审查：把 Worker 的结构化信封（而非裸 prose）交给 Reviewer，
+     * 明确要求 Reviewer 不要只信执行者自述——artifacts 非空或 confidence < 0.7 时必须实际
+     * read_file/grep_code 核实被改文件，降低自证偏差（对标 2026 independent grading 模式）。
+     */
+    public AgentMessage reviewWithRubric(String originalTask, SubAgentResult workerEnvelope, PrintStream out) {
+        String artifactsStr = workerEnvelope.artifacts() == null || workerEnvelope.artifacts().isEmpty()
+                ? "无" : String.join(", ", workerEnvelope.artifacts());
+        String issuesStr = workerEnvelope.issues() == null || workerEnvelope.issues().isEmpty()
+                ? "无" : String.join(" | ", workerEnvelope.issues());
+        String rubricInput = "原始任务：" + originalTask
+                + "\n\n执行者自报摘要：\n" + (workerEnvelope.summary() == null ? "" : workerEnvelope.summary())
+                + "\n\n执行者触发的文件改动（artifacts）：" + artifactsStr
+                + "\n执行者观察到的问题（issues）：" + issuesStr
+                + "\n执行者置信度（confidence）：" + String.format("%.2f", workerEnvelope.confidence())
+                + "\n\n审查要求（rubric）："
+                + "\n1. 不要只信执行者自报摘要——若 artifacts 非空，必须用 read_file / grep_code 实际读取被改文件核实，避免执行者自证偏差。"
+                + "\n2. 若 confidence < 0.7 或任务涉及文件写入，必须实际验证。"
+                + "\n3. 判断：通过 / 不通过 + 具体问题。";
+        AgentMessage reviewTask = AgentMessage.task("orchestrator", rubricInput);
+        return execute(reviewTask, out);
     }
 
     /**

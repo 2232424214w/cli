@@ -122,7 +122,7 @@ public final class InlineRenderer implements Renderer {
 
     @Override
     public String inputRightPrompt() {
-        return "message / @path / @image";
+        return com.bettercli.i18n.UiText.inputRightPrompt();
     }
 
     @Override

@@ -40,11 +40,18 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesConcreteModelNameAsSwitchModelPayload() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/model step-custom-model");
+    void parsesLangCommand() {
+        CliCommandParser.ParsedCommand status = CliCommandParser.parse("/lang");
+        assertEquals(CliCommandParser.CommandType.LANG, status.type());
+        assertNull(status.payload());
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_MODEL, command.type());
-        assertEquals("step-custom-model", command.payload());
+        CliCommandParser.ParsedCommand zh = CliCommandParser.parse("/lang zh");
+        assertEquals(CliCommandParser.CommandType.LANG, zh.type());
+        assertEquals("zh", zh.payload());
+
+        CliCommandParser.ParsedCommand en = CliCommandParser.parse("/language en");
+        assertEquals(CliCommandParser.CommandType.LANG, en.type());
+        assertEquals("en", en.payload());
     }
 
     @Test

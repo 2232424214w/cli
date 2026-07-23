@@ -1,12 +1,18 @@
 package com.bettercli.prompt;
 
+import com.bettercli.i18n.UiText;
+
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 public class PromptAssembler {
+    private static final Pattern LANGUAGE_SECTION = Pattern.compile(
+            "(?ms)^## Language\\s*\\n+.*?(?=^## |\\z)");
+
     private final PromptRepository repository;
 
     public PromptAssembler(PromptRepository repository) {
@@ -21,7 +27,7 @@ public class PromptAssembler {
         Objects.requireNonNull(mode, "mode");
         PromptContext ctx = context == null ? PromptContext.empty() : context;
 
-        String base = repository.loadRequired("base.md");
+        String base = applyUiLanguage(repository.loadRequired("base.md"));
         if (!ctx.toolsEnabled()) {
             base = stripToolSections(base);
         }
@@ -45,6 +51,18 @@ public class PromptAssembler {
         String assembled = prompt.toString().trim();
         validateLanguageSection(assembled, "assembled prompt");
         return assembled;
+    }
+
+    /** Replace ## Language body so LLM follows current UI language preference. */
+    static String applyUiLanguage(String base) {
+        if (base == null || base.isBlank()) {
+            return base;
+        }
+        String replacement = "## Language\n\n" + UiText.llmLanguagePolicy() + "\n\n";
+        if (LANGUAGE_SECTION.matcher(base).find()) {
+            return LANGUAGE_SECTION.matcher(base).replaceFirst(java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        return replacement + base;
     }
 
     private String approvalMode(PromptContext context) {

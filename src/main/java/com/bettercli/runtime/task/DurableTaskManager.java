@@ -23,6 +23,7 @@ public class DurableTaskManager implements Closeable {
     private final Map<String, Thread> runningTasks = new ConcurrentHashMap<>();
     private ExecutorService workers;
     private volatile boolean running;
+    private volatile TaskCompletionListener completionListener = TaskCompletionListener.NO_OP;
 
     public DurableTaskManager(Path dbPath, TaskRunner runner, int workerCount) throws SQLException {
         this.dbPath = dbPath;
@@ -40,6 +41,14 @@ public class DurableTaskManager implements Closeable {
 
     public static DurableTaskManager openDefault(TaskRunner runner) throws SQLException {
         return new DurableTaskManager(defaultDbPath(), runner, workerCount());
+    }
+
+    /**
+     * 注册任务终态回推监听（微信 / HTTP 等前端）。null 则清空为 NO_OP。
+     * 在 markTerminal 之后同步调用；监听器异常不影响任务状态落库。
+     */
+    public void setCompletionListener(TaskCompletionListener listener) {
+        this.completionListener = listener == null ? TaskCompletionListener.NO_OP : listener;
     }
 
     public static Path defaultDbPath() {
@@ -172,7 +181,7 @@ public class DurableTaskManager implements Closeable {
                 runningTasks.put(taskId, Thread.currentThread());
                 Instant startedAt = Instant.now();
                 try {
-                    String result = runner.run(task.prompt());
+                    String result = runner.run(taskId, task.prompt());
                     synchronized (this) {
                         DurableTask latest = find(taskId).orElse(null);
                         if (latest != null && latest.status() != TaskStatus.CANCELED) {
@@ -268,6 +277,20 @@ public class DurableTaskManager implements Closeable {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("更新后台任务失败: " + e.getMessage(), e);
+        }
+        notifyCompletion(id);
+    }
+
+    private void notifyCompletion(String id) {
+        try {
+            find(id).ifPresent(task -> {
+                try {
+                    completionListener.onTerminal(task);
+                } catch (Exception ignored) {
+                    // 前端回推失败不回滚任务状态
+                }
+            });
+        } catch (Exception ignored) {
         }
     }
 

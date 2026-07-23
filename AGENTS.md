@@ -29,9 +29,15 @@
 ```bash
 cp .env.example .env
 mvn clean package        # 默认跳过测试，优先产出可手工验收 jar
+# 全局命令（对标 Claude Code 的 `claude`）：安装后任意目录可直接运行
+# Windows:  .\scripts\install.ps1
+# Unix:     ./scripts/install.sh
+bettercli                # 交互式 CLI（安装后）
+/lang zh                 # 界面与回复默认中文（默认）；/lang en 切英文
+bettercli wechat setup   # 主动绑定微信 iLink 通道，默认不开启
+bettercli wechat start   # 前台启动微信通道
+# 未安装时仍可用 jar 直启
 java -jar target/bettercli-1.0-SNAPSHOT.jar
-java -jar target/bettercli-1.0-SNAPSHOT.jar wechat setup   # 主动绑定微信 iLink 通道，默认不开启
-java -jar target/bettercli-1.0-SNAPSHOT.jar wechat start   # 前台启动微信通道
 /wechat                   # 交互式 CLI 内扫码绑定并后台启动微信通道
 mvn test -Pquick          # 常规回归
 mvn test -Pphase16-smoke  # TUI 相关
@@ -57,9 +63,12 @@ Plan-and-Execute DAG 校验：`ExecutionPlan.validate()` 返回 `PlanValidationR
 Multi-Agent 角色工具白名单（`AgentRole.allowedTools()`）：PLANNER 只读+调研（`read_file`/`glob_files`/`grep_code`/`list_dir`/`web_search`/`web_fetch`），REVIEWER 纯只读（`read_file`/`glob_files`/`grep_code`/`list_dir`，不联网不写不执行），WORKER 返回 `null` 表示不限制（全量内置 + MCP）。白名单两处生效：`ToolRegistry.getToolDefinitions(whitelist)` 只把白名单内工具 schema 下发给 LLM；`executeTools(invocations, whitelist)` 在执行层拦截越权调用（含 mcp__*），防御 LLM 幻觉出白名单外工具名。`SubAgent` 不再用 `shouldUseTools()` 布尔，改用 `role.allowedTools()`；`team-planner.md` / `team-reviewer.md` 已声明可用只读工具并要求规划/审查前先核实代码。
 Multi-Agent 角色级模型分配（`RoleModelResolver`）：`AgentOrchestrator.setRoleClientResolver(Function<AgentRole, LlmClient>)` 让 Planner / Reviewer / Worker 用不同模型，配置走 `bettercli.team.<role>.provider` 系统属性或 `BETTERCLI_TEAM_<ROLE>_PROVIDER` 环境变量，未配或建不出来时回退主模型（向后兼容）。`/team` 启动时打印三角色模型标签；`roleModelLabel(role)` 供状态展示与 ablation 记录。`setRoleClientResolver` 会重建 SubAgent 并重新下发已设置的 Skill 系统与外部上下文。
 Multi-Agent Worker 分工与持久记忆：`AgentOrchestrator.setWorkerSpecialties(List<String>)` 给 worker-1/worker-2 注入差异化专长（默认按能力维度：实现 vs 分析/验证，可用 `bettercli.team.worker.specialties` / `BETTERCLI_TEAM_WORKER_SPECIALTIES` 覆盖）；团队名单 + 专长通过 `{{teamWorkers}}` 注入 `team-planner.md`，规划者在每个 step 的 `assignee` 指定最匹配的 Worker。`ExecutionStep` 新增 `assignee` 字段，`parsePlan` 读取并经 `normalizeAssignee` 过滤幻觉出的不存在 worker 名（回退默认调度）。串行/并行两条路径都按 assignee 路由（`pickWorker` / `takeWorker`），指派命中时打印 🎯 提示。Worker 不再每步 `clearHistory`——保留跨步骤对话记忆，超 window 时由 `SubAgent.maybeCompactHistory` 自动压缩；`team-worker.md` 声明持久记忆并要求避免重复读取。
+Multi-Agent 动态重规划：`AgentOrchestrator` 在 step 执行失败（Worker ERROR/空结果）或审查重试耗尽（`MAX_RETRIES_PER_STEP`）时回调 planner 重新规划剩余步骤；保留已完成步骤，新步骤 id 加 `r<n>_` 前缀避免冲突；`MAX_REPLAN_PER_RUN=2` 防 replan 风暴。规划阶段不再立即 `clearHistory`——保留 planner 上下文供 replan 复用，`run()` 结束时统一清理。同 issues 连续出现时走辩论收敛（`ReflectionService.isDebateConverged`），不触发 replan。
+Multi-Agent Scatter-Gather：`ScatterGather.explore` 为同一目标派 N 路角度并行调研再 fan-in 合成（区别于无依赖 step 碰巧并行）；底层 `ParallelStep` + `WorkflowAdapters.fanInTask`。
+Multi-Agent 增量辩论：审查拒绝后 Worker 收到 `buildIncrementalDebateContext`（只改指出的点，不推倒重来）；issues 实质相同或审查 JSON `converged: true` 时停止辩论并保留当前结果。
 Multi-Agent 设计与 ablation：设计决策见 `docs/multi-agent-design.md`（四阶段迭代 + 权衡）；ablation 方法论见 `docs/multi-agent-ablation.md`，配套 `TeamBenchmark`（`src/test/java/com/bettercli/agent/TeamBenchmark.java`，`@EnabledIfSystemProperty` 默认禁用，`-Dbettercli.benchmark.enabled=true` 启用，跑单 Agent vs Multi baseline vs Multi full 三组对照，用 `CountingLlmClient` 包装器累计 token/调用次数，输出 `docs/multi-agent-ablation-results.md`）。
 
-核心内置工具 18 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search`
+核心内置工具 19 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan`
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
 
@@ -78,7 +87,8 @@ Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com
 
 ```
 src/main/java/com/bettercli/
-├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java
+├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java, AgentRole, RoleModelResolver, AgentBudget, AgentMessage, SubAgentResult, ReActPlan, PlanStore, SharedState, WorkflowScript, WorkflowStep, TaskStep, ParallelStep, ConditionalStep, LoopStep, WorkflowRuntime, WorkflowAdapters, ScatterGather, WorkflowCheckpoint, WorkflowCheckpointStore, DurableWorkflowBridge, Worker, MixedWorkerPool
+├── a2a/         AgentCard, A2AClient, HttpTransport, JavaNetHttpTransport, RemoteAgent, A2AException
 ├── cli/         Main.java, CliCommandParser.java, PlanReviewInputParser.java
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         GLMClient, DeepSeekClient, StepClient, KimiClient, FreeLlmApiClient, AgnesClient
@@ -103,7 +113,8 @@ src/main/java/com/bettercli/
 
 启动与 inline 渲染当前约定：
 
-- 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 π 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
+- 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 **BETTER AGENT** ASCII 字标 + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
+- 界面语言默认中文（Banner tips、状态栏、Thinking、右提示）；`/lang zh|en` 可切换，并同步 system prompt 的 Language 策略。也可用 `BETTERCLI_UI_LANG` / `-Dbettercli.ui.lang` / `~/.bettercli/config.json` 的 `uiLanguage`。
 - inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。
 - 默认 CLI 启动路径应先 `Renderer.start()` 并初始化底部 dock；inline 首屏不要在 `readLine` 前裸写 stdout，而是通过 `InlineRenderer.installStartupScreen(...)` 挂到 `LineReader.CALLBACK_INIT`，首次进入输入时用 `printAbove` 一次性显示完整 Banner + tips，避免 logo 被 LineReader 首次重绘滚出可视区域。
 - `BottomStatusBar` 现在是 JLine `Status` 托管的底部 dock：由 JLine 维护滚动区域和状态行位置，不再手写 `\n` / `moveUp` / `CLEAR_TO_EOS` 清屏。输入期会把 LineReader 光标定位到 dock 上方一行，让 `*` 输入行和 Status 同处底部区域；dock 保留两类信息：上层模式 + MCP/Skill 摘要，下层 Auto Model / model / phase / ctx 百分比与 token / cost / elapsed / cwd。关键字段可用克制的 JLine `AttributedString` 彩色样式突出，但纯文本格式和宽度裁剪逻辑要保持稳定。`ctx` 表示当前仍会带入下一轮请求的上下文估算；`in/out/cache` 表示最近任务的 LLM 调用统计，二者不要混用。
@@ -140,6 +151,42 @@ src/main/java/com/bettercli/
 - `/init` 会根据当前项目生成短 `BETTER.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
 - `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.bettercli/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
 - JLine 交互升级计划记录在 `docs/phase-22-jline-interaction-upgrade.md`。
+- ReAct 轻量规划（`update_plan` 工具，对标 Claude Code TodoWrite）：
+ - 存储：`PlanStore`（Agent 实例字段，会话级内存态，不持久化）；`ReActPlan`（id / content / status: pending\|in_progress\|completed）。
+ - `update_plan`：replace 语义，每次传完整任务列表（markdown checkbox 编码 `[ ]`/`[~]`/`[x]`，换行分隔），整体覆盖 store；空字符串清空。低危工具，不走 HITL 审批。
+ - 触发：Agent system prompt 引导"多步骤复杂任务先用 `update_plan` 列步骤"，简单单步任务不强制。
+ - 隔离：`update_plan` 不在 SubAgent 角色工具白名单内（阶段A 角色隔离），仅 ReAct 主 Agent 可用。
+ - `/clear` 会同时清空 `planStore`。
+- ReAct 工具失败反思（`ReflectionService`，对标 OpenHands CriticMixin + Claude Code 错误恢复反螺旋，阶段1 轻量版）：
+ - 触发：`Agent` 在 `executeToolCalls` 之后检测本轮工具结果，若出现失败/策略拒绝/超时，由 `ReflectionService.buildReflectionPrompt` 构造反思提示，作为 user message 注入 `conversationHistory`，引导 LLM 复述错误原因 + 改换策略，不原样重试。不额外调用 LLM，零成本增量。
+ - 分类：`ToolExecutionResult` 无显式 error 字段，`ReflectionService.classify` 基于字符串前缀（`🛡️ 策略拒绝` / `工具执行失败:` / `搜索失败` / `抓取失败` / `❌` / `*_失败`）+ `timedOut` 字段分类为 SUCCESS / FAILED / REJECTED / TIMEOUT。工具新增失败格式时同步更新前缀表。
+ - 反螺旋：`ReflectionService` 内置 `consecutiveReflections` 计数器，连续反思超过 `maxConsecutive` 阈值（默认 2）后停止注入，交给 `AgentBudget` stagnation 检测兜底，避免"反思→失败→反思"死循环（借鉴 Claude Code `hasAttemptedReactiveCompact` one-shot 思路）。
+ - 配置：`bettercli.react.reflection.enabled`（默认 true）/ `bettercli.react.reflection.max.consecutive`（默认 2）。
+ - 隔离：仅 ReAct 主 Agent 启用，SubAgent 暂不做（角色隔离）。
+ - 引导：`base.md` Reflection Policy 段落声明收到 `[反思提示]` 时的响应规范。
+- Multi-Agent 共享黑板（`SharedState`，对标 2026 Blackboard 架构 + 状态所有权契约）：
+ - 存储：`AgentOrchestrator` 每次 `run()` 重建；`goal`（orchestrator 写）/ `plan`（PLANNER 写）/ `artifacts.<stepId>`（WORKER 写）/ `reviews.<stepId>`（REVIEWER 写）/ `routingLog`（orchestrator 派活决策）。
+ - 所有权契约：每个字段只允许特定角色写，越权抛 `SharedState.StateOwnershipException`（防 agent 互相覆盖产物）；所有角色可读。
+ - 集成：`buildStepContext` 优先从黑板读 `artifacts`（回退到 `step.result()`）；worker/reviewer 产物双写进黑板（`step.result()` 仍保留供旧路径）；`pickWorker` / 并行批次把 routing 决策写入 `routingLog` 供审计。
+ - 定位：阶段C 地基，后续阶段D（p2p 共享 task list）/ 阶段E（workflow 中间结果存黑板不灌 LLM context）复用此黑板。
+- Multi-Agent peer-to-peer 留言（`ask_peer` 工具，对标 Claude Code agent teams：worker 间直接消息）：
+ - 通道：`SharedState.peerMessages` + `postPeerMessage(from, to, content)` / `getInbox(workerName)`；空 `to` = 广播；inbox 排除自己发的。
+ - 工具：`ask_peer`（WORKER 角色可用，PLANNER/REVIEWER 白名单不含）；异步单向留言，不阻塞不等回复（对标 2026 共识"p2p 难调试"，避免实时对话死锁）。
+ - 暴露控制：`getToolDefinitions` 在 `sharedState` 未注入时过滤掉 `ask_peer`，避免主 ReAct 看到调用即失败的工具。
+ - 集成：`AgentOrchestrator.runStep` 派活时 `setSharedState` + `setCurrentWorkerName`，并把 `buildInboxBlock` 注入 worker context，使 worker 执行前能看到同事留言。
+- Dynamic Workflow（`WorkflowScript` + `WorkflowRuntime` + `WorkflowAdapters`，对标 Claude Code 2026.6 Dynamic Workflow：AI 写脚本编排 agent）：
+ - 数据结构：`WorkflowScript(goal, steps)`；步骤 sealed interface `WorkflowStep`：`TaskStep`（顺序，action=Function<SharedState,String>）/ `ParallelStep`（并行 fan-out）/ `ConditionalStep`（读黑板 condition 走 then/else）/ `LoopStep`（循环到 condition 满足或 maxIterations）。
+ - 执行器：`WorkflowRuntime.execute(script, state)` 脚本驱动；中间结果以 step id 为 key 存 `SharedState` 黑板（`putArtifactByRuntime`），不回灌 LLM context——对标"中间结果存脚本变量，主 session 只拿最终答案"，可扩到上千步不爆 context。
+ - LLM 节点胶水：`WorkflowAdapters.subAgentAction` / `fanInAction` 把 `Worker#executeWithContext` 包成 `TaskStep.action`，使节点真正调 LLM；`fanInAction` 读黑板多个 artifact → 一次 LLM 合成（scatter-gather 的 gather 端）。便捷工厂：`llmTask` / `fanInTask`。
+ - 断点续跑：`WorkflowCheckpoint` + `WorkflowCheckpointStore`；`WorkflowRuntime.withSkippedSteps` / `setCheckpointListener`；`DurableWorkflowBridge` 把 durable taskId 与 checkpoint 对齐，崩溃重入队后恢复黑板并跳过已完成步骤。`DurableTaskManager.setCompletionListener` 终态主动回推。
+ - 控制流：顺序 / 并行 / 条件 / 循环；`LoopStep` 强制 maxIterations 硬上限防死循环（对标 2026 生产硬性最佳实践）。
+ - 定位：与现有 Plan-and-Execute（静态 DAG）并存，是其"带控制流"的演进形态；TaskStep.action 可注入纯函数（单测）或 LLM 节点（生产）；实际使用时通过 WorkflowAdapters 把 SubAgent 注入。
+- A2A 跨服务 agent（`a2a/` 包，对标 Google A2A 协议：agent↔agent，与 MCP 的 agent↔tool 互补）：
+ - 发现：`AgentCard(name, description, url, skills)` 远程 agent 能力名片 + `hasSkill` 能力匹配。
+ - 客户端：`A2AClient` JSON-RPC 2.0 over HTTP，`sendTask` / `getTask` / `executeAndWait`（轮询到终态，2 分钟硬上限防无限等待）；传输层 `HttpTransport` 可注入，生产用 `JavaNetHttpTransport`，测试用 mock。
+ - 适配：`RemoteAgent` 包装 A2A 远程 agent 为本地可调用 worker，提供与 `SubAgent` 同签名的 `executeWithContext`，远程失败返回 `AgentMessage.error`。
+ - 混编：`Worker` 接口让 `SubAgent` + `RemoteAgent` 共同实现；`MixedWorkerPool` 统一调度本地+远程 worker（名指派优先 / 游标轮询回退，与 orchestrator.pickWorker 对齐）。
+ - 定位：本轮交付 A2A 客户端层 + 混编池（独立可测）；orchestrator worker 池从 `List<SubAgent>` 迁移到 `List<Worker>` 留作后续集成。
 
 ## 关键行为约束（Agent 必读）
 
@@ -232,10 +279,19 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
+| Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
+| Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |
 | TUI/终端 | `mvn test -Pphase16-smoke` |
 | RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest` |
 | Agent 记忆 | `mvn test -Dtest=AgentMemoryEntryTest,MemoryQueryModelsTest,SqliteAgentMemoryStoreTest,MemoryMaintenanceSchedulerTest,LongTermMemoryMigratorTest` |
 | 会话历史检索 | `mvn test -Dtest=SessionMessageModelsTest,SqliteSessionMessageStoreTest,SessionMessageIndexerTest` |
+| ReAct 轻量规划 | `mvn test -Dtest=PlanStoreTest,UpdatePlanToolTest,AgentUpdatePlanIntegrationTest` |
+| ReAct 工具失败反思 | `mvn test -Dtest=ReflectionServiceTest,AgentReflectionIntegrationTest` |
+| Multi-Agent 共享黑板 | `mvn test -Dtest=SharedStateTest,AgentSharedStateIntegrationTest` |
+| Multi-Agent p2p 留言 | `mvn test -Dtest=AskPeerToolTest,SharedStateTest` |
+| Dynamic Workflow | `mvn test -Dtest=WorkflowRuntimeTest,WorkflowLlmNodeTest` |
+| Durable Workflow 断点续跑 | `mvn test -Dtest=DurableWorkflowResumeTest,DurableTaskManagerTest` |
+| A2A 跨服务 agent | `mvn test -Dtest=AgentCardTest,A2AClientTest,RemoteAgentTest,MixedWorkerPoolTest` |
 | 可插拔后端 | `mvn test -Dtest=MemoryStoreFactoryTest,PostgresMemoryStoresTest` |
 | 常规回归 | `mvn test -Pquick` |
 
@@ -247,7 +303,10 @@ src/main/java/com/bettercli/
 |----------|------|
 | CLI 命令 | Main.java + CliCommandParser.java |
 | 规划/DAG | PlanExecuteAgent.java + Planner.java + ExecutionPlan.java |
+| 迭代规划 | docs/iteration-roadmap.md（多 LLM 协作深化 → 异步跨端运行时主线，求职项目方向；上下文压缩后找回规划的权威来源） |
 | 工具调用 | ToolRegistry.java + Agent.java |
+| ReAct 轻量规划 | agent/PlanStore.java + agent/ReActPlan.java + ToolRegistry.java (`update_plan`) |
+| ReAct 工具失败反思 | agent/ReflectionService.java + Agent.java (`maybeInjectReflection`) |
 | 代码搜索 | ToolRegistry.java (`glob_files` / `grep_code` / `read_file`) |
 | 模型/API | llm/*Client.java + LlmClientFactory.java |
 | RAG 语义辅助 | CodeRetriever.java + CodeIndex.java + VectorStore.java |
@@ -255,6 +314,12 @@ src/main/java/com/bettercli/
 | 会话历史检索 | memory/SessionMessageStore.java + SqliteSessionMessageStore.java + SessionMessageIndexer.java |
 | 可插拔后端 | memory/MemoryStoreFactory.java + PostgresAgentMemoryStore.java + PostgresSessionMessageStore.java + MemoryMigrator.java |
 | Multi-Agent | AgentOrchestrator.java + SubAgent.java |
+| Multi-Agent 动态重规划 | AgentOrchestrator.java（`triggerReplan` / `StepOutcome`） |
+| Multi-Agent Scatter-Gather | agent/ScatterGather.java + WorkflowAdapters.fanInTask |
+| Multi-Agent 共享黑板 | agent/SharedState.java + AgentOrchestrator.java (`buildStepContext` / `pickWorker` / 产物双写) |
+| Dynamic Workflow | agent/WorkflowScript.java + WorkflowStep.java + WorkflowRuntime.java + WorkflowAdapters.java |
+| Durable Workflow 断点续跑 | agent/DurableWorkflowBridge.java + WorkflowCheckpointStore + runtime/task/DurableTaskManager |
+| A2A 跨服务 agent | a2a/AgentCard.java + A2AClient.java + RemoteAgent.java + agent/Worker.java + agent/MixedWorkerPool.java |
 | MCP | McpServerManager.java + McpClient.java |
 | TUI/渲染 | render/Renderer.java + RendererFactory.java |
 

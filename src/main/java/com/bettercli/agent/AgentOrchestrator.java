@@ -44,6 +44,11 @@ public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int MAX_RETRIES_PER_STEP = 2;
+    /**
+     * 单次 run 内允许的动态重规划次数上限（防 replan 风暴）。
+     * 触发条件克制：仅在 step 执行失败（FAILED）或重试耗尽仍未通过审查（EXHAUSTED）时回调 planner。
+     */
+    private static final int MAX_REPLAN_PER_RUN = 2;
 
     private final LlmClient llmClient;
     private SubAgent planner;
@@ -57,6 +62,9 @@ public class AgentOrchestrator {
     private com.bettercli.skill.SkillRegistry skillRegistry;
     private com.bettercli.skill.SkillContextBuffer skillContextBuffer;
     private List<String> workerSpecialties;
+    // Multi-Agent 共享黑板（对标 2026 Blackboard 架构）。每次 run() 重建；
+    // worker/reviewer 产物双写进黑板，routing 决策入审计。供测试断言与后续 p2p/workflow 阶段复用。
+    private SharedState sharedState;
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -82,6 +90,36 @@ public class AgentOrchestrator {
 
     enum StepStatus {
         PENDING, RUNNING, COMPLETED, FAILED
+    }
+
+    /**
+     * 单步执行结局，供主循环判断是否触发动态重规划。
+     * <ul>
+     *   <li>{@link #COMPLETED}  - 审查通过（含重试后通过），或审查 LLM 调用失败时保留结果（现有兜底行为）</li>
+     *   <li>{@link #FAILED}     - Worker 执行 LLM 出错 / 结果为空 / 用户取消（前置失败类，下游依赖会被卡）</li>
+     *   <li>{@link #EXHAUSTED}  - 重试耗尽 {@link #MAX_RETRIES_PER_STEP} 次仍未通过审查（审查连续拒绝类）</li>
+     * </ul>
+     * 后两类是动态重规划的触发条件。
+     */
+    enum StepOutcome {
+        COMPLETED, FAILED, EXHAUSTED;
+
+        boolean shouldTriggerReplan() {
+            return this == FAILED || this == EXHAUSTED;
+        }
+    }
+
+    /**
+     * {@link #runStep} 的返回值：结局 + 失败原因（供 replan prompt 使用）。
+     */
+    record StepRunResult(StepOutcome outcome, String failureReason) {
+        static StepRunResult completed() {
+            return new StepRunResult(StepOutcome.COMPLETED, null);
+        }
+
+        static StepRunResult of(StepOutcome outcome, String failureReason) {
+            return new StepRunResult(outcome, failureReason);
+        }
     }
 
     public AgentOrchestrator(LlmClient llmClient) {
@@ -233,6 +271,9 @@ public class AgentOrchestrator {
      */
     public String run(String userInput) {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        // 每次运行重建共享黑板（对标 2026 Blackboard：显式共享状态 + routing 审计）
+        this.sharedState = new SharedState();
+        this.sharedState.setGoal(userInput, null);
         memoryManager.addUserMessage(userInput);
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
@@ -245,75 +286,114 @@ public class AgentOrchestrator {
         AgentMessage planMessage = AgentMessage.task("orchestrator",
                 "请为以下任务制定执行计划：\n" + userInput);
         AgentMessage planResult = planner.execute(planMessage, out);
-        planner.clearHistory();
-        if (CancellationContext.isCancelled()) {
-            return "⏹️ 已取消当前多 Agent 任务。";
-        }
-
-        if (planResult.type() == AgentMessage.Type.ERROR) {
-            return "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
-        }
-        if (planResult.content() == null || planResult.content().isBlank()) {
-            return "❌ 规划失败：规划者未能生成有效计划";
-        }
-
-        // 2. 解析计划
-        List<ExecutionStep> steps = parsePlan(planResult.content());
-        if (steps.isEmpty()) {
-            return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
-        }
-
-        out.println(AnsiStyle.heading("📋 执行计划"));
-        out.println(summarizeSteps(steps) + "\n");
-
-        // 3. 执行阶段：按依赖顺序分配给执行者
-        out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
-        Map<String, Integer> retryCount = new ConcurrentHashMap<>();
-        int singleStepCursor = 0;
-        int batchIndex = 0;
-
-        while (true) {
+        try {
+            // 不在此处 clearHistory：保留 planner 对话历史，供执行阶段动态重规划（replan）复用上下文。
+            // 本 try 的 finally 统一清理，避免跨 run 污染。
             if (CancellationContext.isCancelled()) {
                 return "⏹️ 已取消当前多 Agent 任务。";
             }
-            List<ExecutionStep> executable = getExecutableSteps(steps);
-            if (executable.isEmpty()) {
-                break;
-            }
-            batchIndex++;
 
-            if (executable.size() == 1) {
-                // 单步批次：直接串行流式输出，保持实时打字观感
-                ExecutionStep step = executable.get(0);
-                SubAgent worker = pickWorker(step, singleStepCursor);
-                if (step.assignee() != null && worker != null && worker.getName().equals(step.assignee())) {
-                    out.println("🎯 步骤 [" + step.id() + "] 由 " + step.assignee() + " 执行（规划者指派）");
+            if (planResult.type() == AgentMessage.Type.ERROR) {
+                return "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
+            }
+            if (planResult.content() == null || planResult.content().isBlank()) {
+                return "❌ 规划失败：规划者未能生成有效计划";
+            }
+            // planner 产物写入黑板（所有权：PLANNER）
+            this.sharedState.setPlan(planResult.content(), AgentRole.PLANNER);
+
+            // 2. 解析计划
+            List<ExecutionStep> steps = parsePlan(planResult.content());
+            if (steps.isEmpty()) {
+                return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
+            }
+
+            out.println(AnsiStyle.heading("📋 执行计划"));
+            out.println(summarizeSteps(steps) + "\n");
+
+            // 3. 执行阶段：按依赖顺序分配给执行者
+            out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
+            Map<String, Integer> retryCount = new ConcurrentHashMap<>();
+            int singleStepCursor = 0;
+            int batchIndex = 0;
+            int replanCount = 0;
+
+            while (true) {
+                if (CancellationContext.isCancelled()) {
+                    return "⏹️ 已取消当前多 Agent 任务。";
                 }
-                singleStepCursor++;
-                String context = buildStepContext(steps, step);
-                runStep(step, steps, retryCount, worker, reviewer, context, out);
-                // 持久记忆：不再每步 clearHistory，让 Worker 记得自己干过什么；
-                // 上下文超 window 时由 SubAgent.maybeCompactHistory 自动压缩早期消息。
-            } else {
-                // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
-                out.println("⚡ 批次 #" + batchIndex + "：" + executable.size()
-                        + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
-                runBatchParallel(executable, steps, retryCount);
+                List<ExecutionStep> executable = getExecutableSteps(steps);
+                if (executable.isEmpty()) {
+                    break;
+                }
+                batchIndex++;
+
+                StepRunResult replanTrigger = null;   // 本批次首个可触发 replan 的结局
+                String replanAnchorStepId = null;    // 对应的失败 step id（replan 锚点）
+
+                if (executable.size() == 1) {
+                    // 单步批次：直接串行流式输出，保持实时打字观感
+                    ExecutionStep step = executable.get(0);
+                    SubAgent worker = pickWorker(step, singleStepCursor);
+                    if (step.assignee() != null && worker != null && worker.getName().equals(step.assignee())) {
+                        out.println("🎯 步骤 [" + step.id() + "] 由 " + step.assignee() + " 执行（规划者指派）");
+                    }
+                    singleStepCursor++;
+                    String context = buildStepContext(steps, step);
+                    StepRunResult rr = runStep(step, steps, retryCount, worker, reviewer, context, out);
+                    // 持久记忆：不再每步 clearHistory，让 Worker 记得自己干过什么；
+                    // 上下文超 window 时由 SubAgent.maybeCompactHistory 自动压缩早期消息。
+                    if (rr.outcome().shouldTriggerReplan()) {
+                        replanTrigger = rr;
+                        replanAnchorStepId = step.id();
+                    }
+                } else {
+                    // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
+                    out.println("⚡ 批次 #" + batchIndex + "：" + executable.size()
+                            + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
+                    Map<String, StepRunResult> outcomes = runBatchParallel(executable, steps, retryCount);
+                    // 并行批次：取首个（按 step_id 顺序）可触发 replan 的结局作为重规划锚点
+                    for (ExecutionStep step : executable) {
+                        StepRunResult rr = outcomes.get(step.id());
+                        if (rr != null && rr.outcome().shouldTriggerReplan()) {
+                            replanTrigger = rr;
+                            replanAnchorStepId = step.id();
+                            break;
+                        }
+                    }
+                }
+
+                // 动态重规划：当某 step 执行失败（FAILED）或重试耗尽仍未通过审查（EXHAUSTED），
+                // 且回调次数未超 MAX_REPLAN_PER_RUN 时，让 planner 基于已完成步骤 + 失败原因
+                // 重新规划剩余步骤，替换当前 PENDING/FAILED 步骤，重新进入主循环。
+                if (replanTrigger != null && replanCount < MAX_REPLAN_PER_RUN) {
+                    replanCount++;
+                    List<ExecutionStep> replanned = triggerReplan(steps, replanAnchorStepId,
+                            replanTrigger.failureReason(), replanCount);
+                    if (replanned != null) {
+                        steps = replanned;
+                    }
+                    // replan 后继续主循环，重新计算可执行步骤
+                }
             }
-        }
 
-        // 5. 处理因前置失败而无法执行的残留步骤（显式提示用户）
-        for (ExecutionStep step : steps) {
-            if (step.status() == StepStatus.PENDING) {
-                out.println("⏭️ 步骤 [" + step.id() + "] 因前置步骤失败被跳过: " + step.description());
+            // 5. 处理因前置失败而无法执行的残留步骤（显式提示用户）
+            for (ExecutionStep step : steps) {
+                if (step.status() == StepStatus.PENDING) {
+                    out.println("⏭️ 步骤 [" + step.id() + "] 因前置步骤失败被跳过: " + step.description());
+                }
             }
+
+            // 6. 汇总结果
+            String finalResult = buildFinalResult(steps);
+            memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
+
+            return finalResult;
+        } finally {
+            // 统一清理 planner 对话历史：执行阶段可能因 replan 多次复用 planner 上下文，
+            // run 结束后清空（保留系统提示词），避免下次 run 带入上次规划历史。
+            planner.clearHistory();
         }
-
-        // 6. 汇总结果
-        String finalResult = buildFinalResult(steps);
-        memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
-
-        return finalResult;
     }
 
     /**
@@ -401,13 +481,25 @@ public class AgentOrchestrator {
 
     /**
      * 串行单步路由：若规划者指定了 assignee 且该 worker 存在，就用它；否则按游标轮询。
+     * 路由决策写入共享黑板 routingLog（对标 2026 routing 审计）。
      */
     private SubAgent pickWorker(ExecutionStep step, int singleStepCursor) {
         SubAgent named = findWorker(step.assignee());
+        SubAgent picked;
+        String reason;
         if (named != null) {
-            return named;
+            picked = named;
+            reason = "规划者指派 " + step.assignee();
+        } else {
+            picked = workers.get(singleStepCursor % workers.size());
+            reason = step.assignee() != null
+                    ? "规划者指派的 " + step.assignee() + " 不存在，回退轮询"
+                    : "未指派，按游标轮询";
         }
-        return workers.get(singleStepCursor % workers.size());
+        if (sharedState != null) {
+            sharedState.recordRouting(step.id(), picked.getName(), reason);
+        }
+        return picked;
     }
 
     /**
@@ -558,6 +650,14 @@ public class AgentOrchestrator {
         return toolRegistry;
     }
 
+    /**
+     * 获取当前 run 的共享黑板（Blackboard）。run() 之前或之后返回的实例可能为 null 或已结束态；
+     * 主要供测试断言 routing 决策与 artifacts，以及后续 p2p/workflow 阶段复用。
+     */
+    public SharedState getSharedState() {
+        return sharedState;
+    }
+
     private synchronized void updateStep(List<ExecutionStep> steps, String stepId, ExecutionStep updated) {
         for (int i = 0; i < steps.size(); i++) {
             if (steps.get(i).id().equals(stepId)) {
@@ -572,9 +672,11 @@ public class AgentOrchestrator {
      *
      * 每个步骤获取一个 Worker（池化，避免同一 Worker 被两个步骤并发占用），同时创建独立的 Reviewer 实例，
      * 流式输出写入步骤本地的 ByteArrayOutputStream；所有任务完成后按 step_id 顺序将缓冲区 flush 到 stdout。
+     *
+     * @return 各 step id 到其 {@link StepRunResult} 的映射，供主循环判断是否触发动态重规划。
      */
-    private void runBatchParallel(List<ExecutionStep> batch, List<ExecutionStep> steps,
-                                  Map<String, Integer> retryCount) {
+    private Map<String, StepRunResult> runBatchParallel(List<ExecutionStep> batch, List<ExecutionStep> steps,
+                                                          Map<String, Integer> retryCount) {
         int parallelism = Math.min(batch.size(), workers.size());
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread t = new Thread(r, "bettercli-multi-agent");
@@ -583,6 +685,7 @@ public class AgentOrchestrator {
         });
         BlockingQueue<SubAgent> workerPool = new LinkedBlockingQueue<>(workers);
         Map<String, ByteArrayOutputStream> buffers = new ConcurrentHashMap<>();
+        Map<String, StepRunResult> outcomes = new ConcurrentHashMap<>();
         List<Future<?>> futures = new ArrayList<>();
 
         for (ExecutionStep step : batch) {
@@ -601,15 +704,23 @@ public class AgentOrchestrator {
                     if (step.assignee() != null && worker != null && worker.getName().equals(step.assignee())) {
                         stepOut.println("🎯 步骤 [" + step.id() + "] 由 " + step.assignee() + " 执行（规划者指派）\n");
                     }
-                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut);
+                    if (sharedState != null && worker != null) {
+                        sharedState.recordRouting(step.id(), worker.getName(), "并行批次派活");
+                    }
+                    StepRunResult rr = runStep(step, steps, retryCount, worker, localReviewer, context, stepOut);
+                    outcomes.put(step.id(), rr);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
                     stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
+                    outcomes.put(step.id(), StepRunResult.of(StepOutcome.FAILED,
+                            "步骤 [" + step.id() + "] 并行执行被中断"));
                 } catch (RuntimeException e) {
                     log.error("Parallel step {} failed unexpectedly", step.id(), e);
                     updateStep(steps, step.id(), step.withFailed("并行执行异常: " + e.getMessage()));
                     stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
+                    outcomes.put(step.id(), StepRunResult.of(StepOutcome.FAILED,
+                            "步骤 [" + step.id() + "] 并行执行异常: " + e.getMessage()));
                 } finally {
                     if (worker != null) {
                         // 持久记忆：不 clearHistory，Worker 跨步骤保留对话历史
@@ -641,52 +752,84 @@ public class AgentOrchestrator {
                 out.flush();
             }
         }
+        return outcomes;
     }
 
     /**
      * 执行单个步骤（Worker 执行 + Reviewer 审查 + 最多 2 次重试）。
      *
      * 此方法被串行和并行两条路径共享，通过 {@code out} 控制流式输出目的地。
+     *
+     * @return {@link StepRunResult}：结局 + 失败原因。FAILED（Worker 出错/空/取消）与
+     *         EXHAUSTED（重试耗尽未通过审查）两类结局会触发主循环的动态重规划；COMPLETED 不触发。
      */
-    private void runStep(ExecutionStep step, List<ExecutionStep> steps,
-                         Map<String, Integer> retryCount,
-                         SubAgent worker, SubAgent reviewer, String context,
-                         PrintStream out) {
+    private StepRunResult runStep(ExecutionStep step, List<ExecutionStep> steps,
+                                  Map<String, Integer> retryCount,
+                                  SubAgent worker, SubAgent reviewer, String context,
+                                  PrintStream out) {
+        // 注入共享黑板 + 当前 worker 名，使该 worker 的 ask_peer 工具可用（阶段D p2p）
+        toolRegistry.setSharedState(this.sharedState);
+        toolRegistry.setCurrentWorkerName(worker.getName());
+        // 把发给该 worker 的 peer 留言注入 context（对标 agent teams 共享消息）
+        String inboxBlock = buildInboxBlock(worker.getName());
+        String fullContext = inboxBlock.isEmpty() ? context : context + "\n" + inboxBlock;
         out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
-            return;
+            // 取消不触发 replan：主循环顶部会捕获取消状态并退出整个 run
+            return StepRunResult.completed();
         }
 
         AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = worker.executeWithContext(taskMsg, context, out);
+        AgentMessage result = worker.executeWithContext(taskMsg, fullContext, out);
+        SubAgentResult workerEnvelope = worker.lastRunResult();
+        if (workerEnvelope != null) {
+            out.println(workerEnvelope.oneLineSummary());
+        }
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
-            return;
+            // 取消不触发 replan：主循环顶部会捕获取消状态并退出整个 run
+            return StepRunResult.completed();
         }
 
         if (result.type() == AgentMessage.Type.ERROR) {
             updateStep(steps, step.id(), step.withFailed(result.content()));
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：" + result.content() + "\n");
-            return;
+            return StepRunResult.of(StepOutcome.FAILED,
+                    "步骤 [" + step.id() + "] Worker 执行失败：" + result.content());
         }
         if (result.content() == null || result.content().isBlank()) {
             updateStep(steps, step.id(), step.withFailed("执行结果为空"));
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：结果为空\n");
-            return;
+            return StepRunResult.of(StepOutcome.FAILED,
+                    "步骤 [" + step.id() + "] Worker 执行结果为空");
+        }
+        // worker 产物写入共享黑板（所有权：WORKER）。双写：step.result() 仍保留供旧路径，
+        // 黑板成为后续 p2p/workflow 阶段的权威共享源。
+        if (sharedState != null) {
+            sharedState.putArtifact(step.id(), result.content(), AgentRole.WORKER);
         }
 
         out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
-        AgentMessage reviewResult = reviewer.review(step.description(), result.content(), out);
+        if (workerEnvelope != null && workerEnvelope.needsAdversarialVerification()) {
+            out.println("   ⚠️ 低置信度或涉及文件改动，审查者将实际核实 artifacts（对抗式验证）");
+        }
+        AgentMessage reviewResult = reviewer.reviewWithRubric(step.description(),
+                workerEnvelope != null ? workerEnvelope : emptyEnvelope(result.content()), out);
         reviewer.clearHistory();
+        // reviewer 反馈写入共享黑板（所有权：REVIEWER），供审计与后续 p2p 阶段复用。
+        if (sharedState != null && reviewResult.content() != null) {
+            sharedState.putReview(step.id(), reviewResult.content(), AgentRole.REVIEWER);
+        }
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
             log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
             out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
             updateStep(steps, step.id(), step.withResult(result.content()));
-            return;
+            // 审查基础设施失败（非 Worker 责任）：保留结果，不触发 replan
+            return StepRunResult.completed();
         }
 
         boolean approved = parseReviewApproval(reviewResult.content());
@@ -695,21 +838,36 @@ public class AgentOrchestrator {
         if (approved) {
             updateStep(steps, step.id(), step.withResult(acceptedResult));
             out.println("✅ 步骤 [" + step.id() + "] 审查通过\n");
-            return;
+            return StepRunResult.completed();
         }
 
         int retries = retryCount.getOrDefault(step.id(), 0);
         String issues = parseReviewIssues(reviewResult.content());
+        String previousIssues = null;
         log.info("Step {} rejected (retry {}/{}): {}", step.id(), retries, MAX_RETRIES_PER_STEP, issues);
 
         while (!approved && retries < MAX_RETRIES_PER_STEP) {
+            // 收敛：本轮 issues 与上轮实质相同，或审查显式 converged → 停止辩论，保留当前结果
+            if (ReflectionService.isDebateConverged(reviewResult.content(), previousIssues)) {
+                out.println("🤝 步骤 [" + step.id() + "] 辩论已收敛，保留当前结果\n");
+                updateStep(steps, step.id(), step.withResult(acceptedResult));
+                return StepRunResult.completed();
+            }
+            previousIssues = issues;
+
             retries++;
             retryCount.put(step.id(), retries);
-            out.println("⚠️ 步骤 [" + step.id() + "] 审查未通过，正在重新执行...");
+            out.println("⚠️ 步骤 [" + step.id() + "] 审查未通过，增量辩论第 " + retries + " 轮...");
             out.println("   反馈: " + issues + "\n");
 
-            String feedbackContext = context + "\n\n之前的执行结果被审查拒绝，原因：\n" + issues;
+            // 增量辩论：只改审查指出的点，不从头重做（对标阶段 2 反思循环收敛）
+            String feedbackContext = ReflectionService.buildIncrementalDebateContext(
+                    fullContext, acceptedResult, issues, retries);
             AgentMessage retryResult = worker.executeWithContext(taskMsg, feedbackContext, out);
+            SubAgentResult retryEnvelope = worker.lastRunResult();
+            if (retryEnvelope != null) {
+                out.println(retryEnvelope.oneLineSummary());
+            }
             if (retryResult.type() == AgentMessage.Type.ERROR) {
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();
@@ -725,8 +883,17 @@ public class AgentOrchestrator {
             }
 
             acceptedResult = retryResult.content();
-            AgentMessage retryReview = reviewer.review(step.description(), acceptedResult, out);
+            // 重试产物覆盖黑板 artifact（最新一次有效执行）
+            if (sharedState != null) {
+                sharedState.putArtifact(step.id(), acceptedResult, AgentRole.WORKER);
+            }
+            AgentMessage retryReview = reviewer.reviewWithRubric(step.description(),
+                    retryEnvelope != null ? retryEnvelope : emptyEnvelope(acceptedResult), out);
             reviewer.clearHistory();
+            // 重试 review 覆盖黑板（最新一次审查反馈）
+            if (sharedState != null && retryReview.content() != null) {
+                sharedState.putReview(step.id(), retryReview.content(), AgentRole.REVIEWER);
+            }
 
             if (retryReview.type() == AgentMessage.Type.ERROR) {
                 log.warn("Reviewer failed for step {} retry {}: {}", step.id(), retries, retryReview.content());
@@ -735,16 +902,135 @@ public class AgentOrchestrator {
                 break;
             }
 
+            reviewResult = retryReview;
             approved = parseReviewApproval(retryReview.content());
             issues = parseReviewIssues(retryReview.content());
+        }
+
+        // 循环结束后再判一次收敛（最后一轮审查可能刚给出相同 issues）
+        if (!approved && ReflectionService.isDebateConverged(reviewResult.content(), previousIssues)) {
+            out.println("🤝 步骤 [" + step.id() + "] 辩论已收敛，保留当前结果\n");
+            updateStep(steps, step.id(), step.withResult(acceptedResult));
+            return StepRunResult.completed();
         }
 
         updateStep(steps, step.id(), step.withResult(acceptedResult));
         if (approved) {
             out.println("✅ 步骤 [" + step.id() + "] 重试后审查通过\n");
+            return StepRunResult.completed();
         } else {
-            out.println("⚠️ 步骤 [" + step.id() + "] 超过最大重试次数，保留当前结果\n");
+            String reason = "步骤 [" + step.id() + "] 经 " + MAX_RETRIES_PER_STEP
+                    + " 次增量辩论仍未通过审查：" + issues;
+            out.println("⚠️ " + reason + "，保留当前结果\n");
+            return StepRunResult.of(StepOutcome.EXHAUSTED, reason);
         }
+    }
+
+    /**
+     * 动态重规划：当某 step 执行失败（FAILED）或重试耗尽仍未通过审查（EXHAUSTED）时，
+     * 让 planner 基于已完成步骤 + 失败原因重新规划剩余步骤。
+     *
+     * <p>合并策略：
+     * <ul>
+     *   <li>保留所有 {@link StepStatus#COMPLETED} 步骤（已完成，不重复执行）</li>
+     *   <li>丢弃所有 {@link StepStatus#FAILED} / {@link StepStatus#PENDING} 步骤（失败或被卡住的剩余步骤）</li>
+     *   <li>追加新计划步骤，id 加 {@code r<replanCount>_} 前缀避免与原 id 冲突；
+     *       新计划内部依赖同步重映射，保证 {@link #getExecutableSteps} 能正确解析</li>
+     * </ul>
+     *
+     * <p>新计划不显式依赖原已完成步骤的 id（planner 不知道原 id），但 replan prompt 已告知 planner
+     * 哪些步骤完成及其结果摘要，由 planner 在新计划中自行引用必要信息。
+     *
+     * @param steps          当前步骤列表（含已完成 / 失败 / 待执行）
+     * @param failedStepId   触发 replan 的失败步骤 id（写入 prompt 供 planner 定位问题）
+     * @param failureReason  失败原因（FAILED / EXHAUSTED 的具体描述）
+     * @param replanCount    本次 replan 的序号（用于 id 前缀，1-based）
+     * @return 合并后的新步骤列表；若 replan LLM 调用失败或输出无法解析，返回 {@code null}（主循环保留原计划继续）
+     */
+    private List<ExecutionStep> triggerReplan(List<ExecutionStep> steps, String failedStepId,
+                                              String failureReason, int replanCount) {
+        out.println(AnsiStyle.heading("🔄 动态重规划（第 " + replanCount + "/" + MAX_REPLAN_PER_RUN + " 次）"));
+        out.println("   触发原因：" + failureReason + "\n");
+
+        StringBuilder replanPrompt = new StringBuilder();
+        replanPrompt.append("之前的执行计划在执行中遇到问题，需要重新规划剩余步骤。\n\n");
+        replanPrompt.append("原始任务：").append(sharedState.getGoal()).append("\n\n");
+        replanPrompt.append("失败原因：").append(failureReason).append("\n");
+        replanPrompt.append("失败的步骤：[").append(failedStepId).append("]\n\n");
+        replanPrompt.append("已成功完成的步骤（不要重复执行，可在新计划中引用其结果）：\n");
+        boolean anyCompleted = false;
+        for (ExecutionStep s : steps) {
+            if (s.status() == StepStatus.COMPLETED) {
+                anyCompleted = true;
+                replanPrompt.append("- [").append(s.id()).append("] ").append(s.description());
+                String r = s.result();
+                if (r != null && !r.isBlank()) {
+                    String preview = r.length() > 200 ? r.substring(0, 200) + "..." : r;
+                    replanPrompt.append("（结果摘要：").append(preview).append("）");
+                }
+                replanPrompt.append("\n");
+            }
+        }
+        if (!anyCompleted) {
+            replanPrompt.append("（无）\n");
+        }
+        replanPrompt.append("\n请制定新的执行计划，避开之前的问题，不要重复已完成的步骤。")
+                .append("输出 JSON 格式，包含 steps 数组，每个 step 有 id/description/type/dependencies 字段。");
+
+        AgentMessage replanMsg = AgentMessage.task("orchestrator", replanPrompt.toString());
+        AgentMessage replanResult = planner.execute(replanMsg, out);
+        // 不 clearHistory：保留 planner 历史，供后续 replan 继续复用上下文（run 结束时统一清理）
+
+        if (replanResult.type() == AgentMessage.Type.ERROR
+                || replanResult.content() == null || replanResult.content().isBlank()) {
+            out.println("⚠️ 重规划 LLM 调用失败或输出为空，保留原计划继续执行\n");
+            return null;
+        }
+        // replan 产物覆盖黑板 plan（所有权：PLANNER）
+        this.sharedState.setPlan(replanResult.content(), AgentRole.PLANNER);
+
+        List<ExecutionStep> newSteps = parsePlan(replanResult.content());
+        if (newSteps.isEmpty()) {
+            out.println("⚠️ 重规划输出无法解析为有效计划，保留原计划继续执行\n");
+            return null;
+        }
+
+        // 合并：保留已完成步骤 + 重命名后的新计划步骤
+        String prefix = "r" + replanCount + "_";
+        Map<String, String> idMap = new HashMap<>();
+        for (ExecutionStep ns : newSteps) {
+            idMap.put(ns.id(), prefix + ns.id());
+        }
+        // 保留已完成步骤，但排除触发 replan 的锚点（EXHAUSTED 路径用 withResult 标成 COMPLETED，
+        // 其结果已被审查拒绝，不应作为「已成功」保留；FAILED 路径本就不会进入 COMPLETED）。
+        List<ExecutionStep> merged = new ArrayList<>();
+        for (ExecutionStep s : steps) {
+            if (s.status() == StepStatus.COMPLETED && !s.id().equals(failedStepId)) {
+                merged.add(s);
+            }
+        }
+        for (ExecutionStep ns : newSteps) {
+            String newId = idMap.get(ns.id());
+            List<String> newDeps = new ArrayList<>();
+            for (String dep : ns.dependencies()) {
+                newDeps.add(idMap.getOrDefault(dep, dep));
+            }
+            merged.add(new ExecutionStep(newId, ns.description(), ns.type(), newDeps,
+                    ns.assignee(), ns.result(), ns.status()));
+        }
+
+        out.println(AnsiStyle.heading("📋 重规划后的执行计划"));
+        out.println(summarizeSteps(merged) + "\n");
+        return merged;
+    }
+
+    /**
+     * Worker 未产出信封（理论上不会发生，execute 总会 storeLastResult）时的兜底：用裸 prose 造最小信封，
+     * 让 Reviewer 的 rubric 路径始终拿到结构化输入。
+     */
+    private SubAgentResult emptyEnvelope(String summary) {
+        return new SubAgentResult("unknown", AgentRole.WORKER, summary,
+                List.of(), List.of(), 0.5, false, 0, 0, 0, false, null);
     }
 
     private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
@@ -755,10 +1041,14 @@ public class AgentOrchestrator {
             if (step.status() == StepStatus.COMPLETED && currentStep.dependencies().contains(step.id())) {
                 context.append("已完成的依赖步骤 [").append(step.id()).append("]: ")
                         .append(step.description()).append("\n");
-                if (step.result() != null && !step.result().isBlank()) {
-                    String preview = step.result().length() > 500
-                            ? step.result().substring(0, 500) + "..."
-                            : step.result();
+                // 优先从共享黑板读 artifact（对标 2026 Blackboard：显式共享状态）；
+                // 黑板未命中时回退到 step.result()，兼容旧路径。
+                String artifact = sharedState != null ? sharedState.getArtifact(step.id()) : null;
+                String source = artifact != null ? artifact : step.result();
+                if (source != null && !source.isBlank()) {
+                    String preview = source.length() > 500
+                            ? source.substring(0, 500) + "..."
+                            : source;
                     context.append("结果：").append(preview).append("\n");
                 }
                 context.append("\n");
@@ -766,6 +1056,28 @@ public class AgentOrchestrator {
         }
 
         return context.toString();
+    }
+
+    /**
+     * 构造发给该 worker 的 peer 留言块（阶段D p2p，对标 agent teams 共享消息）。
+     * 从共享黑板读 inbox（含广播），格式化为 "同事留言" 段落注入 worker context。
+     * 无留言时返回空串，不影响 context。
+     */
+    private String buildInboxBlock(String workerName) {
+        if (sharedState == null) {
+            return "";
+        }
+        List<SharedState.PeerMessage> inbox = sharedState.getInbox(workerName);
+        if (inbox.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("同事留言（peer messages）：\n");
+        for (SharedState.PeerMessage msg : inbox) {
+            String target = msg.to().isEmpty() ? "所有人" : msg.to();
+            sb.append("- 来自 ").append(msg.from()).append(" 给 ").append(target)
+                    .append("：").append(msg.content()).append("\n");
+        }
+        return sb.toString();
     }
 
     private String summarizeSteps(List<ExecutionStep> steps) {

@@ -62,6 +62,18 @@
 
 **决策**：建可运行的 benchmark 框架 + 方法论文档，用数据证明"真 Multi-Agent"在复杂任务上的价值。详见 `docs/multi-agent-ablation.md`。
 
+### 阶段 E：动态重规划 + Workflow LLM 节点（迭代路线阶段 1）
+
+**决策 1（动态重规划）**：`AgentOrchestrator` 在 step `FAILED`（Worker 出错/空结果）或 `EXHAUSTED`（审查重试耗尽）时调用 planner 重新规划。保留 `COMPLETED` 步骤，丢弃失败锚点与剩余 PENDING，新步骤 id 加 `r<n>_` 前缀。`MAX_REPLAN_PER_RUN=2` 防风暴。Planner 对话历史在整个 `run()` 内保留供 replan 复用，结束时统一 `clearHistory`。
+
+**决策 2（Workflow LLM 胶水）**：新增 `WorkflowAdapters`，把 `Worker#executeWithContext` 包成 `TaskStep.action`（`subAgentAction` / `llmTask`），以及 fan-in 汇总（`fanInAction` / `fanInTask`：读黑板多 artifact → 一次 LLM 合成）。`WorkflowRuntime` 本身仍不感知 LLM，胶水层可独立单测。
+
+**权衡**：replan 触发条件克制（仅 FAILED/EXHAUSTED，不在每次审查拒绝时立刻 replan），避免 token 爆炸；EXHAUSTED 路径仍 `withResult` 保留结果以兼容无 replan 时的旧行为，但 merge 时排除失败锚点 id。
+
+### 阶段 F：Durable checkpoint + 完成回推（迭代路线阶段 3）
+
+**决策**：`DurableWorkflowBridge` 将 durable taskId 与 `WorkflowCheckpointStore` 对齐；`WorkflowRuntime` 支持 skip + checkpoint listener；`TaskCompletionListener` 让微信/HTTP 作为终态回推插件。Side-Git 通过可选 `snapshotHook` 接入，不强制依赖快照系统启用。
+
 ## 3. 架构约束
 
 - **共享层**：`ToolRegistry` / `MemoryManager` / `AuditLog` / `SnapshotService` / MCP 状态由三条主路径共享，Multi-Agent 不另起一套。

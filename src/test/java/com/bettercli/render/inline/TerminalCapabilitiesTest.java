@@ -42,6 +42,13 @@ class TerminalCapabilitiesTest {
     }
 
     @Test
+    void windowsVtTerminalIsAnsiCapableEvenIfMisleading() {
+        Terminal terminal = Mockito.mock(Terminal.class);
+        Mockito.when(terminal.getType()).thenReturn("windows-vtp");
+        assertTrue(TerminalCapabilities.supportsAnsi(terminal));
+    }
+
+    @Test
     void xtermTerminalIsAnsiCapable() {
         Terminal terminal = Mockito.mock(Terminal.class);
         Mockito.when(terminal.getType()).thenReturn("xterm-256color");
