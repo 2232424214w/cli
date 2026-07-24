@@ -52,6 +52,19 @@ class ReflectionServiceTest {
     }
 
     @Test
+    void classifiesByStructuredToolStatus() {
+        ReflectionService s = new ReflectionService(true, 2);
+        ToolExecutionResult denied = new ToolExecutionResult(
+                "c1", "write_file", "{}", "🛡️ 策略拒绝: x", 0, false, null,
+                com.bettercli.tool.ToolStatus.policyDenied());
+        ToolExecutionResult missing = new ToolExecutionResult(
+                "c2", "read_file", "{}", "读取文件失败: no such file", 0, false, null,
+                com.bettercli.tool.ToolStatus.notFound());
+        assertEquals(ReflectionService.Outcome.REJECTED, s.classify(denied));
+        assertEquals(ReflectionService.Outcome.FAILED, s.classify(missing));
+    }
+
+    @Test
     void returnsNullWhenAllSucceedAndResetsCounter() {
         ReflectionService s = new ReflectionService(true, 2);
         assertNotNull(s.buildReflectionPrompt(

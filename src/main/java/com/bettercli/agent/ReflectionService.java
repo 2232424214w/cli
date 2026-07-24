@@ -17,8 +17,7 @@ import java.util.List;
  * 停止反思，交给 AgentBudget 的 stagnation 检测兜底。借鉴 Claude Code
  * hasAttemptedReactiveCompact 的 one-shot 思路，避免"反思→失败→反思"死循环。
  *
- * <p>失败检测基于字符串前缀 + timedOut 字段（ToolExecutionResult 无显式 error 字段），
- * 集中在本类，工具新增失败格式时同步更新 classify 前缀表。
+ * <p>失败检测优先读 ToolExecutionResult.status；无显式状态时回退字符串前缀 + timedOut。
  *
  * <p>配置：bettercli.react.reflection.enabled（默认 true）/
  *         bettercli.react.reflection.max.consecutive（默认 2）
@@ -41,26 +40,31 @@ public class ReflectionService {
         this.maxConsecutive = Math.max(1, maxConsecutive);
     }
 
-    /** 分类单个工具结果。集中所有失败前缀，工具新增失败格式时在此同步。 */
+    /** 分类单个工具结果。优先结构化 status，再回退字符串前缀。 */
     public Outcome classify(ToolExecutionResult result) {
         if (result == null) {
             return Outcome.SUCCESS;
         }
-        if (result.timedOut()) {
+        if (result.timedOut()
+                || (result.status() != null
+                && result.status().errorType() == com.bettercli.tool.ToolStatus.ErrorType.TIMEOUT)) {
             return Outcome.TIMEOUT;
         }
+        if (result.status() != null && !result.status().success()) {
+            return switch (result.status().errorType()) {
+                case POLICY_DENIED -> Outcome.REJECTED;
+                case TIMEOUT -> Outcome.TIMEOUT;
+                case OK -> Outcome.SUCCESS;
+                default -> Outcome.FAILED;
+            };
+        }
         String text = result.result() == null ? "" : result.result();
-        // 策略拒绝 / 角色权限拒绝统一归 REJECTED
         if (text.startsWith("🛡️")) {
             return Outcome.REJECTED;
         }
-        // ❌ 开头（网络拒绝 / 限流等）归 FAILED
         if (text.startsWith("❌")) {
             return Outcome.FAILED;
         }
-        // 几乎所有工具失败返回都含 "失败:" 子串（读取文件失败: / 工具执行失败: /
-        // 搜索失败: / session_search 检索失败: / *_失败: 等）。用子串匹配覆盖未来
-        // 新增工具的失败，无需逐一枚举前缀。去重"跳过"不算失败，归 SUCCESS。
         if (text.contains("失败:") || text.contains("失败 -")) {
             return Outcome.FAILED;
         }

@@ -1986,19 +1986,20 @@ public class ToolRegistry {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text(result);
+            ToolStatus inferred = ToolExecutionResult.inferStatusFromText(result, false);
+            return ToolOutput.text(result, inferred);
         } catch (PolicyException e) {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.denyByPolicy(
                         name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text("🛡️ 策略拒绝: " + e.getMessage());
+            return ToolOutput.text("🛡️ 策略拒绝: " + e.getMessage(), ToolStatus.policyDenied());
         } catch (Exception e) {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.error(
                         name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text("工具执行失败: " + e.getMessage());
+            return ToolOutput.text("工具执行失败: " + e.getMessage(), ToolStatus.executionError());
         }
     }
 
@@ -2282,16 +2283,32 @@ public class ToolRegistry {
 
     public record ToolExecutionResult(String id, String name, String argumentsJson,
                                       String result, long elapsedMillis, boolean timedOut,
-                                      List<com.bettercli.llm.LlmClient.ContentPart> imageParts) {
+                                      List<com.bettercli.llm.LlmClient.ContentPart> imageParts,
+                                      ToolStatus status) {
+        public ToolExecutionResult {
+            status = status == null ? (timedOut ? ToolStatus.timeout() : ToolStatus.ok()) : status;
+            imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
+        }
+
+        /** 兼容旧 7 字段构造（测试与调用方）。 */
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result, long elapsedMillis, boolean timedOut,
+                                   List<com.bettercli.llm.LlmClient.ContentPart> imageParts) {
+            this(id, name, argumentsJson, result, elapsedMillis, timedOut, imageParts,
+                    timedOut ? ToolStatus.timeout() : inferStatusFromText(result, timedOut));
+        }
+
         private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis) {
+            ToolOutput safe = output == null ? ToolOutput.text("") : output;
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
-                    output == null ? "" : output.text(),
+                    safe.text(),
                     elapsedMillis,
                     false,
-                    output == null ? List.of() : output.imageParts());
+                    safe.imageParts(),
+                    safe.status());
         }
 
         private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {
@@ -2299,7 +2316,8 @@ public class ToolRegistry {
         }
 
         private static ToolExecutionResult failed(ToolInvocation invocation, String message) {
-            return completed(invocation, "工具执行失败: " + message, 0);
+            return completed(invocation,
+                    ToolOutput.text("工具执行失败: " + message, ToolStatus.executionError()), 0);
         }
 
         private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds) {
@@ -2310,12 +2328,33 @@ public class ToolRegistry {
                     "工具执行超时（" + timeoutSeconds + "秒），已取消",
                     timeoutSeconds * 1000,
                     true,
-                    List.of()
+                    List.of(),
+                    ToolStatus.timeout()
             );
         }
 
         public boolean hasImageParts() {
             return imageParts != null && !imageParts.isEmpty();
+        }
+
+        /** 从历史字符串前缀推断状态（无显式 status 的旧路径）。 */
+        static ToolStatus inferStatusFromText(String text, boolean timedOut) {
+            if (timedOut) {
+                return ToolStatus.timeout();
+            }
+            if (text == null || text.isBlank()) {
+                return ToolStatus.ok();
+            }
+            if (text.startsWith("🛡️")) {
+                return ToolStatus.policyDenied();
+            }
+            if (text.contains("不存在") || text.contains("未找到") || text.contains("找不到")) {
+                return ToolStatus.notFound();
+            }
+            if (text.contains("失败:") || text.contains("失败 -") || text.startsWith("❌")) {
+                return ToolStatus.executionError();
+            }
+            return ToolStatus.ok();
         }
     }
 
