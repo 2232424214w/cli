@@ -774,7 +774,14 @@ public class AgentOrchestrator {
         toolRegistry.setCurrentWorkerName(worker.getName());
         // 把发给该 worker 的 peer 留言注入 context（对标 agent teams 共享消息）
         String inboxBlock = buildInboxBlock(worker.getName());
-        String fullContext = inboxBlock.isEmpty() ? context : context + "\n" + inboxBlock;
+        String typeSpecialty = WorkerTaskSpecialty.promptFor(step.type());
+        String fullContext = context;
+        if (!inboxBlock.isEmpty()) {
+            fullContext = fullContext + "\n" + inboxBlock;
+        }
+        if (!typeSpecialty.isBlank()) {
+            fullContext = fullContext + "\n" + typeSpecialty;
+        }
         out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
