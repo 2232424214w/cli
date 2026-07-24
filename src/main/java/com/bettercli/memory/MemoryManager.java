@@ -51,6 +51,33 @@ public class MemoryManager {
         this.retriever = new MemoryRetriever(shortTermMemory, this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.currentProject = defaultProjectKey();
+        maybeEnableSemanticRetrieval();
+    }
+
+    /**
+     * 长期记忆语义检索：默认开启（embedding 失败自动回退关键词）。
+     * 可用 {@code bettercli.memory.semantic.enabled=false} / {@code BETTERCLI_MEMORY_SEMANTIC=false} 关闭。
+     */
+    private void maybeEnableSemanticRetrieval() {
+        String prop = System.getProperty("bettercli.memory.semantic.enabled");
+        String env = System.getenv("BETTERCLI_MEMORY_SEMANTIC");
+        String raw = prop != null ? prop : env;
+        boolean enabled = raw == null || !raw.equalsIgnoreCase("false");
+        if (!enabled) {
+            return;
+        }
+        try {
+            MemoryVectorIndex index = new MemoryVectorIndex(new com.bettercli.rag.EmbeddingClient());
+            retriever.setVectorIndex(index);
+            log.info("长期记忆语义检索已启用（embedding 失败时回退关键词）");
+        } catch (Exception e) {
+            log.warn("无法初始化记忆语义索引，使用关键词检索: {}", e.toString());
+        }
+    }
+
+    /** 测试 / 注入用：自定义 embedder（如 stub） */
+    public void setMemoryVectorIndex(MemoryVectorIndex index) {
+        retriever.setVectorIndex(index);
     }
 
     public void setLlmClient(LlmClient llmClient) {
@@ -143,6 +170,10 @@ public class MemoryManager {
                 MemoryEntry.estimateTokens(fact)
         );
         longTermMemory.store(entry);
+        MemoryVectorIndex index = retriever.getVectorIndex();
+        if (index != null) {
+            index.invalidate(entry.getId());
+        }
     }
 
     /**
@@ -161,7 +192,12 @@ public class MemoryManager {
     }
 
     public boolean deleteLongTerm(String id) {
-        return longTermMemory.delete(id);
+        boolean deleted = longTermMemory.delete(id);
+        MemoryVectorIndex index = retriever.getVectorIndex();
+        if (deleted && index != null) {
+            index.invalidate(id);
+        }
+        return deleted;
     }
 
     /**
@@ -216,6 +252,10 @@ public class MemoryManager {
      */
     public void clearLongTerm() {
         longTermMemory.clear();
+        MemoryVectorIndex index = retriever.getVectorIndex();
+        if (index != null) {
+            index.clear();
+        }
     }
 
     /**

@@ -102,4 +102,40 @@ class MemoryRetrieverTest {
         assertTrue(context.contains("当前项目使用 Java 17"));
         assertFalse(context.contains("其他项目使用 Python"));
     }
+
+    @Test
+    void semanticHybridFindsParaphraseWithoutSharedSubstring() {
+        // 关键词无法命中「ORM框架」↔「对象关系映射」，语义向量应抬升
+        longTerm.store(new MemoryEntry("orm", "项目使用对象关系映射持久化数据",
+                MemoryEntry.MemoryType.FACT, null, 20));
+        longTerm.store(new MemoryEntry("noise", "用户喜欢深色主题",
+                MemoryEntry.MemoryType.FACT, null, 10));
+
+        MemoryVectorIndex index = new MemoryVectorIndex(text -> {
+            if (text.contains("对象关系") || text.contains("ORM") || text.contains("orm")) {
+                return new float[]{1f, 0f, 0f};
+            }
+            if (text.contains("深色") || text.contains("主题")) {
+                return new float[]{0f, 1f, 0f};
+            }
+            return new float[]{0.9f, 0.1f, 0f}; // query「ORM框架」
+        });
+        retriever.setVectorIndex(index);
+
+        var results = retriever.retrieveLongTerm("ORM框架是什么", 3);
+        assertFalse(results.isEmpty());
+        assertEquals("orm", results.get(0).getId());
+    }
+
+    @Test
+    void factTypeDoesNotApplyTimeDecay() {
+        MemoryEntry oldFact = new MemoryEntry("f-old", "偏好使用Maven", MemoryEntry.MemoryType.FACT,
+                java.time.Instant.now().minusSeconds(7 * 24 * 3600), null, 10);
+        MemoryEntry recentConv = new MemoryEntry("c-new", "偏好使用Maven", MemoryEntry.MemoryType.CONVERSATION,
+                java.time.Instant.now(), null, 10);
+        double factScore = retriever.computeRelevanceScore(oldFact, "Maven");
+        double convScore = retriever.computeRelevanceScore(recentConv, "Maven");
+        assertEquals(1.0, factScore, 0.001, "FACT 不应被时间衰减压分");
+        assertTrue(convScore <= factScore);
+    }
 }

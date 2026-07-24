@@ -93,7 +93,7 @@ src/main/java/com/bettercli/
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         GLMClient, DeepSeekClient, StepClient, KimiClient, FreeLlmApiClient, AgnesClient
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
-├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory, AgentMemoryStore, SqliteAgentMemoryStore, PostgresAgentMemoryStore, LongTermMemoryMigrator, MemoryMaintenanceScheduler, SessionMessageStore, SqliteSessionMessageStore, PostgresSessionMessageStore, SessionMessageIndexer, MemoryStoreFactory, MemoryMigrator
+├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory, MemoryRetriever, MemoryVectorIndex, AgentMemoryStore, ...
 ├── plan/        Planner, ExecutionPlan, Task
 ├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker, ReciprocalRankFusion, LexicalOverlapReranker, HnswIndex
 ├── lsp/         LspManager, LspDiagnosticFormatter
@@ -196,7 +196,8 @@ src/main/java/com/bettercli/
 
 ### Memory
 
-- 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
+- 长期记忆只通过 `/save` 或用户明确要求保存；默认不自动提取事实（可用 `bettercli.memory.auto_extract.enabled=true` 在压缩前 opt-in）
+- 长期记忆检索：关键词 +（可选）语义向量经 RRF 融合（`MemoryVectorIndex` 复用 EmbeddingClient/HnswIndex）；`bettercli.memory.semantic.enabled=false` 可关语义路；FACT 类型不做 24h 时间衰减
 - `BETTER.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `BETTER.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
