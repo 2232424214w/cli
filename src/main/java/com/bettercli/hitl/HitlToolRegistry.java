@@ -25,6 +25,7 @@ public class HitlToolRegistry extends ToolRegistry {
     public HitlToolRegistry(HitlHandler hitlHandler) {
         super();
         this.hitlHandler = hitlHandler;
+        setHitlHandler(hitlHandler);
     }
 
     @Override

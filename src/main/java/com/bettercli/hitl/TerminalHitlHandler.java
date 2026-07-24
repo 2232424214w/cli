@@ -249,4 +249,59 @@ public class TerminalHitlHandler implements HitlHandler {
     public boolean isApprovedAllByServer(String serverName) {
         return serverName != null && approvedAllByServer.contains(serverName);
     }
+
+    @Override
+    public synchronized String askUser(ClarificationRequest request) {
+        if (request == null) {
+            return ClarificationRequest.NON_INTERACTIVE_FALLBACK;
+        }
+        out.println();
+        out.println("────────── ❓  需要你的确认 ──────────");
+        for (String line : ApprovalRequest.wrapByDisplayWidth(request.question(), 56)) {
+            out.println(line);
+        }
+        if (request.hasOptions()) {
+            out.println();
+            for (int i = 0; i < request.options().size(); i++) {
+                out.println("  [" + (i + 1) + "] " + request.options().get(i));
+            }
+            out.println("可输入序号或直接输入答案。");
+        }
+        for (int attempt = 0; attempt < 5; attempt++) {
+            out.print("> ");
+            out.flush();
+            String input;
+            try {
+                input = in.readLine();
+            } catch (IOException e) {
+                out.println("  [ask_user] 读取失败，使用降级答案");
+                return request.resolveNonInteractiveAnswer();
+            }
+            if (input == null) {
+                out.println("  [ask_user] 输入流已关闭，使用降级答案");
+                return request.resolveNonInteractiveAnswer();
+            }
+            String trimmed = input.trim();
+            if (trimmed.isEmpty()) {
+                out.println("  答案不能为空，请重新输入");
+                continue;
+            }
+            if (request.hasOptions()) {
+                try {
+                    int idx = Integer.parseInt(trimmed);
+                    if (idx >= 1 && idx <= request.options().size()) {
+                        String chosen = request.options().get(idx - 1);
+                        out.println("  已选择: " + chosen);
+                        return chosen;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // treat as free-text answer
+                }
+            }
+            out.println("  已收到回答");
+            return trimmed;
+        }
+        out.println("  [ask_user] 连续无效输入，使用降级答案");
+        return request.resolveNonInteractiveAnswer();
+    }
 }

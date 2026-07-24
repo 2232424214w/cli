@@ -59,4 +59,9 @@ public final class SwitchableHitlHandler implements HitlHandler {
     public void clearApprovedAllForServer(String serverName) {
         delegate.clearApprovedAllForServer(serverName);
     }
+
+    @Override
+    public String askUser(ClarificationRequest request) {
+        return delegate.askUser(request);
+    }
 }

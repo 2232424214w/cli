@@ -247,7 +247,7 @@ public record ApprovalRequest(
     /**
      * 按显示宽度将一段文本拆成多行，每行不超过 lineWidth 显示列。
      */
-    static List<String> wrapByDisplayWidth(String text, int lineWidth) {
+    public static List<String> wrapByDisplayWidth(String text, int lineWidth) {
         List<String> lines = new ArrayList<>();
         if (text == null || text.isBlank()) {
             lines.add("");

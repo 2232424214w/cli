@@ -47,4 +47,17 @@ public interface HitlHandler {
 
     default void clearApprovedAllForServer(String serverName) {
     }
+
+    /**
+     * 向用户提出澄清问题并收集自由文本/选项答案。
+     *
+     * <p>与 {@link #requestApproval} 语义正交：审批返回批准/拒绝，反问返回一段答案文本。
+     * 默认实现走非交互降级（defaultAnswer 或固定文案），供微信等无面板通道与测试 stub 使用。
+     */
+    default String askUser(ClarificationRequest request) {
+        if (request == null) {
+            return ClarificationRequest.NON_INTERACTIVE_FALLBACK;
+        }
+        return request.resolveNonInteractiveAnswer();
+    }
 }

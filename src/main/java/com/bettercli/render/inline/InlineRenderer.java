@@ -307,6 +307,12 @@ public final class InlineRenderer implements Renderer {
     }
 
     @Override
+    public String promptClarification(com.bettercli.hitl.ClarificationRequest request) {
+        // 最小实现：复用 Plain 回退路径（与审批一样，无 terminal 时也能测）
+        return fallback.promptClarification(request);
+    }
+
+    @Override
     public int openPalette(String title, List<String> items) {
         if (terminal == null) {
             return fallback.openPalette(title, items);

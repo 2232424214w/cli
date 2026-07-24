@@ -118,6 +118,8 @@ public class ToolRegistry {
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。由 Agent 在构造后注入；
     // 未注入时 update_plan 工具返回未初始化提示，不影响其它工具。
     private com.bettercli.agent.PlanStore planStore;
+    // ask_user 复用 HITL 交互底层；由 HitlToolRegistry / Main 注入。未注入时走非交互降级文案。
+    private com.bettercli.hitl.HitlHandler hitlHandler;
     // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
     // 未注入时 ask_peer 工具返回未初始化提示。主 ReAct Agent 不注入，故 ask_peer 对 ReAct 不可用。
     private com.bettercli.agent.SharedState sharedState;
@@ -150,6 +152,7 @@ public class ToolRegistry {
         registerAgentMemoryTools();
         registerSessionSearchTool();
         registerPlanTool();
+        registerAskUserTool();
         registerPeerTool();
     }
 
@@ -285,6 +288,17 @@ public class ToolRegistry {
 
     public SessionMessageStore getSessionMessageStore() {
         return sessionMessageStore;
+    }
+
+    /**
+     * 注入 HITL 处理器，供 ask_user 复用交互底层（非审批语义）。
+     */
+    public void setHitlHandler(com.bettercli.hitl.HitlHandler hitlHandler) {
+        this.hitlHandler = hitlHandler;
+    }
+
+    public com.bettercli.hitl.HitlHandler getHitlHandler() {
+        return hitlHandler;
     }
 
     /**
@@ -1173,6 +1187,59 @@ public class ToolRegistry {
                 ),
                 args -> updatePlan(args)
         ));
+    }
+
+    /**
+     * 注册主动反问工具 ask_user（clarification / elicitation）。
+     *
+     * <p>仅当信息缺失会导致做错、且无法用 read/grep/glob/web 自行查明时才调用。
+     * 复用 HitlHandler.askUser，不走审批链路。options 用换行分隔字符串编码（内置工具 Map 入口不支持 JSON 数组）。
+     */
+    private void registerAskUserTool() {
+        tools.put("ask_user", new Tool(
+                "ask_user",
+                "向用户提出一个澄清问题并等待回答。"
+                        + "仅当信息缺失会导致做错、且无法用其它工具（read_file/grep_code/glob_files/web_search/web_fetch）自行查明时才调用；"
+                        + "能自己查的绝不问，避免把探索工作推给用户。",
+                createParameters(
+                        new Param("question", "string", "要问用户的问题（简洁、具体）", true),
+                        new Param("options", "string",
+                                "可选：结构化选项，换行分隔。用户可回序号或直接输入自由文本。空表示自由问答。", false),
+                        new Param("default_answer", "string",
+                                "可选：非交互通道（如微信）的降级默认答案。", false)
+                ),
+                args -> askUser(args)
+        ));
+    }
+
+    private String askUser(Map<String, String> args) {
+        String question = args.get("question");
+        if (question == null || question.isBlank()) {
+            return "ask_user 失败: question 不能为空";
+        }
+        List<String> options = parseNewlineOptions(args.get("options"));
+        String defaultAnswer = args.get("default_answer") == null ? "" : args.get("default_answer");
+        com.bettercli.hitl.ClarificationRequest request =
+                new com.bettercli.hitl.ClarificationRequest(question.trim(), options, defaultAnswer);
+        if (hitlHandler == null) {
+            return request.resolveNonInteractiveAnswer();
+        }
+        String answer = hitlHandler.askUser(request);
+        return answer == null || answer.isBlank() ? request.resolveNonInteractiveAnswer() : answer;
+    }
+
+    private static List<String> parseNewlineOptions(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        List<String> options = new ArrayList<>();
+        for (String line : raw.split("\\R")) {
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty()) {
+                options.add(trimmed);
+            }
+        }
+        return options;
     }
 
     private String updatePlan(Map<String, String> args) {

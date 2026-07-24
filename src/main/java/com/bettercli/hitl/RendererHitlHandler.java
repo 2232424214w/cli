@@ -86,4 +86,9 @@ public final class RendererHitlHandler implements HitlHandler {
             approvedAllByServer.remove(serverName);
         }
     }
+
+    @Override
+    public synchronized String askUser(ClarificationRequest request) {
+        return renderer.promptClarification(request);
+    }
 }

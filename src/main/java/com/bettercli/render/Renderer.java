@@ -144,6 +144,17 @@ public interface Renderer extends AutoCloseable {
     ApprovalResult promptApproval(ApprovalRequest request);
 
     /**
+     * 同步阻塞地向用户提出澄清问题并收集答案。
+     * 默认走非交互降级，供微信等无面板通道；Plain/Inline 渲染器覆写为真实提问。
+     */
+    default String promptClarification(com.bettercli.hitl.ClarificationRequest request) {
+        if (request == null) {
+            return com.bettercli.hitl.ClarificationRequest.NON_INTERACTIVE_FALLBACK;
+        }
+        return request.resolveNonInteractiveAnswer();
+    }
+
+    /**
      * 显示一个临时浮起的选择列表，等待用户选定一项或取消。
      *
      * @return 选中项的下标；用户取消（Esc）返回 -1
