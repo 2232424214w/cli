@@ -158,10 +158,15 @@ public class MemoryManager {
     }
 
     public void storeFact(String fact, String scope) {
+        storeFact(fact, scope, "fact");
+    }
+
+    public void storeFact(String fact, String scope, String source) {
         String normalizedScope = normalizeScope(scope);
+        String src = source == null || source.isBlank() ? "fact" : source;
         Map<String, String> metadata = "global".equals(normalizedScope)
-                ? Map.of("source", "fact", "scope", "global")
-                : Map.of("source", "fact", "scope", "project", "project", currentProject);
+                ? Map.of("source", src, "scope", "global")
+                : Map.of("source", src, "scope", "project", "project", currentProject);
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 fact,
@@ -174,6 +179,42 @@ public class MemoryManager {
         if (index != null) {
             index.invalidate(entry.getId());
         }
+    }
+
+    /**
+     * 压缩前可选自动提取稳定事实（默认关闭）。
+     * 开启：{@code bettercli.memory.auto_extract.enabled=true} / {@code BETTERCLI_MEMORY_AUTO_EXTRACT=true}
+     */
+    public int maybeExtractFacts() {
+        if (!isAutoExtractEnabled()) {
+            return 0;
+        }
+        List<MemoryEntry> snapshot = shortTermMemory.getAll();
+        if (snapshot.size() < 4) {
+            return 0;
+        }
+        try {
+            List<String> facts = compressor.extractFactCandidates(snapshot);
+            int saved = 0;
+            for (String fact : facts) {
+                storeFact(fact, "project", "fact_extractor");
+                saved++;
+            }
+            if (saved > 0) {
+                log.info("自动提取并写入 {} 条长期事实（source=fact_extractor）", saved);
+            }
+            return saved;
+        } catch (Exception e) {
+            log.warn("自动事实提取失败: {}", e.toString());
+            return 0;
+        }
+    }
+
+    static boolean isAutoExtractEnabled() {
+        String prop = System.getProperty("bettercli.memory.auto_extract.enabled");
+        String env = System.getenv("BETTERCLI_MEMORY_AUTO_EXTRACT");
+        String raw = prop != null ? prop : env;
+        return raw != null && raw.equalsIgnoreCase("true");
     }
 
     /**
@@ -231,6 +272,7 @@ public class MemoryManager {
         int beforeTokens = shortTermMemory.getTokenCount();
         log.info("上下文占用达到压缩阈值（{}%），触发短期记忆压缩",
                 (int) (contextProfile.compressionTriggerRatio() * 100));
+        maybeExtractFacts();
         String summary = compressor.compress(shortTermMemory);
         if (summary != null) {
             int afterTokens = shortTermMemory.getTokenCount();

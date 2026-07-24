@@ -143,10 +143,10 @@ public class ContextCompressor {
     }
 
     /**
-     * 从对话中提取关键事实，存入长期记忆
+     * 从对话中提取关键事实候选（不落盘）。调用方应用 {@link MemoryManager#storeFact} 写入以带上 scope。
      */
-    public List<String> extractFacts(List<MemoryEntry> entries, LongTermMemory longTermMemory) {
-        if (entries.isEmpty()) return List.of();
+    public List<String> extractFactCandidates(List<MemoryEntry> entries) {
+        if (entries == null || entries.isEmpty()) return List.of();
 
         StringBuilder conversation = new StringBuilder();
         for (MemoryEntry entry : entries) {
@@ -163,23 +163,13 @@ public class ContextCompressor {
             );
 
             LlmClient.ChatResponse response = llmClient.chat(messages, null);
-            String factsText = response.content();
+            String factsText = response.content() == null ? "" : response.content();
 
             List<String> facts = new ArrayList<>();
             for (String line : factsText.split("\n")) {
                 String fact = normalizeFactLine(line);
                 if (isPersistentFactCandidate(fact)) {
                     facts.add(fact);
-
-                    // 存入长期记忆
-                    MemoryEntry factEntry = new MemoryEntry(
-                            "fact-" + UUID.randomUUID().toString().substring(0, 8),
-                            fact,
-                            MemoryEntry.MemoryType.FACT,
-                            java.util.Map.of("source", "fact_extractor"),
-                            MemoryEntry.estimateTokens(fact)
-                    );
-                    longTermMemory.store(factEntry);
                 }
             }
             return facts;
@@ -187,6 +177,27 @@ public class ContextCompressor {
             System.err.println("⚠️ 事实提取失败: " + e.getMessage());
             return List.of();
         }
+    }
+
+    /**
+     * 从对话中提取关键事实，存入长期记忆（无 scope，默认 global 可见；优先用 MemoryManager）。
+     */
+    public List<String> extractFacts(List<MemoryEntry> entries, LongTermMemory longTermMemory) {
+        List<String> facts = extractFactCandidates(entries);
+        if (longTermMemory == null) {
+            return facts;
+        }
+        for (String fact : facts) {
+            MemoryEntry factEntry = new MemoryEntry(
+                    "fact-" + UUID.randomUUID().toString().substring(0, 8),
+                    fact,
+                    MemoryEntry.MemoryType.FACT,
+                    java.util.Map.of("source", "fact_extractor"),
+                    MemoryEntry.estimateTokens(fact)
+            );
+            longTermMemory.store(factEntry);
+        }
+        return facts;
     }
 
     /**
