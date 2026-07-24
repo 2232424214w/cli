@@ -50,9 +50,18 @@ class ApprovalPolicyTest {
     }
 
     @Test
-    void mcpToolRequiresApproval() {
-        assertTrue(ApprovalPolicy.requiresApproval("mcp__filesystem__read_file"));
+    void mcpReadOnlyToolDoesNotRequireApproval() {
+        assertFalse(ApprovalPolicy.requiresApproval("mcp__filesystem__read_file"));
+        assertFalse(ApprovalPolicy.requiresApproval("mcp__demo__list_resources"));
+        assertFalse(ApprovalPolicy.requiresApproval("mcp__step_search__web_search"));
         assertEquals("filesystem", ApprovalPolicy.mcpServerName("mcp__filesystem__read_file"));
+    }
+
+    @Test
+    void mcpWriteOrUnknownToolRequiresApproval() {
+        assertTrue(ApprovalPolicy.requiresApproval("mcp__filesystem__write_file"));
+        assertTrue(ApprovalPolicy.requiresApproval("mcp__chrome-devtools__click"));
+        assertTrue(ApprovalPolicy.requiresApproval("mcp__demo__tool"));
     }
 
     @Test
@@ -77,8 +86,10 @@ class ApprovalPolicyTest {
 
     @Test
     void mcpToolHasMcpDangerLevel() {
-        assertEquals("🟡 MCP", ApprovalPolicy.getDangerLevel("mcp__demo__tool"));
+        assertEquals("🟢 MCP只读", ApprovalPolicy.getDangerLevel("mcp__filesystem__read_file"));
+        assertEquals("🟡 MCP写入", ApprovalPolicy.getDangerLevel("mcp__demo__tool"));
         assertTrue(ApprovalPolicy.getRiskDescription("mcp__demo__tool").contains("MCP"));
+        assertTrue(ApprovalPolicy.getRiskDescription("mcp__filesystem__read_file").contains("只读"));
     }
 
     @Test

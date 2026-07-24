@@ -10,7 +10,7 @@ import java.util.Set;
  * - 写入/执行类操作（write_file、execute_command）需要确认，有潜在破坏性
  * - create_project 属于写入操作，默认需要确认
  * - revert_turn 会批量回写工作区文件，默认需要确认
- * - MCP 工具来自外部 server，默认都需要确认
+ * - MCP：只读语义工具免审批，写入/未知语义仍需确认（见 {@link McpToolRiskClassifier}）
  */
 public class ApprovalPolicy {
 
@@ -30,7 +30,7 @@ public class ApprovalPolicy {
      * 判断该工具调用是否需要人工确认
      */
     public static boolean requiresApproval(String toolName) {
-        return DANGEROUS_TOOLS.contains(toolName) || isMcpTool(toolName);
+        return DANGEROUS_TOOLS.contains(toolName) || McpToolRiskClassifier.requiresApproval(toolName);
     }
 
     /**
@@ -43,7 +43,12 @@ public class ApprovalPolicy {
             case "write_file" -> "🟡 中危";
             case "create_project" -> "🟡 中危";
             case "suggest_better_md" -> "🟡 中危";
-            default -> isMcpTool(toolName) ? "🟡 MCP" : "🟢 安全";
+            default -> {
+                if (!isMcpTool(toolName)) {
+                    yield "🟢 安全";
+                }
+                yield McpToolRiskClassifier.isReadOnly(toolName) ? "🟢 MCP只读" : "🟡 MCP写入";
+            }
         };
     }
 
@@ -57,9 +62,15 @@ public class ApprovalPolicy {
             case "write_file" -> "将写入或覆盖文件内容，原有内容将丢失";
             case "create_project" -> "将在磁盘上创建新目录和文件";
             case "suggest_better_md" -> "将向 BETTER.md 项目记忆文件追加新条目，影响后续会话的 system prompt 注入";
-            default -> isMcpTool(toolName)
-                    ? "将调用外部 MCP server 提供的工具，可能访问网络、文件或第三方服务"
-                    : "安全的只读操作";
+            default -> {
+                if (!isMcpTool(toolName)) {
+                    yield "安全的只读操作";
+                }
+                if (McpToolRiskClassifier.isReadOnly(toolName)) {
+                    yield "只读 MCP 工具：按名称启发式判定为无副作用探测/查询，免人工确认";
+                }
+                yield "将调用外部 MCP server 的写入或未分类工具，可能修改远程状态、文件或浏览器";
+            }
         };
     }
 

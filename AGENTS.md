@@ -104,7 +104,7 @@ src/main/java/com/bettercli/
 ├── tool/        ToolRegistry
 ├── wechat/      iLink client, account store, message loop, non-interactive policy
 ├── mcp/         McpClient, McpServerManager, transport/, resources/, mention/
-├── hitl/        HitlToolRegistry, ApprovalPolicy, TerminalHitlHandler
+├── hitl/        HitlToolRegistry, ApprovalPolicy, McpToolRiskClassifier, TerminalHitlHandler
 ├── web/         SearchProvider, WebFetcher, HtmlExtractor, NetworkPolicy
 ├── policy/      PathGuard, CommandGuard, AuditLog
 ├── skill/       SkillRegistry, SkillContextBuffer, SkillIndexFormatter
@@ -206,6 +206,7 @@ src/main/java/com/bettercli/
 - 用户无法批准策略拒绝的请求
 - PathGuard 强制路径限定在项目根内
 - CommandGuard 是辅助黑名单，不是主防线
+- MCP 细粒度权限：`McpToolRiskClassifier` 按工具名末段启发式区分只读/写入；只读 MCP（read/list/search/snapshot 等）免 HITL，写入或未分类仍需审批
 - 微信 iLink 通道没有人工审批面板，必须走非交互式默认拒绝策略：只读工具默认允许，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝，文件写入仍由 PathGuard 限定在绑定 workspace 内。
 
 ### Plan 审阅交互
