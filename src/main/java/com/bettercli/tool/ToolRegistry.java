@@ -467,11 +467,14 @@ public class ToolRegistry {
                         new Param("limit", "integer", "最多读取多少行；省略时读取全文，最大 2000 行", false)
                 ),
                 args -> {
-                    Path safe = pathGuard.resolveSafe(args.get("path"));
                     try {
+                        Path safe = pathGuard.resolveSafe(args.get("path"));
                         return readFileForTool(safe, args);
+                    } catch (PolicyException e) {
+                        throw e;
                     } catch (Exception e) {
-                        return "读取文件失败: " + e.getMessage();
+                        return "读取文件失败: " + e.getMessage()
+                                + "。建议：先用 glob_files 定位真实路径，或用 list_dir 确认目录结构；不要反复用同一错误 path 重试。";
                     }
                 }
         ));
@@ -515,7 +518,8 @@ public class ToolRegistry {
                         runPostEditLspHook(path, safe);
                         return "文件已写入: " + path;
                     } catch (Exception e) {
-                        return "写入文件失败: " + e.getMessage();
+                        return "写入文件失败: " + e.getMessage()
+                                + "。建议：确认父目录可用、路径在项目根内；必要时先 list_dir/glob_files 核实。";
                     }
                 }
         ));
@@ -526,11 +530,15 @@ public class ToolRegistry {
                 "列出目录内容（仅限项目根目录之内）",
                 createParameters(new Param("path", "string", "目录路径", true)),
                 args -> {
-                    Path safe = pathGuard.resolveSafe(args.get("path"));
                     try {
+                        Path safe = pathGuard.resolveSafe(args.get("path"));
                         File[] files = safe.toFile().listFiles();
                         if (files == null) {
-                            return "目录为空或不存在";
+                            return "列出目录失败: 目录不存在或不是目录（path=" + args.get("path") + "）。"
+                                    + "建议：先 glob_files 或从项目根 list_dir(\".\") 定位正确目录，不要猜测深层路径。";
+                        }
+                        if (files.length == 0) {
+                            return "目录存在但为空: " + args.get("path");
                         }
                         StringBuilder sb = new StringBuilder("目录内容:\n");
                         for (File f : files) {
@@ -539,8 +547,11 @@ public class ToolRegistry {
                               .append("\n");
                         }
                         return sb.toString();
+                    } catch (PolicyException e) {
+                        throw e;
                     } catch (Exception e) {
-                        return "列出目录失败: " + e.getMessage();
+                        return "列出目录失败: " + e.getMessage()
+                                + "。建议：先确认路径是否在项目根内，再用 glob_files 定位。";
                     }
                 }
         ));
@@ -575,8 +586,12 @@ public class ToolRegistry {
     }
 
     private String readFileForTool(Path file, Map<String, String> args) throws IOException {
+        if (!Files.exists(file)) {
+            return "读取文件失败: 路径不存在（" + file.getFileName() + "）。"
+                    + "建议：先用 glob_files 按文件名定位，或用 grep_code 搜索符号后再 read_file。";
+        }
         if (!Files.isRegularFile(file)) {
-            return "读取文件失败: 不是普通文件";
+            return "读取文件失败: 不是普通文件（可能是目录）。建议：对目录用 list_dir，对文件再用 read_file。";
         }
         boolean ranged = args.containsKey("offset") || args.containsKey("limit");
         if (!ranged) {
@@ -743,8 +758,12 @@ public class ToolRegistry {
     private void registerShellTools() {
         tools.put("execute_command", new Tool(
                 "execute_command",
-                "在当前项目目录中执行短时 Shell 命令（默认 60 秒超时，不允许全盘扫描）",
-                createParameters(new Param("command", "string", "要执行的命令", true)),
+                "在当前项目目录执行短时 Shell 命令（默认 60 秒超时）。"
+                        + "适用：编译/测试/git 状态/小型脚本。"
+                        + "不要用它做全盘扫描或长驻进程；文件读写优先用 read_file/write_file/list_dir/glob_files/grep_code。"
+                        + "命令受 CommandGuard 黑名单约束，危险命令会被策略拒绝。",
+                createParameters(new Param("command", "string",
+                        "要执行的命令。Windows 走 cmd /c，Unix 走 bash -c。保持简短、可预期退出。", true)),
                 args -> executeCommand(args.get("command"))
         ));
     }
@@ -2187,7 +2206,7 @@ public class ToolRegistry {
     private String executeCommand(String command) {
         String normalized = command == null ? "" : command.trim();
         if (normalized.isEmpty()) {
-            return "执行命令失败: 命令不能为空";
+            return "执行命令失败: 命令不能为空。建议：给出完整可执行命令，例如 `mvn test -Dtest=XxxTest -DskipTests=false`。";
         }
         String denyReason = CommandGuard.check(normalized);
         if (denyReason != null) {
@@ -2219,11 +2238,17 @@ public class ToolRegistry {
                 process.destroyForcibly();
                 process.waitFor(2, TimeUnit.SECONDS);
                 outputFuture.cancel(true);
-                return "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止";
+                return "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止。"
+                        + "建议：缩小任务范围、加过滤条件，或把长任务拆成更短命令后重试。";
             }
 
             String output = getCommandOutput(outputFuture);
             int exitCode = process.exitValue();
+            if (exitCode != 0) {
+                return String.format(
+                        "命令执行失败 (exit code: %d)。建议：阅读输出定位根因，修正后重试；不要原样重复同一命令。\n%s",
+                        exitCode, output);
+            }
             return String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -2235,7 +2260,8 @@ public class ToolRegistry {
             if (process != null) {
                 process.destroyForcibly();
             }
-            return "执行命令失败: " + e.getMessage();
+            return "执行命令失败: " + e.getMessage()
+                    + "。建议：检查命令是否在 PATH 中、工作目录是否正确；必要时先 list_dir 确认。";
         } finally {
             outputReaderExecutor.shutdownNow();
         }

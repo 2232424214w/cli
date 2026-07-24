@@ -295,6 +295,7 @@ src/main/java/com/bettercli/
 | 可插拔后端 | `mvn test -Dtest=MemoryStoreFactoryTest,PostgresMemoryStoresTest` |
 | Agent 任务级 Eval | `mvn test -Dtest=DeterministicScorerTest,EvalRunnerTest` |
 | ask_user 主动反问 | `mvn test -Dtest=AskUserToolTest,TerminalHitlHandlerTest` |
+| 工具可操作错误返回 | `mvn test -Dtest=ActionableToolErrorTest,ReflectionServiceTest` |
 | 常规回归 | `mvn test -Pquick` |
 
 ## 给新线程的导航
