@@ -11,13 +11,15 @@ import java.util.List;
 /**
  * SQLite 向量存储 + 代码关系图谱持久化
  * <p>
- * 向量以 JSON 数组形式存储在 SQLite 中，检索时在内存计算余弦相似度。
- * 对于代码库规模（通常几百到几千个块），此方案足够；规模再大可换 FAISS / pgvector 等。
+ * 向量以 JSON 数组形式持久化在 SQLite；检索走内存 {@link HnswIndex}
+ *（小规模精确余弦，大规模 NSW 近似），避免每次 search 全表解析 JSON 做 O(n) 扫描。
  */
 public class VectorStore implements AutoCloseable {
     private static final ObjectMapper mapper = new ObjectMapper();
     private final Connection connection;
     private final String projectPath;
+    private final HnswIndex annIndex = new HnswIndex();
+    private volatile boolean annDirty = true;
 
     public VectorStore(String projectPath) throws SQLException {
         this.projectPath = projectPath;
@@ -94,6 +96,7 @@ public class VectorStore implements AutoCloseable {
             ps1.executeUpdate();
             ps2.executeUpdate();
         }
+        invalidateAnn();
     }
 
     /**
@@ -118,6 +121,7 @@ public class VectorStore implements AutoCloseable {
             }
             ps.executeBatch();
             connection.commit();
+            invalidateAnn();
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -125,10 +129,6 @@ public class VectorStore implements AutoCloseable {
             connection.setAutoCommit(autoCommit);
         }
     }
-
-    /**
-     * 批量插入代码关系（事务保护）
-     */
     public void insertRelations(List<CodeRelation> relations) throws SQLException {
         String sql = """
                 INSERT INTO code_relations (project_path, from_file, from_name, to_file, to_name, relation_type)
@@ -157,12 +157,25 @@ public class VectorStore implements AutoCloseable {
     }
 
     /**
-     * 语义检索：根据查询向量返回最相似的 TopK 代码块
+     * 语义检索：根据查询向量返回最相似的 TopK 代码块（经内存 ANN 索引）。
      */
     public List<SearchResult> search(float[] queryEmbedding, int topK) throws SQLException {
-        String sql = "SELECT file_path, chunk_type, name, content, embedding_json FROM code_chunks WHERE project_path = ?";
-        List<SearchResult> candidates = new ArrayList<>();
+        ensureAnnLoaded();
+        return annIndex.search(queryEmbedding, topK);
+    }
 
+    private void invalidateAnn() {
+        annDirty = true;
+        annIndex.clear();
+    }
+
+    private synchronized void ensureAnnLoaded() throws SQLException {
+        if (!annDirty) {
+            return;
+        }
+        annIndex.clear();
+        String sql = "SELECT file_path, chunk_type, name, content, embedding_json FROM code_chunks WHERE project_path = ?";
+        List<HnswIndex.Item> batch = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, projectPath);
             try (ResultSet rs = ps.executeQuery()) {
@@ -172,21 +185,17 @@ public class VectorStore implements AutoCloseable {
                         continue;
                     }
                     float[] embedding = jsonToEmbedding(embeddingJson);
-                    double similarity = cosineSimilarity(queryEmbedding, embedding);
-                    candidates.add(new SearchResult(
+                    batch.add(new HnswIndex.Item(
                             rs.getString("file_path"),
                             rs.getString("chunk_type"),
                             rs.getString("name"),
                             rs.getString("content"),
-                            similarity
-                    ));
+                            embedding));
                 }
             }
         }
-
-        // 按相似度降序排序，取 TopK
-        candidates.sort((a, b) -> Double.compare(b.similarity(), a.similarity()));
-        return candidates.size() > topK ? new ArrayList<>(candidates.subList(0, topK)) : candidates;
+        annIndex.addAll(batch);
+        annDirty = false;
     }
 
     /**
@@ -300,24 +309,6 @@ public class VectorStore implements AutoCloseable {
         return new IndexStats(chunks, relations);
     }
 
-    private double cosineSimilarity(float[] a, float[] b) {
-        if (a.length != b.length) {
-            return 0.0;
-        }
-        double dot = 0.0;
-        double normA = 0.0;
-        double normB = 0.0;
-        for (int i = 0; i < a.length; i++) {
-            dot += a[i] * b[i];
-            normA += a[i] * a[i];
-            normB += b[i] * b[i];
-        }
-        if (normA == 0.0 || normB == 0.0) {
-            return 0.0;
-        }
-        return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-    }
-
     private String embeddingToJson(float[] embedding) {
         try {
             return mapper.writeValueAsString(embedding);
@@ -336,6 +327,7 @@ public class VectorStore implements AutoCloseable {
 
     @Override
     public void close() throws SQLException {
+        invalidateAnn();
         if (connection != null && !connection.isClosed()) {
             connection.close();
         }
