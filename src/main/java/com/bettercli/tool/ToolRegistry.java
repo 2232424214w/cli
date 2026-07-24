@@ -118,6 +118,8 @@ public class ToolRegistry {
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。由 Agent 在构造后注入；
     // 未注入时 update_plan 工具返回未初始化提示，不影响其它工具。
     private com.bettercli.agent.PlanStore planStore;
+    // 会话记事本（structured note-taking）。由 Agent 注入；未注入时 notebook_* 返回未初始化提示。
+    private com.bettercli.agent.SessionNotebook sessionNotebook;
     // ask_user 复用 HITL 交互底层；由 HitlToolRegistry / Main 注入。未注入时走非交互降级文案。
     private com.bettercli.hitl.HitlHandler hitlHandler;
     // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
@@ -152,6 +154,7 @@ public class ToolRegistry {
         registerAgentMemoryTools();
         registerSessionSearchTool();
         registerPlanTool();
+        registerNotebookTools();
         registerAskUserTool();
         registerPeerTool();
     }
@@ -311,6 +314,14 @@ public class ToolRegistry {
 
     public com.bettercli.agent.PlanStore getPlanStore() {
         return planStore;
+    }
+
+    public void setSessionNotebook(com.bettercli.agent.SessionNotebook sessionNotebook) {
+        this.sessionNotebook = sessionNotebook;
+    }
+
+    public com.bettercli.agent.SessionNotebook getSessionNotebook() {
+        return sessionNotebook;
     }
 
     /**
@@ -1206,6 +1217,74 @@ public class ToolRegistry {
                 ),
                 args -> updatePlan(args)
         ));
+    }
+
+    /**
+     * 结构化记事本（Anthropic structured note-taking）：压缩前把关键事实 offload，需要时再读回。
+     */
+    private void registerNotebookTools() {
+        tools.put("notebook_write", new Tool(
+                "notebook_write",
+                "向会话记事本写入或更新一条结构化笔记（决策/约束/关键路径/待办）。"
+                        + "长任务或即将上下文压缩前，把不能丢的信息写入记事本，避免有损摘要丢失。"
+                        + "简单单步问答不要用。",
+                createParameters(
+                        new Param("title", "string", "笔记标题（短）", true),
+                        new Param("content", "string", "笔记正文", true),
+                        new Param("id", "string", "可选：已有笔记 id，传入则更新该条", false)
+                ),
+                args -> notebookWrite(args)
+        ));
+        tools.put("notebook_read", new Tool(
+                "notebook_read",
+                "读取会话记事本。可按关键词过滤；空 query 返回全部。",
+                createParameters(
+                        new Param("query", "string", "可选：标题/正文子串过滤", false)
+                ),
+                args -> notebookRead(args)
+        ));
+    }
+
+    private String notebookWrite(Map<String, String> args) {
+        if (sessionNotebook == null) {
+            return "notebook_write 失败: SessionNotebook 未初始化";
+        }
+        String title = args.get("title");
+        String content = args.get("content");
+        String idRaw = args.get("id");
+        try {
+            if (idRaw != null && !idRaw.isBlank()) {
+                long id = Long.parseLong(idRaw.trim());
+                var note = sessionNotebook.update(id, title, content);
+                return "笔记已更新 #" + note.id() + " " + note.title();
+            }
+            var note = sessionNotebook.append(title, content);
+            return "笔记已追加 #" + note.id() + " " + note.title();
+        } catch (NumberFormatException e) {
+            return "notebook_write 失败: id 必须是数字";
+        } catch (IllegalArgumentException e) {
+            return "notebook_write 失败: " + e.getMessage();
+        }
+    }
+
+    private String notebookRead(Map<String, String> args) {
+        if (sessionNotebook == null) {
+            return "notebook_read 失败: SessionNotebook 未初始化";
+        }
+        String query = args.get("query");
+        var notes = sessionNotebook.search(query);
+        if (notes.isEmpty()) {
+            return sessionNotebook.isEmpty() ? "(记事本为空)" : "(无匹配笔记)";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (var n : notes) {
+            sb.append("#").append(n.id()).append(" ").append(n.title()).append("\n");
+            if (n.body() != null && !n.body().isBlank()) {
+                sb.append(n.body()).append("\n");
+            }
+            sb.append("\n");
+        }
+        return sb.toString().trim();
     }
 
     /**

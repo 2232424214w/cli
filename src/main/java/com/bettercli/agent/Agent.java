@@ -61,6 +61,8 @@ public class Agent {
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。会话级内存态，不持久化；
     // 每次 Agent 实例独立持有，通过 toolRegistry 注入给 update_plan 工具读写。
     private final PlanStore planStore = new PlanStore();
+    // 会话结构化记事本（Anthropic structured note-taking）。会话级内存态；/clear 清空。
+    private final SessionNotebook sessionNotebook = new SessionNotebook();
     // 工具失败反思服务（阶段1：轻量反思，不额外调 LLM）。会话级有状态，持有反螺旋计数器。
     // 在 executeToolCalls 之后检测失败并注入反思提示，连续反思超阈值后停止，交给 budget 兜底。
     private final ReflectionService reflectionService = new ReflectionService();
@@ -80,6 +82,7 @@ public class Agent {
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
         this.toolRegistry.setPlanStore(this.planStore);
+        this.toolRegistry.setSessionNotebook(this.sessionNotebook);
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
     }
 
@@ -94,6 +97,10 @@ public class Agent {
     /** 暴露 ReAct 规划存储，供渲染层/状态栏展示进度；不应被外部修改。 */
     public PlanStore getPlanStore() {
         return planStore;
+    }
+
+    public SessionNotebook getSessionNotebook() {
+        return sessionNotebook;
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -306,6 +313,7 @@ public class Agent {
         }
         // 清空 ReAct 规划（对标 /clear 清空其它会话级状态）
         planStore.clear();
+        sessionNotebook.clear();
     }
 
     /**
@@ -485,6 +493,18 @@ public class Agent {
             }
         } catch (Exception e) {
             log.warn("Failed to load agent memory summary", e);
+        }
+        // 会话记事本摘要（structured note-taking）：压缩后仍可 notebook_read 读回全文
+        try {
+            String notebook = sessionNotebook.formatSummary(12, 2_000);
+            if (notebook != null && !notebook.isBlank()) {
+                if (sb.length() > 0) {
+                    sb.append("\n\n");
+                }
+                sb.append(notebook);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to format session notebook summary", e);
         }
         return sb.toString();
     }
