@@ -293,6 +293,7 @@ src/main/java/com/bettercli/
 | Durable Workflow 断点续跑 | `mvn test -Dtest=DurableWorkflowResumeTest,DurableTaskManagerTest` |
 | A2A 跨服务 agent | `mvn test -Dtest=AgentCardTest,A2AClientTest,RemoteAgentTest,MixedWorkerPoolTest` |
 | 可插拔后端 | `mvn test -Dtest=MemoryStoreFactoryTest,PostgresMemoryStoresTest` |
+| Agent 任务级 Eval | `mvn test -Dtest=DeterministicScorerTest,EvalRunnerTest` |
 | 常规回归 | `mvn test -Pquick` |
 
 ## 给新线程的导航
@@ -320,6 +321,7 @@ src/main/java/com/bettercli/
 | Dynamic Workflow | agent/WorkflowScript.java + WorkflowStep.java + WorkflowRuntime.java + WorkflowAdapters.java |
 | Durable Workflow 断点续跑 | agent/DurableWorkflowBridge.java + WorkflowCheckpointStore + runtime/task/DurableTaskManager |
 | A2A 跨服务 agent | a2a/AgentCard.java + A2AClient.java + RemoteAgent.java + agent/Worker.java + agent/MixedWorkerPool.java |
+| Agent 任务级 Eval | eval/EvalRunner.java + eval/DeterministicScorer.java + evals/golden-tasks.jsonl |
 | MCP | McpServerManager.java + McpClient.java |
 | TUI/渲染 | render/Renderer.java + RendererFactory.java |
 
