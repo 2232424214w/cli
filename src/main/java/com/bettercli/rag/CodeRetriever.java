@@ -1,10 +1,8 @@
 package com.bettercli.rag;
 
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -45,91 +43,58 @@ public class CodeRetriever implements AutoCloseable {
     }
 
     /**
-     * 混合检索：同时进行语义检索和关键词检索，合并去重
+     * 混合检索：语义列表 + 关键词列表做 RRF 融合（不再手调魔数权重），再按文件限流。
      */
     public List<VectorStore.SearchResult> hybridSearch(String query, int topK) throws Exception {
-        Map<String, VectorStore.SearchResult> merged = new LinkedHashMap<>();
-        Set<String> dualMatchBonused = new HashSet<>();
-
-        // 1. 语义检索
         int semanticLimit = Math.max(topK * 2, 10);
-        for (VectorStore.SearchResult result : semanticSearch(query, semanticLimit)) {
-            mergeResult(merged, result, dualMatchBonused);
+        List<VectorStore.SearchResult> semantic = semanticSearch(query, semanticLimit);
+
+        Map<String, VectorStore.SearchResult> byKey = new LinkedHashMap<>();
+        List<String> semanticRanks = new ArrayList<>();
+        for (VectorStore.SearchResult result : semantic) {
+            String key = resultKey(result);
+            byKey.putIfAbsent(key, result);
+            semanticRanks.add(key);
         }
 
-        // 2. 关键词检索
-        Set<String> keywords = RagQueryTokenizer.tokenize(query);
-        for (String keyword : keywords) {
+        List<String> keywordRanks = new ArrayList<>();
+        Set<String> seenKeyword = new HashSet<>();
+        for (String keyword : RagQueryTokenizer.tokenize(query)) {
             for (VectorStore.SearchResult result : keywordSearch(keyword)) {
-                mergeResult(merged, boostKeywordMatch(result, keyword), dualMatchBonused);
+                String key = resultKey(result);
+                byKey.putIfAbsent(key, result);
+                if (seenKeyword.add(key)) {
+                    keywordRanks.add(key);
+                }
             }
         }
 
-        // 3. 代码类型加分：method/class 比 file 更直接回答"怎么实现"
+        LinkedHashMap<String, Double> fused = ReciprocalRankFusion.fuse(
+                List.of(semanticRanks, keywordRanks), ReciprocalRankFusion.DEFAULT_K);
+
         List<VectorStore.SearchResult> ranked = new ArrayList<>();
-        for (VectorStore.SearchResult r : merged.values()) {
-            double typeBoost = switch (r.chunkType()) {
-                case "method" -> 0.15;
-                case "class" -> 0.10;
+        for (Map.Entry<String, Double> entry : fused.entrySet()) {
+            VectorStore.SearchResult base = byKey.get(entry.getKey());
+            if (base == null) {
+                continue;
+            }
+            double typeBoost = switch (base.chunkType()) {
+                case "method" -> 0.02;
+                case "class" -> 0.01;
                 default -> 0.0;
             };
-            ranked.add(typeBoost == 0.0 ? r : new VectorStore.SearchResult(
-                    r.filePath(), r.chunkType(), r.name(), r.content(), r.similarity() + typeBoost));
+            ranked.add(new VectorStore.SearchResult(
+                    base.filePath(), base.chunkType(), base.name(), base.content(),
+                    entry.getValue() + typeBoost));
         }
-
-        ranked.sort(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed());
         return limitPerFile(ranked, topK, 2);
     }
 
-    private void mergeResult(Map<String, VectorStore.SearchResult> merged, VectorStore.SearchResult candidate,
-                             Set<String> dualMatchBonused) {
-        String key = candidate.filePath() + "#" + candidate.name();
-        VectorStore.SearchResult existing = merged.get(key);
-        if (existing == null) {
-            merged.put(key, candidate);
-        } else {
-            double best = Math.max(existing.similarity(), candidate.similarity());
-            // 双重命中奖励只给一次，不重复叠加
-            if (!dualMatchBonused.contains(key)) {
-                best += 0.1;
-                dualMatchBonused.add(key);
-            }
-            merged.put(key, new VectorStore.SearchResult(
-                    candidate.filePath(), candidate.chunkType(), candidate.name(),
-                    candidate.content(), best));
-        }
+    private static String resultKey(VectorStore.SearchResult result) {
+        return result.filePath() + "#" + result.name();
     }
 
-    private VectorStore.SearchResult boostKeywordMatch(VectorStore.SearchResult result, String keyword) {
-        String nameLower = result.name().toLowerCase();
-        String fileLower = result.filePath().toLowerCase();
-        String contentLower = result.content().toLowerCase();
-        String keywordLower = keyword.toLowerCase();
-
-        // 加分幅度控制在 0.1~0.5，确保关键词结果（base 0.3）最高到 ~0.8，不会压过语义结果（max 1.0）
-        double bonus = 0.0;
-        if (nameLower.contains(keywordLower)) {
-            bonus += 0.3;  // 类名/方法名精确命中是最强信号
-        }
-        if (fileLower.contains(keywordLower)) {
-            bonus += 0.1;
-        }
-        if (contentLower.contains(keywordLower)) {
-            bonus += 0.1;
-        }
-
-        return new VectorStore.SearchResult(
-                result.filePath(),
-                result.chunkType(),
-                result.name(),
-                result.content(),
-                result.similarity() + bonus
-        );
-    }
-
-    /**
-     * 同一文件最多保留 maxPerFile 个结果，总数不超过 topK
-     */
+    /** 同一文件最多保留 maxPerFile 个结果，总数不超过 topK */
     private List<VectorStore.SearchResult> limitPerFile(List<VectorStore.SearchResult> sorted, int topK, int maxPerFile) {
         List<VectorStore.SearchResult> result = new ArrayList<>();
         Map<String, Integer> fileCount = new HashMap<>();
