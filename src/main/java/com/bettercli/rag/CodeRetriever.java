@@ -87,7 +87,10 @@ public class CodeRetriever implements AutoCloseable {
                     base.filePath(), base.chunkType(), base.name(), base.content(),
                     entry.getValue() + typeBoost));
         }
-        return limitPerFile(ranked, topK, 2);
+        // RRF 召回窗口后做 lexical rerank，再按文件限流
+        int rerankWindow = Math.max(topK * 3, Math.min(ranked.size(), 30));
+        List<VectorStore.SearchResult> reranked = LexicalOverlapReranker.rerank(query, ranked, rerankWindow);
+        return limitPerFile(reranked, topK, 2);
     }
 
     private static String resultKey(VectorStore.SearchResult result) {

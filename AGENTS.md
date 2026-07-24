@@ -70,7 +70,7 @@ Multi-Agent 设计与 ablation：设计决策见 `docs/multi-agent-design.md`（
 
 核心内置工具 20 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user`
 
-代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
+代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。混合检索：语义 + 关键词两路经 `ReciprocalRankFusion` 融合，再经 `LexicalOverlapReranker` 按查询词与 name/content 重叠重排（零外部依赖；后续可换 cross-encoder）。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
@@ -95,7 +95,7 @@ src/main/java/com/bettercli/
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
 ├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory, AgentMemoryStore, SqliteAgentMemoryStore, PostgresAgentMemoryStore, LongTermMemoryMigrator, MemoryMaintenanceScheduler, SessionMessageStore, SqliteSessionMessageStore, PostgresSessionMessageStore, SessionMessageIndexer, MemoryStoreFactory, MemoryMigrator
 ├── plan/        Planner, ExecutionPlan, Task
-├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker
+├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker, ReciprocalRankFusion, LexicalOverlapReranker
 ├── lsp/         LspManager, LspDiagnosticFormatter
 ├── prompt/      PromptAssembler, PromptContext, PromptRepository
 ├── image/       ImageReferenceParser
@@ -282,7 +282,7 @@ src/main/java/com/bettercli/
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |
 | TUI/终端 | `mvn test -Pphase16-smoke` |
-| RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest` |
+| RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest,ReciprocalRankFusionTest,LexicalOverlapRerankerTest,CodeRetrieverTest` |
 | Agent 记忆 | `mvn test -Dtest=AgentMemoryEntryTest,MemoryQueryModelsTest,SqliteAgentMemoryStoreTest,MemoryMaintenanceSchedulerTest,LongTermMemoryMigratorTest` |
 | 会话历史检索 | `mvn test -Dtest=SessionMessageModelsTest,SqliteSessionMessageStoreTest,SessionMessageIndexerTest` |
 | ReAct 轻量规划 | `mvn test -Dtest=PlanStoreTest,UpdatePlanToolTest,AgentUpdatePlanIntegrationTest` |
