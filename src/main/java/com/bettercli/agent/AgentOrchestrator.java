@@ -44,6 +44,8 @@ public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int MAX_RETRIES_PER_STEP = 2;
+    /** 审查 LLM 调用失败时的 fail-safe 重试次数（含首次），用尽仍失败则不放行。 */
+    private static final int REVIEWER_FAILSAFE_ATTEMPTS = 2;
     /**
      * 单次 run 内允许的动态重规划次数上限（防 replan 风暴）。
      * 触发条件克制：仅在 step 执行失败（FAILED）或重试耗尽仍未通过审查（EXHAUSTED）时回调 planner。
@@ -816,20 +818,21 @@ public class AgentOrchestrator {
         if (workerEnvelope != null && workerEnvelope.needsAdversarialVerification()) {
             out.println("   ⚠️ 低置信度或涉及文件改动，审查者将实际核实 artifacts（对抗式验证）");
         }
-        AgentMessage reviewResult = reviewer.reviewWithRubric(step.description(),
-                workerEnvelope != null ? workerEnvelope : emptyEnvelope(result.content()), out);
-        reviewer.clearHistory();
+        AgentMessage reviewResult = reviewWithFailSafe(reviewer, step.description(),
+                workerEnvelope != null ? workerEnvelope : emptyEnvelope(result.content()), out, step.id());
         // reviewer 反馈写入共享黑板（所有权：REVIEWER），供审计与后续 p2p 阶段复用。
-        if (sharedState != null && reviewResult.content() != null) {
+        if (sharedState != null && reviewResult.content() != null
+                && reviewResult.type() != AgentMessage.Type.ERROR) {
             sharedState.putReview(step.id(), reviewResult.content(), AgentRole.REVIEWER);
         }
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
-            log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
-            out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
-            updateStep(steps, step.id(), step.withResult(result.content()));
-            // 审查基础设施失败（非 Worker 责任）：保留结果，不触发 replan
-            return StepRunResult.completed();
+            String err = reviewResult.content() == null ? "unknown" : reviewResult.content();
+            log.warn("Reviewer fail-safe exhausted for step {}: {}", step.id(), err);
+            out.println("❌ 步骤 [" + step.id() + "] 审查服务不可用（已重试），fail-safe 不放行\n");
+            updateStep(steps, step.id(), step.withFailed("审查服务不可用：" + err));
+            return StepRunResult.of(StepOutcome.FAILED,
+                    "步骤 [" + step.id() + "] 审查服务不可用：" + err);
         }
 
         boolean approved = parseReviewApproval(reviewResult.content());
@@ -887,19 +890,21 @@ public class AgentOrchestrator {
             if (sharedState != null) {
                 sharedState.putArtifact(step.id(), acceptedResult, AgentRole.WORKER);
             }
-            AgentMessage retryReview = reviewer.reviewWithRubric(step.description(),
-                    retryEnvelope != null ? retryEnvelope : emptyEnvelope(acceptedResult), out);
-            reviewer.clearHistory();
+            AgentMessage retryReview = reviewWithFailSafe(reviewer, step.description(),
+                    retryEnvelope != null ? retryEnvelope : emptyEnvelope(acceptedResult), out, step.id());
             // 重试 review 覆盖黑板（最新一次审查反馈）
-            if (sharedState != null && retryReview.content() != null) {
+            if (sharedState != null && retryReview.content() != null
+                    && retryReview.type() != AgentMessage.Type.ERROR) {
                 sharedState.putReview(step.id(), retryReview.content(), AgentRole.REVIEWER);
             }
 
             if (retryReview.type() == AgentMessage.Type.ERROR) {
-                log.warn("Reviewer failed for step {} retry {}: {}", step.id(), retries, retryReview.content());
-                approved = true;
-                issues = "";
-                break;
+                String err = retryReview.content() == null ? "unknown" : retryReview.content();
+                log.warn("Reviewer fail-safe exhausted for step {} retry {}: {}", step.id(), retries, err);
+                out.println("❌ 步骤 [" + step.id() + "] 重试审查服务不可用（已重试），fail-safe 不放行\n");
+                updateStep(steps, step.id(), step.withFailed("审查服务不可用：" + err));
+                return StepRunResult.of(StepOutcome.FAILED,
+                        "步骤 [" + step.id() + "] 审查服务不可用：" + err);
             }
 
             reviewResult = retryReview;
@@ -1031,6 +1036,28 @@ public class AgentOrchestrator {
     private SubAgentResult emptyEnvelope(String summary) {
         return new SubAgentResult("unknown", AgentRole.WORKER, summary,
                 List.of(), List.of(), 0.5, false, 0, 0, 0, false, null);
+    }
+
+    /**
+     * 审查 LLM 调用 fail-safe：瞬时失败时重试，用尽仍 ERROR 则由调用方不放行（对标 CommandGuard）。
+     */
+    private AgentMessage reviewWithFailSafe(SubAgent reviewer, String description,
+                                            SubAgentResult envelope, PrintStream out, String stepId) {
+        AgentMessage last = null;
+        for (int attempt = 1; attempt <= REVIEWER_FAILSAFE_ATTEMPTS; attempt++) {
+            last = reviewer.reviewWithRubric(description, envelope, out);
+            reviewer.clearHistory();
+            if (last.type() != AgentMessage.Type.ERROR) {
+                return last;
+            }
+            log.warn("Reviewer fail-safe attempt {}/{} for step {}: {}",
+                    attempt, REVIEWER_FAILSAFE_ATTEMPTS, stepId, last.content());
+            if (attempt < REVIEWER_FAILSAFE_ATTEMPTS) {
+                out.println("⚠️ 审查 LLM 调用失败，fail-safe 重试 ("
+                        + attempt + "/" + REVIEWER_FAILSAFE_ATTEMPTS + ")...");
+            }
+        }
+        return last;
     }
 
     private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
