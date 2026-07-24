@@ -135,7 +135,7 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void emptySummaryAbortsCompaction() {
+    void emptySummaryFallsBackToHardTruncate() {
         StubCompactor c = new StubCompactor("", 2);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("S"));
@@ -147,12 +147,13 @@ class ConversationHistoryCompactorTest {
 
         boolean compacted = c.compactIfNeeded(history, 100);
 
-        assertFalse(compacted);
-        assertEquals(before, history.size());
+        assertTrue(compacted, "空摘要应走硬截断兜底");
+        assertTrue(history.size() < before);
+        assertTrue(history.get(1).content().contains("硬截断"));
     }
 
     @Test
-    void llmFailureDoesNotCorruptHistory() {
+    void llmFailureFallsBackToHardTruncateWithoutLosingTail() {
         StubCompactor c = new StubCompactor(null, 2) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) throws IOException {
@@ -170,8 +171,48 @@ class ConversationHistoryCompactorTest {
 
         boolean compacted = c.compactIfNeeded(history, 100);
 
-        assertFalse(compacted);
-        assertEquals(before, history.size());
+        assertTrue(compacted);
+        assertTrue(history.size() < before);
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q3")));
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q4")));
+        assertFalse(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q0")));
+    }
+
+    @Test
+    void hardTruncatesWhenSummaryThrows() {
+        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 2) {
+            @Override
+            protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                throw new IOException("LLM down");
+            }
+        };
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM"));
+        for (int i = 0; i < 5; i++) {
+            history.add(LlmClient.Message.user("Q" + i + " " + longText(3_000)));
+            history.add(LlmClient.Message.assistant("A" + i + " " + longText(3_000)));
+        }
+        int before = history.size();
+        boolean compacted = c.compactIfNeeded(history, 100);
+        assertTrue(compacted, "摘要失败应走硬截断兜底");
+        assertTrue(history.size() < before);
+        assertTrue(history.get(1).content().contains("硬截断"));
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q3")));
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q4")));
+        assertFalse(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q0")));
+    }
+
+    @Test
+    void hardTruncatesWhenSummaryEmpty() {
+        StubCompactor c = new StubCompactor("   ", 2);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM"));
+        for (int i = 0; i < 4; i++) {
+            history.add(LlmClient.Message.user("U" + i + " " + longText(2_000)));
+            history.add(LlmClient.Message.assistant("R" + i));
+        }
+        assertTrue(c.compactIfNeeded(history, 50));
+        assertTrue(history.get(1).content().contains("硬截断"));
     }
 
     private static String longText(int chars) {

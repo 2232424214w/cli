@@ -118,12 +118,12 @@ public class ConversationHistoryCompactor {
         try {
             summary = summarize(oldMsgs);
         } catch (IOException e) {
-            log.warn("conversation summary LLM call failed; skip compaction", e);
-            return false;
+            log.warn("conversation summary LLM call failed; hard-truncate fallback", e);
+            return hardTruncate(history, systemEnd, splitIdx, currentTokens);
         }
         if (summary == null || summary.isBlank()) {
-            log.warn("conversation summary returned empty; skip compaction");
-            return false;
+            log.warn("conversation summary returned empty; hard-truncate fallback");
+            return hardTruncate(history, systemEnd, splitIdx, currentTokens);
         }
 
         List<LlmClient.Message> rebuilt = new ArrayList<>();
@@ -141,6 +141,35 @@ public class ConversationHistoryCompactor {
                 "compacted conversationHistory: tokens %d -> %d, messages %d -> %d, summary chars %d",
                 currentTokens, afterTokens, userIndices.size() + systemEnd /* 估值 */, rebuilt.size(),
                 summary.length()));
+        return true;
+    }
+
+    /**
+     * 摘要失败时的硬截断兜底：丢弃 splitIdx 之前的过程消息，仍守 user 边界，
+     * 保证任何情况下都能把 token 压回窗口内（从“会崩”变成“必不崩”）。
+     */
+    private boolean hardTruncate(List<LlmClient.Message> history, int systemEnd, int splitIdx, int beforeTokens) {
+        if (splitIdx <= systemEnd || splitIdx >= history.size()) {
+            return false;
+        }
+        List<LlmClient.Message> rebuilt = new ArrayList<>();
+        for (int i = 0; i < systemEnd; i++) {
+            rebuilt.add(history.get(i));
+        }
+        rebuilt.add(LlmClient.Message.user(
+                "[历史对话已硬截断] 摘要服务不可用，已丢弃较早轮次以保住上下文窗口。"
+                        + "如需细节请用 read_file / session_search 按需取回。"));
+        rebuilt.add(LlmClient.Message.assistant("好的，较早上下文已截断，请基于保留的近期对话继续。"));
+        rebuilt.addAll(history.subList(splitIdx, history.size()));
+        int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
+        if (afterTokens >= beforeTokens && rebuilt.size() >= history.size()) {
+            return false;
+        }
+        history.clear();
+        history.addAll(rebuilt);
+        log.info(String.format(Locale.ROOT,
+                "hard-truncated conversationHistory after summary failure: tokens %d -> %d, messages -> %d",
+                beforeTokens, afterTokens, rebuilt.size()));
         return true;
     }
 
