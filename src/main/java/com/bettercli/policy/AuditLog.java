@@ -131,11 +131,25 @@ public class AuditLog {
     static String sanitize(String s) {
         if (s == null) return null;
         String sanitized = s.replaceAll("(?i)Bearer\\s+[^\\s\"'}]+", "Bearer ***");
+        // JSON / key=value：扩展关键词（api_key、access_token、credential 等）
         sanitized = sanitized.replaceAll(
-                "(?i)(\"?(?:token|key|password|secret|authorization)\"?\\s*[:=]\\s*\")([^\"]+)(\")",
+                "(?i)(\"?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+                        + "credential|credentials|passwd|password|secret|token|authorization|key)\"?"
+                        + "\\s*[:=]\\s*\")([^\"]+)(\")",
                 "$1***$3");
         sanitized = sanitized.replaceAll(
-                "(?i)(\\b(?:token|key|password|secret|authorization)\\b\\s*[:=]\\s*)([^\\s,}]+)",
+                "(?i)(\\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+                        + "credential|credentials|passwd|password|secret|token|authorization|key)\\b"
+                        + "\\s*[:=]\\s*)([^\\s,}]+)",
+                "$1***");
+        // 环境变量赋值：FOO_API_KEY=... / BAR_SECRET: ...
+        sanitized = sanitized.replaceAll(
+                "(?i)(\\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|"
+                        + "CLIENT[_-]?SECRET|SECRET|PASSWORD|TOKEN|CREDENTIALS?)\\b\\s*[:=]\\s*)([^\\s,}]+)",
+                "$1***");
+        // 进程环境块常见形态：KEY=value 且 KEY 含敏感后缀（已大写匹配；再补小写 env 名）
+        sanitized = sanitized.replaceAll(
+                "(?i)(\\b[a-z][a-z0-9_]*(?:api[_-]?key|access[_-]?token|secret|password|token)\\b\\s*[:=]\\s*)([^\\s,}]+)",
                 "$1***");
         return sanitized;
     }

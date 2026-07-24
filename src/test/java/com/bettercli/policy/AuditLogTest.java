@@ -129,6 +129,23 @@ class AuditLogTest {
     }
 
     @Test
+    void sanitizesExtendedKeywordsAndEnvAssignments(@TempDir Path tempDir) {
+        AuditLog log = new AuditLog(tempDir);
+        log.record(AuditLog.AuditEntry.allow(
+                "execute_command",
+                "env GLM_API_KEY=sk-live-secret access_token=tok-xyz credential=cred-1 FOO_SECRET=shh",
+                1));
+
+        AuditLog.AuditEntry entry = log.readRecent(1).get(0);
+        assertFalse(entry.args().contains("sk-live-secret"));
+        assertFalse(entry.args().contains("tok-xyz"));
+        assertFalse(entry.args().contains("cred-1"));
+        assertFalse(entry.args().contains("shh"));
+        assertTrue(entry.args().contains("GLM_API_KEY=***"));
+        assertTrue(entry.args().contains("***"));
+    }
+
+    @Test
     void concurrentWritesDoNotInterleave(@TempDir Path tempDir) throws Exception {
         AuditLog log = new AuditLog(tempDir);
         int threads = 10;
