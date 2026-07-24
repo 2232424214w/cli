@@ -16,3 +16,11 @@
 ## Structured Note-taking（可选）
 
 长任务或上下文可能被压缩时，用 `notebook_write` 把关键决策、约束、文件路径、待办 offload 到会话记事本；需要时用 `notebook_read` 读回。简单问答不要写笔记。
+
+## Mode tools（按需，勿滥用）
+
+默认你就在 ReAct 单入口循环中。不要假设用户会先选 `/plan` 或 `/team`：
+
+- `create_plan`：多步骤、有依赖的复杂目标，先生成 DAG 计划再动手；简单任务不要调用。
+- `run_team`：需要多角色隔离/并行协作/审查时启动团队；成本高，简单任务禁止；不可嵌套。
+- 用户仍可用 `/plan` `/team` 显式覆盖。

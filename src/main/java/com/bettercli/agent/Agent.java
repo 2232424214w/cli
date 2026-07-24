@@ -66,6 +66,8 @@ public class Agent {
     // 工具失败反思服务（阶段1：轻量反思，不额外调 LLM）。会话级有状态，持有反螺旋计数器。
     // 在 executeToolCalls 之后检测失败并注入反思提示，连续反思超阈值后停止，交给 budget 兜底。
     private final ReflectionService reflectionService = new ReflectionService();
+    /** run_team 嵌套深度，防止团队工具递归调用自己。 */
+    private final java.util.concurrent.atomic.AtomicInteger teamNesting = new java.util.concurrent.atomic.AtomicInteger();
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -83,6 +85,7 @@ public class Agent {
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
         this.toolRegistry.setPlanStore(this.planStore);
         this.toolRegistry.setSessionNotebook(this.sessionNotebook);
+        wireModeCapabilityTools();
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
     }
 
@@ -92,6 +95,72 @@ public class Agent {
         this.historyCompactor.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        wireModeCapabilityTools();
+    }
+
+    /**
+     * 把 Planner / AgentOrchestrator 挂成 ReAct 工具（模式统一：单入口 + 按需调用）。
+     */
+    private void wireModeCapabilityTools() {
+        toolRegistry.setModeCapabilityHandlers(this::createPlanViaTool, this::runTeamViaTool);
+    }
+
+    private String createPlanViaTool(String goal) {
+        try {
+            java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+            PrintStream planOut = new PrintStream(buf, true, java.nio.charset.StandardCharsets.UTF_8);
+            com.bettercli.plan.Planner planner = new com.bettercli.plan.Planner(llmClient, planOut);
+            planner.setProjectMemorySupplier(this::buildProjectMemoryContext);
+            com.bettercli.plan.ExecutionPlan plan = planner.createPlan(goal);
+            StringBuilder sb = new StringBuilder();
+            sb.append("已生成执行计划（create_plan，未自动执行）。\n");
+            sb.append("目标：").append(plan.getGoal()).append("\n");
+            if (plan.getSummary() != null && !plan.getSummary().isBlank()) {
+                sb.append("摘要：").append(plan.getSummary()).append("\n");
+            }
+            sb.append("任务列表：\n");
+            for (com.bettercli.plan.Task task : plan.getAllTasks()) {
+                sb.append("- [").append(task.getId()).append("] (").append(task.getType()).append(") ")
+                        .append(task.getDescription());
+                if (!task.getDependencies().isEmpty()) {
+                    sb.append("  deps=").append(task.getDependencies());
+                }
+                sb.append("\n");
+            }
+            sb.append("\n请按依赖顺序逐步用工具完成；需要完整审阅执行流时可用 /plan。");
+            return sb.toString();
+        } catch (Exception e) {
+            return "create_plan 失败: " + e.getMessage();
+        }
+    }
+
+    private String runTeamViaTool(String goal) {
+        if (teamNesting.get() > 0) {
+            return "run_team 失败: 不可嵌套调用（团队执行中）";
+        }
+        teamNesting.incrementAndGet();
+        try {
+            java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+            PrintStream teamOut = new PrintStream(buf, true, java.nio.charset.StandardCharsets.UTF_8);
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, toolRegistry, memoryManager, teamOut);
+            String result = orchestrator.run(goal);
+            String logs = buf.toString(java.nio.charset.StandardCharsets.UTF_8);
+            StringBuilder sb = new StringBuilder();
+            sb.append("【Multi-Agent 团队结果】\n");
+            if (result != null && !result.isBlank()) {
+                sb.append(result.trim()).append("\n");
+            }
+            if (logs != null && !logs.isBlank()) {
+                String trimmed = logs.length() > 4000 ? logs.substring(logs.length() - 4000) : logs;
+                sb.append("\n--- 执行摘录 ---\n").append(trimmed.trim());
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "run_team 失败: " + e.getMessage();
+        } finally {
+            teamNesting.decrementAndGet();
+        }
     }
 
     /** 暴露 ReAct 规划存储，供渲染层/状态栏展示进度；不应被外部修改。 */

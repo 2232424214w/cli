@@ -120,6 +120,9 @@ public class ToolRegistry {
     private com.bettercli.agent.PlanStore planStore;
     // 会话记事本（structured note-taking）。由 Agent 注入；未注入时 notebook_* 返回未初始化提示。
     private com.bettercli.agent.SessionNotebook sessionNotebook;
+    // 模式工具化：create_plan / run_team 回调（由 Agent 注入；未注入时返回提示）
+    private java.util.function.Function<String, String> createPlanHandler;
+    private java.util.function.Function<String, String> runTeamHandler;
     // ask_user 复用 HITL 交互底层；由 HitlToolRegistry / Main 注入。未注入时走非交互降级文案。
     private com.bettercli.hitl.HitlHandler hitlHandler;
     // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
@@ -155,6 +158,7 @@ public class ToolRegistry {
         registerSessionSearchTool();
         registerPlanTool();
         registerNotebookTools();
+        registerModeCapabilityTools();
         registerAskUserTool();
         registerPeerTool();
     }
@@ -322,6 +326,17 @@ public class ToolRegistry {
 
     public com.bettercli.agent.SessionNotebook getSessionNotebook() {
         return sessionNotebook;
+    }
+
+    /**
+     * 注入模式能力工具回调（create_plan / run_team）。由 ReAct Agent 在构造后设置，
+     * 使模型在单入口循环内按需调用规划 / 多 Agent，而无需用户先选 /plan /team。
+     */
+    public void setModeCapabilityHandlers(
+            java.util.function.Function<String, String> createPlanHandler,
+            java.util.function.Function<String, String> runTeamHandler) {
+        this.createPlanHandler = createPlanHandler;
+        this.runTeamHandler = runTeamHandler;
     }
 
     /**
@@ -1285,6 +1300,64 @@ public class ToolRegistry {
             sb.append("\n");
         }
         return sb.toString().trim();
+    }
+
+    /**
+     * plan / team 工具化：单入口 ReAct 内按需调用（对标 Claude Code spawn / 规划工具）。
+     */
+    private void registerModeCapabilityTools() {
+        tools.put("create_plan", new Tool(
+                "create_plan",
+                "为多步骤、有依赖的复杂目标生成 DAG 执行计划（不立即执行）。"
+                        + "当任务需要分阶段推进、有明确依赖顺序、或你需要先想清楚再动手时调用；"
+                        + "简单单步查询/改文件不要调用。"
+                        + "返回计划摘要后，可按步骤自行用工具执行，或提示用户用 /plan 走完整审阅执行路径。",
+                createParameters(
+                        new Param("goal", "string", "要规划的目标（完整任务描述）", true)
+                ),
+                args -> invokeCreatePlan(args)
+        ));
+        tools.put("run_team", new Tool(
+                "run_team",
+                "启动 Multi-Agent 团队（planner + workers + reviewer）协作完成目标，返回汇总结果。"
+                        + "适合需要隔离上下文的并行调研、多角色审查、或单 Agent 容易顾此失彼的大任务；"
+                        + "简单任务不要用（成本高）。不可嵌套调用。"
+                        + "用户仍可用 /team 显式覆盖。",
+                createParameters(
+                        new Param("goal", "string", "交给团队的目标", true)
+                ),
+                args -> invokeRunTeam(args)
+        ));
+    }
+
+    private String invokeCreatePlan(Map<String, String> args) {
+        String goal = args.get("goal");
+        if (goal == null || goal.isBlank()) {
+            return "create_plan 失败: goal 不能为空";
+        }
+        if (createPlanHandler == null) {
+            return "create_plan 失败: 规划能力未注入（请在 ReAct Agent 内使用）";
+        }
+        try {
+            return createPlanHandler.apply(goal.trim());
+        } catch (Exception e) {
+            return "create_plan 失败: " + e.getMessage();
+        }
+    }
+
+    private String invokeRunTeam(Map<String, String> args) {
+        String goal = args.get("goal");
+        if (goal == null || goal.isBlank()) {
+            return "run_team 失败: goal 不能为空";
+        }
+        if (runTeamHandler == null) {
+            return "run_team 失败: 团队能力未注入（请在 ReAct Agent 内使用）";
+        }
+        try {
+            return runTeamHandler.apply(goal.trim());
+        } catch (Exception e) {
+            return "run_team 失败: " + e.getMessage();
+        }
     }
 
     /**

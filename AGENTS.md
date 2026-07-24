@@ -54,9 +54,9 @@ mvn test -DskipTests=false                  # 全量回归
 
 | 路径 | 入口 | 触发 |
 |------|------|------|
-| ReAct | `Agent.java` | 默认模式 |
-| Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
-| Multi-Agent | `AgentOrchestrator.java` | `/team` |
+| ReAct | `Agent.java` | 默认模式；亦可在循环内调用 `create_plan` / `run_team` 工具（模式统一起步） |
+| Plan-and-Execute | `PlanExecuteAgent.java` | `/plan`（显式覆盖） |
+| Multi-Agent | `AgentOrchestrator.java` | `/team`（显式覆盖）或 ReAct 内 `run_team` |
 
 Plan-and-Execute DAG 校验：`ExecutionPlan.validate()` 返回 `PlanValidationResult`（悬空依赖 / 自依赖 / 环三类问题正交），`detectCycle()` 返回环路径（跳过自环与悬空边，避免误判）。`Planner.parsePlan` 解析期自动修复可恢复项（自依赖、悬空依赖丢弃 + `log.warn`），真环抛带路径的 `IOException`（"存在循环依赖: task_1 -> task_2 -> task_1"）。`Planner.replan` 保留原目标（失败上下文作 `createPlan(goal, extraContext)` 补充，不再污染 `plan.getGoal()`）。`PlanExecuteAgent` 计划停滞时列出被卡的 PENDING 任务 id。`inferSimpleTaskType` 已修复 `&&`/`||` 优先级 bug（读取/打开/查看三个动词一致判 FILE_READ）。详见 `docs/plan-module-iteration.md`。
 
@@ -68,7 +68,7 @@ Multi-Agent Scatter-Gather：`ScatterGather.explore` 为同一目标派 N 路角
 Multi-Agent 增量辩论：审查拒绝后 Worker 收到 `buildIncrementalDebateContext`（只改指出的点，不推倒重来）；issues 实质相同或审查 JSON `converged: true` 时停止辩论并保留当前结果。
 Multi-Agent 设计与 ablation：设计决策见 `docs/multi-agent-design.md`（四阶段迭代 + 权衡）；ablation 方法论见 `docs/multi-agent-ablation.md`，配套 `TeamBenchmark`（`src/test/java/com/bettercli/agent/TeamBenchmark.java`，`@EnabledIfSystemProperty` 默认禁用，`-Dbettercli.benchmark.enabled=true` 启用，跑单 Agent vs Multi baseline vs Multi full 三组对照，用 `CountingLlmClient` 包装器累计 token/调用次数，输出 `docs/multi-agent-ablation-results.md`）。
 
-核心内置工具 22 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read`
+核心内置工具 24 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team`
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。混合检索：语义 + 关键词两路经 `ReciprocalRankFusion` 融合，再经 `LexicalOverlapReranker` 按查询词与 name/content 重叠重排（零外部依赖；后续可换 cross-encoder）。向量检索经内存 `HnswIndex`（≤64 精确余弦，更大规模 NSW 近似），SQLite 仅作持久化，避免每次 search 全表解析 JSON。
 
