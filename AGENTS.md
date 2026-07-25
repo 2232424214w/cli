@@ -54,7 +54,7 @@ mvn test -DskipTests=false                  # 全量回归
 
 | 路径 | 入口 | 触发 |
 |------|------|------|
-| ReAct | `Agent.java` | 默认模式；亦可在循环内调用 `create_plan` / `run_team` 工具（模式统一起步） |
+| ReAct | `Agent.java` | 默认模式；亦可在循环内调用 `create_plan` / `run_team` / `run_subagent` 工具（模式统一起步） |
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan`（显式覆盖） |
 | Multi-Agent | `AgentOrchestrator.java` | `/team`（显式覆盖）或 ReAct 内 `run_team` |
 
@@ -68,7 +68,9 @@ Multi-Agent Scatter-Gather：`ScatterGather.explore` 为同一目标派 N 路角
 Multi-Agent 增量辩论：审查拒绝后 Worker 收到 `buildIncrementalDebateContext`（只改指出的点，不推倒重来）；issues 实质相同或审查 JSON `converged: true` 时停止辩论并保留当前结果。
 Multi-Agent 设计与 ablation：设计决策见 `docs/multi-agent-design.md`（四阶段迭代 + 权衡）；ablation 方法论见 `docs/multi-agent-ablation.md`，配套 `TeamBenchmark`（`src/test/java/com/bettercli/agent/TeamBenchmark.java`，`@EnabledIfSystemProperty` 默认禁用，`-Dbettercli.benchmark.enabled=true` 启用，跑单 Agent vs Multi baseline vs Multi full 三组对照，用 `CountingLlmClient` 包装器累计 token/调用次数，输出 `docs/multi-agent-ablation-results.md`）。
 
-核心内置工具 24 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team`
+核心内置工具 25 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team` / `run_subagent`
+
+Custom Subagent（与 Multi-Agent `/team` **独立**）：用户/项目用 `AGENT.md` 定义专属子 Agent（prompt / 工具白名单 / 模型 / maxTurns / timeoutSeconds / skills）；主 ReAct 将 name+description 注入 system prompt 索引，经**大模型语义识别**后调用 `run_subagent(name, task)` 委托（立即异步占位，同轮可并行，批次结束回填）；另有**轻量路由 LLM**（默认开启，可关）命中则跳过主 Agent 直达响应。用户自然语言点名亦可。**禁止** `/subagent <name> <task>` 斜杠硬指定执行。管理命令：`/subagent` / `/subagent list` / `/subagent reload` / `/subagent status`（仅查看/重扫/运行态）。目录：`~/.bettercli/agents/`、`.bettercli/agents/`（覆盖内置 `agents-cache`）。子 Agent 强制剥离 `run_subagent`/`run_team`/`create_plan` 防递归；`skills` 白名单约束 `load_skill`；`/cancel` 与超时（默认 300s）可中断；`write_subagent_memory` 可追加 MEMORY.md；审计写入 `~/.bettercli/audit/subagent-*.jsonl`。详见 `docs/custom-subagent.md`。
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。混合检索：语义 + 关键词两路经 `ReciprocalRankFusion` 融合，再经 `LexicalOverlapReranker` 按查询词与 name/content 重叠重排（零外部依赖；后续可换 cross-encoder）。向量检索经内存 `HnswIndex`（≤64 精确余弦，更大规模 NSW 近似），SQLite 仅作持久化，避免每次 search 全表解析 JSON。
 
@@ -108,6 +110,7 @@ src/main/java/com/bettercli/
 ├── web/         SearchProvider, WebFetcher, HtmlExtractor, NetworkPolicy
 ├── policy/      PathGuard, CommandGuard, AuditLog
 ├── skill/       SkillRegistry, SkillContextBuffer, SkillIndexFormatter
+├── subagent/    CustomSubAgentDefinition, CustomSubAgentRegistry, CustomSubAgentRunner, CustomSubAgentRouter
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
@@ -239,6 +242,17 @@ src/main/java/com/bettercli/
 - system prompt 索引段注入三处提示词，上限 20 个 / 4KB
 - `load_skill` → SkillContextBuffer → 下一轮 user message 前置注入
 
+### Custom Subagent
+
+- 与 `/team` Multi-Agent 并存、不融合；任务由主模型语义调用 `run_subagent` 或轻量路由 LLM 触发
+- `/subagent list|reload|status` 仅管理；禁止斜杠指定执行
+- 定义见 `~/.bettercli/agents/<name>/AGENT.md` 与项目级 `.bettercli/agents/`
+- `run_subagent` 异步占位 + 批次回填；RuntimeContext ThreadLocal 支持同轮并行
+- 路由默认开启（`bettercli.subagent.router.enabled`）；置信度门控（`min.confidence` 默认 0.70）；`@main`/`/main` 强制主 Agent
+- 路由模式 `seedParentHistory` 继承主会话；委托等待时状态栏 `sa:name`/`sa×N`
+- `skills` 白名单、`timeoutSeconds`、`/cancel`、`write_subagent_memory`、审计 JSONL 已交付
+- 平台专属（RoleHub / Webhook / HA）不做，见 `docs/custom-subagent.md`
+
 ## 修改时的硬规则
 
 ### 1. 改行为 → 同步文档
@@ -285,6 +299,7 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
+| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CliCommandParserTest` |
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent reviewer fail-safe | `mvn test -Dtest=ReviewerFailSafeIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |
@@ -324,6 +339,7 @@ src/main/java/com/bettercli/
 | 会话历史检索 | memory/SessionMessageStore.java + SqliteSessionMessageStore.java + SessionMessageIndexer.java |
 | 可插拔后端 | memory/MemoryStoreFactory.java + PostgresAgentMemoryStore.java + PostgresSessionMessageStore.java + MemoryMigrator.java |
 | Multi-Agent | AgentOrchestrator.java + SubAgent.java |
+| Custom Subagent | subagent/CustomSubAgentRegistry.java + CustomSubAgentRunner.java + CustomSubAgentRouter.java + Agent.java (`run_subagent`) |
 | Multi-Agent 动态重规划 | AgentOrchestrator.java（`triggerReplan` / `StepOutcome`） |
 | Multi-Agent Scatter-Gather | agent/ScatterGather.java + WorkflowAdapters.fanInTask |
 | Multi-Agent 共享黑板 | agent/SharedState.java + AgentOrchestrator.java (`buildStepContext` / `pickWorker` / 产物双写) |

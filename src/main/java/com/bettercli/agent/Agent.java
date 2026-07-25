@@ -20,6 +20,8 @@ import com.bettercli.runtime.CancellationContext;
 import com.bettercli.skill.SkillContextBuffer;
 import com.bettercli.skill.SkillIndexFormatter;
 import com.bettercli.skill.SkillRegistry;
+import com.bettercli.subagent.CustomSubAgentIndexFormatter;
+import com.bettercli.subagent.CustomSubAgentRunner;
 import com.bettercli.util.AnsiStyle;
 import com.bettercli.tool.ToolRegistry;
 import com.bettercli.tool.ToolRegistry.ToolExecutionResult;
@@ -53,6 +55,7 @@ public class Agent {
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
+    private CustomSubAgentRunner customSubAgentRunner;
     private Renderer renderer;
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
@@ -99,10 +102,25 @@ public class Agent {
     }
 
     /**
-     * 把 Planner / AgentOrchestrator 挂成 ReAct 工具（模式统一：单入口 + 按需调用）。
+     * 把 Planner / AgentOrchestrator / Custom SubAgent 挂成 ReAct 工具（模式统一：单入口 + 按需调用）。
      */
     private void wireModeCapabilityTools() {
         toolRegistry.setModeCapabilityHandlers(this::createPlanViaTool, this::runTeamViaTool);
+        toolRegistry.setRunSubagentHandler(this::runSubagentViaTool);
+    }
+
+    /**
+     * 注入 Custom SubAgent 运行时（语义委托 run_subagent）。与 /team Multi-Agent 独立。
+     */
+    public void setCustomSubAgentRunner(CustomSubAgentRunner customSubAgentRunner) {
+        this.customSubAgentRunner = customSubAgentRunner;
+        refreshSystemPromptAfterSubagentChange();
+    }
+
+    private void refreshSystemPromptAfterSubagentChange() {
+        if (conversationHistory != null && !conversationHistory.isEmpty()) {
+            conversationHistory.set(0, LlmClient.Message.system(buildSystemPrompt("")));
+        }
     }
 
     private String createPlanViaTool(String goal) {
@@ -161,6 +179,22 @@ public class Agent {
         } finally {
             teamNesting.decrementAndGet();
         }
+    }
+
+    private String runSubagentViaTool(String name, String task) {
+        if (customSubAgentRunner == null) {
+            return "run_subagent 失败: Custom SubAgent 未初始化";
+        }
+        PrintStream progress = null;
+        try {
+            progress = renderer().stream();
+        } catch (Exception e) {
+            log.debug("Custom SubAgent progress stream unavailable: {}", e.getMessage());
+        }
+        String parentConversationId = sessionMessageIndexer == null
+                ? null : sessionMessageIndexer.getConversationId();
+        // 立即返回占位，后台执行；executeToolCalls 结束后 materialize 回填
+        return customSubAgentRunner.startAsync(name, task, llmClient, toolRegistry, progress, parentConversationId);
     }
 
     /** 暴露 ReAct 规划存储，供渲染层/状态栏展示进度；不应被外部修改。 */
@@ -439,13 +473,18 @@ public class Agent {
     }
 
     private String buildSystemPrompt(String memoryContext) {
-        return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
+        String assembled = promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
                 .memoryContext(memoryContext)
                 .externalContext(buildExternalContext())
                 .skillIndex(buildSkillIndex())
                 .toolsEnabled(llmClient == null || llmClient.supportsTools())
                 .build());
+        String subagentIndex = buildCustomSubAgentIndex();
+        if (subagentIndex == null || subagentIndex.isBlank()) {
+            return assembled;
+        }
+        return assembled + "\n\n" + subagentIndex.trim();
     }
 
     private void maybeCompactHistory() {
@@ -519,6 +558,18 @@ public class Agent {
         }
     }
 
+    private String buildCustomSubAgentIndex() {
+        if (customSubAgentRunner == null || customSubAgentRunner.registry() == null) {
+            return "";
+        }
+        try {
+            return CustomSubAgentIndexFormatter.format(customSubAgentRunner.registry().all());
+        } catch (Exception e) {
+            log.warn("Failed to build Custom SubAgent index", e);
+            return "";
+        }
+    }
+
     private String prependSkillBodies(String userInput) {
         if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
             return userInput;
@@ -583,6 +634,81 @@ public class Agent {
      */
     public List<LlmClient.Message> getConversationHistory() {
         return new ArrayList<>(conversationHistory);
+    }
+
+    /**
+     * 路由命中 Custom SubAgent 后，把本轮 user/assistant 写入主会话，保持对话连续。
+     */
+    public void recordExternalTurn(String userInput, String assistantReply) {
+        if (userInput != null && !userInput.isBlank()) {
+            memoryManager.addUserMessage(userInput);
+            conversationHistory.add(LlmClient.Message.user(userInput));
+        }
+        String reply = assistantReply == null ? "" : assistantReply;
+        memoryManager.addAssistantMessage(reply);
+        conversationHistory.add(LlmClient.Message.assistant(reply));
+        if (sessionMessageIndexer != null) {
+            try {
+                sessionMessageIndexer.indexIncremental(new ArrayList<>(conversationHistory));
+            } catch (Exception e) {
+                log.debug("异步索引会话消息失败: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 主会话近期 transcript 摘录，供路由直达子 Agent 延续上下文（跳过 system）。
+     */
+    public String buildTranscriptExcerpt(int maxMessages, int maxChars) {
+        List<LlmClient.Message> msgs = recentDialogueMessages(maxMessages);
+        StringBuilder sb = new StringBuilder();
+        for (LlmClient.Message m : msgs) {
+            String role = m.role() == null ? "?" : m.role();
+            String content = m.content() == null ? "" : m.content().trim();
+            if (content.isEmpty()) {
+                continue;
+            }
+            if (content.length() > 400) {
+                content = content.substring(0, 400) + "...";
+            }
+            if (sb.length() > 0) {
+                sb.append("\n");
+            }
+            sb.append(role).append(": ").append(content);
+            if (sb.length() >= maxChars) {
+                break;
+            }
+        }
+        if (sb.length() > maxChars) {
+            return sb.substring(0, Math.max(0, maxChars)) + "...";
+        }
+        return sb.toString();
+    }
+
+    /** 供 Custom SubAgent 路由模式 seed 的近期对话（user/assistant，无 tool）。 */
+    public List<LlmClient.Message> recentDialogueMessages(int maxMessages) {
+        int limit = Math.max(1, maxMessages);
+        List<LlmClient.Message> msgs = new ArrayList<>();
+        for (LlmClient.Message m : conversationHistory) {
+            if (m == null) {
+                continue;
+            }
+            String role = m.role() == null ? "" : m.role().toLowerCase();
+            if ("system".equals(role) || "tool".equals(role)) {
+                continue;
+            }
+            if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
+                continue;
+            }
+            if (m.content() == null || m.content().isBlank()) {
+                continue;
+            }
+            msgs.add(m);
+        }
+        if (msgs.size() > limit) {
+            return new ArrayList<>(msgs.subList(msgs.size() - limit, msgs.size()));
+        }
+        return msgs;
     }
 
     /**
@@ -839,6 +965,42 @@ public class Agent {
             log.info("Executing {} tool calls in parallel (iteration={})", invocations.size(), iteration);
         }
         List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        if (customSubAgentRunner != null) {
+            long pending = results.stream()
+                    .filter(r -> CustomSubAgentRunner.parsePendingSessionId(r.result()) != null)
+                    .count();
+            if (pending > 0) {
+                String phase = customSubAgentRunner.activeRunsSummary();
+                if (phase == null || phase.isBlank()) {
+                    phase = "sa×" + pending;
+                }
+                try {
+                    renderer().updateStatus(currentStatus(phase));
+                } catch (Exception e) {
+                    log.debug("subagent status update skipped: {}", e.getMessage());
+                }
+                try {
+                    renderer().stream().println(AnsiStyle.subtle(
+                            "  ⏳ 等待 " + pending + " 个 Custom SubAgent 完成…"));
+                } catch (Exception e) {
+                    log.debug("subagent wait hint skipped: {}", e.getMessage());
+                }
+            }
+            results = customSubAgentRunner.materializeAsyncResults(results);
+            // 防止占位泄漏进对话
+            List<ToolExecutionResult> sanitized = new ArrayList<>(results.size());
+            for (ToolExecutionResult r : results) {
+                if (CustomSubAgentRunner.parsePendingSessionId(r.result()) != null) {
+                    sanitized.add(new ToolExecutionResult(
+                            r.id(), r.name(), r.argumentsJson(),
+                            "run_subagent 失败: 异步结果未回填",
+                            r.elapsedMillis(), false, r.imageParts()));
+                } else {
+                    sanitized.add(r);
+                }
+            }
+            results = sanitized;
+        }
         for (ToolExecutionResult result : results) {
             log.debug("Tool result preview [{}]: {}", result.name(), preview(result.result(), 300));
             emitToolResultSummary(result);

@@ -319,6 +319,22 @@ public class Main {
             hitlToolRegistry.setSkillRegistry(skillRegistry);
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
+            // === Custom SubAgent 系统初始化（与 Multi-Agent /team 独立）===
+            Path agentsCacheDir = home.resolve(".bettercli/agents-cache");
+            Path userAgentsDir = home.resolve(".bettercli/agents");
+            Path projectAgentsDir = Path.of(".bettercli/agents").toAbsolutePath();
+            try {
+                new com.bettercli.subagent.CustomSubAgentBuiltinExtractor(agentsCacheDir).extractAll();
+            } catch (Exception e) {
+                startupNote = appendStartupNote(startupNote, "内置 Custom SubAgent 解压失败: " + e.getMessage());
+            }
+            com.bettercli.subagent.CustomSubAgentRegistry customSubAgentRegistry =
+                    new com.bettercli.subagent.CustomSubAgentRegistry(
+                            agentsCacheDir, userAgentsDir, projectAgentsDir);
+            customSubAgentRegistry.reload();
+            com.bettercli.subagent.CustomSubAgentRunner customSubAgentRunner =
+                    new com.bettercli.subagent.CustomSubAgentRunner(customSubAgentRegistry);
+
             // 记忆存储后端（对标美团 1024 Agent，可插拔：sqlite/postgres，默认 sqlite）
             File memoryDir = new File(new File(System.getProperty("user.home"), ".bettercli"), "memory");
             String projectPath = Path.of(".").toAbsolutePath().normalize().toString();
@@ -392,6 +408,7 @@ public class Main {
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
+            reactAgent.setCustomSubAgentRunner(customSubAgentRunner);
             if (sessionMessageIndexer != null) {
                 reactAgent.setSessionMessageIndexer(sessionMessageIndexer);
             }
@@ -409,6 +426,7 @@ public class Main {
             }
             boolean nextTaskUsePlanMode = false;
             boolean nextTaskUseTeamMode = false;
+            String lastRoutedSubAgent = null; // 路由 sticky：短跟进提示
 
             // === TUI / CLI 分支判断 ===
             // 旧 BETTERCLI_TUI=true 路径仍走 Lanterna 全屏 TUI（Day 5 后由 LanternaRenderer 接管）。
@@ -497,6 +515,7 @@ public class Main {
                     case CLEAR -> {
                         reactAgent.clearHistory();
                         hitlHandler.clearApprovedAll();
+                        lastRoutedSubAgent = null;
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         ui.println("🗑️ 当前对话历史已清空，长期记忆保持不变\n");
                         continue;
@@ -900,6 +919,26 @@ public class Main {
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
+                    case SUBAGENT_LIST -> {
+                        ui.println(SubagentCommandHandler.list(customSubAgentRegistry));
+                        continue;
+                    }
+                    case SUBAGENT_RELOAD -> {
+                        customSubAgentRegistry.reload();
+                        reactAgent.setCustomSubAgentRunner(customSubAgentRunner);
+                        ui.println("🔄 已重新扫描 Custom SubAgent 目录");
+                        String summary = SubagentCommandHandler.startupSummary(customSubAgentRegistry);
+                        if (!summary.isBlank()) {
+                            ui.println(summary);
+                        }
+                        ui.println(SubagentCommandHandler.list(customSubAgentRegistry));
+                        ui.println("✅ 下一轮 LLM 调用生效（任务仍须由主 Agent 语义调用 run_subagent）");
+                        continue;
+                    }
+                    case SUBAGENT_STATUS -> {
+                        ui.println(SubagentCommandHandler.status(customSubAgentRunner));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -1012,8 +1051,55 @@ public class Main {
                         return orchestrator.run(taskInput);
                     };
                 } else {
-                    snapshotMode = "react";
-                    runTask = () -> reactAgent.run(taskInput);
+                    // 轻量路由：旁路前缀 / 置信度门控 / sticky；命中则跳过主 Agent
+                    com.bettercli.subagent.CustomSubAgentRouter.BypassResult bypass =
+                            com.bettercli.subagent.CustomSubAgentRouter.detectBypass(taskInput);
+                    final String effectiveTask = (bypass.message() == null || bypass.message().isBlank())
+                            ? taskInput : bypass.message();
+                    if (bypass.bypassRouter()) {
+                        lastRoutedSubAgent = null;
+                    }
+                    java.util.Optional<com.bettercli.subagent.CustomSubAgentRouter.RouteDecision> routed =
+                            java.util.Optional.empty();
+                    if (!bypass.bypassRouter() && !customSubAgentRegistry.all().isEmpty()) {
+                        routed = com.bettercli.subagent.CustomSubAgentRouter.route(
+                                effectiveTask, llmClient, customSubAgentRegistry.all(), lastRoutedSubAgent);
+                    }
+                    if (routed.isPresent()) {
+                        final String routedName = routed.get().agentName();
+                        final double routedConfidence = routed.get().confidence();
+                        final LlmClient activeClient = llmClient;
+                        final com.bettercli.memory.SessionMessageIndexer indexer = sessionMessageIndexer;
+                        lastRoutedSubAgent = routedName;
+                        snapshotMode = "subagent:" + routedName;
+                        runTask = () -> {
+                            PrintStream progress = null;
+                            try {
+                                progress = renderer.stream();
+                            } catch (Exception ignored) {
+                                // plain / test path
+                            }
+                            if (progress != null) {
+                                progress.println(String.format(
+                                        java.util.Locale.ROOT,
+                                        "🧭 路由 → %s (confidence=%.2f)",
+                                        routedName, routedConfidence));
+                            }
+                            String parentId = indexer == null ? null : indexer.getConversationId();
+                            List<com.bettercli.llm.LlmClient.Message> history =
+                                    reactAgent.recentDialogueMessages(12);
+                            String answer = customSubAgentRunner.runDirect(
+                                    routedName, effectiveTask, activeClient,
+                                    reactAgent.getToolRegistry(),
+                                    progress, parentId, history, null);
+                            reactAgent.recordExternalTurn(effectiveTask, answer);
+                            return answer;
+                        };
+                    } else {
+                        snapshotMode = "react";
+                        final String mainTask = effectiveTask;
+                        runTask = () -> reactAgent.run(mainTask);
+                    }
                 }
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
@@ -1824,6 +1910,11 @@ public class Main {
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
+                new SlashCommandHint("/subagent", "/subagent", "查看 Custom SubAgent 列表（仅管理）"),
+                new SlashCommandHint("/subagent list", "/subagent list", "查看 Custom SubAgent 列表"),
+                new SlashCommandHint("/subagent reload", "/subagent reload", "重新扫描 Custom SubAgent 目录"),
+                new SlashCommandHint("/subagent status", "/subagent status", "查看运行中的 Custom SubAgent 委托"),
+                new SlashCommandHint("/sa-st", "/sa-st", "查看运行中的 Custom SubAgent 委托"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
                 new SlashCommandHint("/exit", "/exit", "退出 BetterCLI"),
                 new SlashCommandHint("/quit", "/quit", "退出 BetterCLI")

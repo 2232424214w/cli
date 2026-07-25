@@ -522,4 +522,22 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
     }
+
+    @Test
+    void parsesSubagentListAndReloadOnly() {
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent list").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/sa").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/subagent reload").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/sa reload").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/subagent status").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/sa-st").type());
+    }
+
+    @Test
+    void subagentNameTaskIsNotAnExecutionCommand() {
+        // 禁止斜杠硬指定执行：/subagent foo bar 视为未知命令，走主 Agent 语义路径
+        CliCommandParser.ParsedCommand cmd = CliCommandParser.parse("/subagent code-reviewer 审查这段代码");
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, cmd.type());
+    }
 }

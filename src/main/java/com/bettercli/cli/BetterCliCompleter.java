@@ -51,6 +51,7 @@ final class BetterCliCompleter implements Completer {
                 || completeConfig(input, candidates)
                 || completeMcp(input, candidates)
                 || completeSkill(input, candidates)
+                || completeSubagent(input, candidates)
                 || completeTask(input, candidates)
                 || completeBrowser(input, candidates)
                 || completeSnapshot(input, candidates)) {
@@ -179,6 +180,36 @@ final class BetterCliCompleter implements Completer {
         if (List.of("show", "on", "off").contains(sub)) {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addSkillCandidates(candidates, prefix);
+            return true;
+        }
+        return true;
+    }
+
+    private boolean completeSubagent(String input, List<Candidate> candidates) {
+        if (!input.equalsIgnoreCase("/subagent") && !input.regionMatches(true, 0, "/subagent ", 0, 10)
+                && !input.equalsIgnoreCase("/sa") && !input.regionMatches(true, 0, "/sa ", 0, 4)) {
+            return false;
+        }
+        String payload;
+        if (input.regionMatches(true, 0, "/subagent", 0, 9)) {
+            payload = input.length() <= 9 ? "" : input.substring(9).trim();
+            if (input.length() > 9 && input.charAt(9) == ' ') {
+                payload = input.substring(10);
+            } else if (input.length() == 9) {
+                payload = "";
+            }
+        } else {
+            payload = input.length() <= 3 ? "" : input.substring(3).trim();
+            if (input.length() > 3 && input.charAt(3) == ' ') {
+                payload = input.substring(4);
+            }
+        }
+        String[] parts = payload.trim().isEmpty() ? new String[0] : payload.trim().split("\\s+");
+        if (parts.length <= 1 && !payload.endsWith(" ")) {
+            addMatching(candidates, "Custom SubAgent", payload,
+                    option("list", "查看 Custom SubAgent 列表"),
+                    option("reload", "重新扫描 Custom SubAgent 目录"),
+                    option("status", "查看运行中委托"));
             return true;
         }
         return true;

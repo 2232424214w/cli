@@ -11,6 +11,8 @@ import com.bettercli.prompt.PromptAssembler;
 import com.bettercli.prompt.PromptContext;
 import com.bettercli.prompt.PromptMode;
 import com.bettercli.prompt.ProjectMemoryLoader;
+import com.bettercli.runtime.CancellationContext;
+import com.bettercli.skill.Skill;
 import com.bettercli.skill.SkillContextBuffer;
 import com.bettercli.skill.SkillIndexFormatter;
 import com.bettercli.skill.SkillRegistry;
@@ -30,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -48,6 +51,16 @@ public class SubAgent implements Worker {
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private final String specialty;
+    /** Custom SubAgent：专属 system prompt body；非 null 时不再走 TEAM_* PromptMode。 */
+    private final String customPromptBody;
+    /** Custom SubAgent：可选 MEMORY.md 正文。 */
+    private final String customMemoryMd;
+    /** Custom SubAgent：工具白名单；非 null 时覆盖 {@link AgentRole#allowedTools()}。 */
+    private final Set<String> toolOverride;
+    /** Custom SubAgent：硬轮数覆盖；null 表示用默认 AgentBudget。 */
+    private final Integer maxTurnsOverride;
+    /** Custom SubAgent：Skill 白名单；null/空 = 不限制（全量）；非空则索引与 load 仅限这些。 */
+    private final Set<String> skillWhitelist;
     private Supplier<String> externalContextSupplier = () -> "";
     private String teamWorkersContext;
     private SkillRegistry skillRegistry;
@@ -65,15 +78,74 @@ public class SubAgent implements Worker {
      *                 用于让多个 Worker 有差异化专长；null/空 表示不注入。
      */
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry, String specialty) {
+        this(name, role, llmClient, toolRegistry, specialty, null, null, null, null, null);
+    }
+
+    /**
+     * 由 Custom SubAgent 定义构造：独立 prompt / 工具集 / maxTurns，角色标签固定为 WORKER。
+     */
+    public static SubAgent forCustom(
+            String name,
+            LlmClient llmClient,
+            ToolRegistry toolRegistry,
+            String promptBody,
+            String memoryMd,
+            Set<String> effectiveTools,
+            Integer maxTurns) {
+        return forCustom(name, llmClient, toolRegistry, promptBody, memoryMd, effectiveTools, maxTurns, null);
+    }
+
+    public static SubAgent forCustom(
+            String name,
+            LlmClient llmClient,
+            ToolRegistry toolRegistry,
+            String promptBody,
+            String memoryMd,
+            Set<String> effectiveTools,
+            Integer maxTurns,
+            Set<String> skillWhitelist) {
+        if (effectiveTools == null) {
+            throw new IllegalArgumentException("Custom SubAgent effectiveTools 不能为 null");
+        }
+        return new SubAgent(
+                name,
+                AgentRole.WORKER,
+                llmClient,
+                toolRegistry,
+                null,
+                promptBody == null ? "" : promptBody,
+                memoryMd,
+                Set.copyOf(effectiveTools),
+                maxTurns,
+                skillWhitelist == null || skillWhitelist.isEmpty() ? null : Set.copyOf(skillWhitelist));
+    }
+
+    private SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry,
+                     String specialty, String customPromptBody, String customMemoryMd,
+                     Set<String> toolOverride, Integer maxTurnsOverride, Set<String> skillWhitelist) {
         this.name = name;
         this.role = role;
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.specialty = specialty;
+        this.customPromptBody = customPromptBody;
+        this.customMemoryMd = customMemoryMd;
+        this.toolOverride = toolOverride;
+        this.maxTurnsOverride = maxTurnsOverride;
+        this.skillWhitelist = skillWhitelist;
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
+    }
+
+    /** 是否为 Custom SubAgent 模式（非 Multi-Agent 三角色模板）。 */
+    public boolean isCustomMode() {
+        return customPromptBody != null;
+    }
+
+    Set<String> effectiveToolWhitelist() {
+        return toolOverride != null ? toolOverride : role.allowedTools();
     }
 
     /**
@@ -100,9 +172,12 @@ public class SubAgent implements Worker {
     }
 
     /**
-     * 根据角色获取系统提示词
+     * 根据角色获取系统提示词；Custom 模式使用专属 body + 可选 MEMORY.md。
      */
     private String getSystemPrompt() {
+        if (customPromptBody != null) {
+            return buildCustomSystemPrompt();
+        }
         return promptAssembler.assemble(promptMode(), PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
                 .externalContext(buildExternalContext())
@@ -111,6 +186,27 @@ public class SubAgent implements Worker {
                 .variable("teamWorkers", teamWorkersContext == null ? "" : teamWorkersContext)
                 .toolsEnabled(llmClient == null || llmClient.supportsTools())
                 .build());
+    }
+
+    private String buildCustomSystemPrompt() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(customPromptBody.trim());
+        String projectMem = buildProjectMemoryContext();
+        if (projectMem != null && !projectMem.isBlank()) {
+            sb.append("\n\n## Project Context\n\n").append(projectMem.trim());
+        }
+        if (customMemoryMd != null && !customMemoryMd.isBlank()) {
+            sb.append("\n\n## Subagent Memory\n\n").append(customMemoryMd.trim());
+        }
+        String skillIndex = buildSkillIndex();
+        if (skillIndex != null && !skillIndex.isBlank()) {
+            sb.append("\n\n").append(skillIndex.trim());
+        }
+        sb.append("\n\n## Language\n\n请用中文回复；代码、命令、文件名保留原文。\n");
+        sb.append("\n## Subagent Memory Policy\n\n");
+        sb.append("跨会话稳定偏好/经验可用 `write_subagent_memory` 追加写入本子 Agent 的 MEMORY.md；")
+                .append("不要写入密钥、一次性任务细节或猜测。\n");
+        return sb.toString();
     }
 
     private PromptMode promptMode() {
@@ -138,7 +234,14 @@ public class SubAgent implements Worker {
     private String buildSkillIndex() {
         if (skillRegistry == null) return "";
         try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkills());
+            List<Skill> skills = skillRegistry.enabledSkills();
+            if (skillWhitelist != null && !skillWhitelist.isEmpty()) {
+                skills = skills.stream()
+                        .filter(s -> skillWhitelist.stream()
+                                .anyMatch(w -> w.equalsIgnoreCase(s.name())))
+                        .toList();
+            }
+            return SkillIndexFormatter.format(skills);
         } catch (Exception e) {
             log.warn("[{}] failed to build skill index", name, e);
             return "";
@@ -206,10 +309,18 @@ public class SubAgent implements Worker {
 
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
-        AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentBudget budget = AgentBudget.fromLlmClient(llmClient, maxTurnsOverride);
 
         // 与 Agent.java 对称：主退出条件 = LLM 自决，budget 仅在 token / 停滞 / 硬轮数兜底。
         while (true) {
+            if (CancellationContext.isCancelled()) {
+                streamRenderer.finish();
+                String msg = "用户取消";
+                log.info("[{}] cancelled by CancellationContext", name);
+                storeLastResult(msg, true, msg, budget, false);
+                return AgentMessage.error(name, role, msg);
+            }
+
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
                 streamRenderer.finish();
@@ -230,13 +341,20 @@ public class SubAgent implements Worker {
             try {
                 LlmClient.ChatResponse response = llmClient.chat(
                         conversationHistory,
-                        llmClient.supportsTools() ? toolRegistry.getToolDefinitions(role.allowedTools()) : null,
+                        llmClient.supportsTools() ? toolRegistry.getToolDefinitions(effectiveToolWhitelist()) : null,
                         streamRenderer
                 );
                 LlmTraceLogger.logReasoning(log,
                         "sub-agent name=" + name + " role=" + role + " iteration=" + budget.iteration(),
                         llmClient,
                         response.reasoningContent());
+
+                if (CancellationContext.isCancelled()) {
+                    streamRenderer.finish();
+                    String msg = "用户取消";
+                    storeLastResult(msg, true, msg, budget, false);
+                    return AgentMessage.error(name, role, msg);
+                }
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
 
@@ -412,6 +530,48 @@ public class SubAgent implements Worker {
         conversationHistory.add(systemMsg);
     }
 
+    /**
+     * 路由/直达模式：把主会话近期 user/assistant 消息 seed 进本子 Agent（保留本 Agent system prompt）。
+     * 跳过 system / tool / 含 tool_calls 的 assistant；截断过长 content。
+     */
+    public void seedParentHistory(List<LlmClient.Message> parentMessages, int maxMessages) {
+        if (parentMessages == null || parentMessages.isEmpty()) {
+            return;
+        }
+        int limit = Math.max(1, maxMessages);
+        List<LlmClient.Message> selected = new ArrayList<>();
+        for (LlmClient.Message m : parentMessages) {
+            if (m == null) {
+                continue;
+            }
+            String role = m.role() == null ? "" : m.role().toLowerCase(java.util.Locale.ROOT);
+            if ("system".equals(role) || "tool".equals(role)) {
+                continue;
+            }
+            if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
+                continue;
+            }
+            String content = m.content();
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+            if (content.length() > 2000) {
+                content = content.substring(0, 2000) + "...";
+            }
+            if ("user".equals(role)) {
+                selected.add(LlmClient.Message.user(content));
+            } else if ("assistant".equals(role)) {
+                selected.add(LlmClient.Message.assistant(content));
+            }
+        }
+        if (selected.size() > limit) {
+            selected = selected.subList(selected.size() - limit, selected.size());
+        }
+        int insertAt = conversationHistory.isEmpty() ? 0 : 1;
+        conversationHistory.addAll(insertAt, selected);
+        log.debug("[{}] seeded {} parent messages", name, selected.size());
+    }
+
     private void pruneHistoricalImagePayloads() {
         int messageCount = 0;
         int imageCount = 0;
@@ -465,7 +625,7 @@ public class SubAgent implements Worker {
         if (invocations.size() > 1) {
             log.info("[{}] executing {} tool calls in parallel", name, invocations.size());
         }
-        return toolRegistry.executeTools(invocations, role.allowedTools());
+        return toolRegistry.executeTools(invocations, effectiveToolWhitelist());
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {

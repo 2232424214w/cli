@@ -120,9 +120,10 @@ public class ToolRegistry {
     private com.bettercli.agent.PlanStore planStore;
     // 会话记事本（structured note-taking）。由 Agent 注入；未注入时 notebook_* 返回未初始化提示。
     private com.bettercli.agent.SessionNotebook sessionNotebook;
-    // 模式工具化：create_plan / run_team 回调（由 Agent 注入；未注入时返回提示）
+    // 模式工具化：create_plan / run_team / run_subagent 回调（由 Agent 注入；未注入时返回提示）
     private java.util.function.Function<String, String> createPlanHandler;
     private java.util.function.Function<String, String> runTeamHandler;
+    private java.util.function.BiFunction<String, String, String> runSubagentHandler;
     // ask_user 复用 HITL 交互底层；由 HitlToolRegistry / Main 注入。未注入时走非交互降级文案。
     private com.bettercli.hitl.HitlHandler hitlHandler;
     // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
@@ -131,6 +132,10 @@ public class ToolRegistry {
     private volatile String currentWorkerName = "";
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
+    /** Custom SubAgent 执行期上下文（skills 白名单 + MEMORY 写回路径）；主 ReAct 为 null。 */
+    /** Custom SubAgent 执行期上下文（ThreadLocal，支持同轮并行多个子 Agent）。 */
+    private final ThreadLocal<com.bettercli.subagent.CustomSubAgentRuntimeContext> customSubAgentContext =
+            new ThreadLocal<>();
 
     public ToolRegistry() {
         this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS);
@@ -152,6 +157,7 @@ public class ToolRegistry {
         registerBrowserTools();
         registerMemoryTools();
         registerSkillTools();
+        registerSubagentMemoryTool();
         registerSnapshotTools();
         registerPaiMdTools();
         registerAgentMemoryTools();
@@ -337,6 +343,30 @@ public class ToolRegistry {
             java.util.function.Function<String, String> runTeamHandler) {
         this.createPlanHandler = createPlanHandler;
         this.runTeamHandler = runTeamHandler;
+    }
+
+    /**
+     * 注入 Custom SubAgent 委托回调（run_subagent）。与 Multi-Agent {@code run_team} 独立。
+     */
+    public void setRunSubagentHandler(java.util.function.BiFunction<String, String, String> runSubagentHandler) {
+        this.runSubagentHandler = runSubagentHandler;
+    }
+
+    public void setCustomSubAgentContext(com.bettercli.subagent.CustomSubAgentRuntimeContext context) {
+        if (context == null) {
+            customSubAgentContext.remove();
+        } else {
+            customSubAgentContext.set(context);
+        }
+    }
+
+    public com.bettercli.subagent.CustomSubAgentRuntimeContext getCustomSubAgentContext() {
+        return customSubAgentContext.get();
+    }
+
+    /** 已注册工具名快照（含 MCP 动态工具），供 Custom SubAgent 计算有效白名单。 */
+    public java.util.Set<String> registeredToolNames() {
+        return java.util.Set.copyOf(tools.keySet());
     }
 
     /**
@@ -951,6 +981,12 @@ public class ToolRegistry {
                     if (skillRegistry == null) {
                         return "load_skill 失败: Skill 系统未初始化";
                     }
+                    com.bettercli.subagent.CustomSubAgentRuntimeContext customCtx = getCustomSubAgentContext();
+                    if (customCtx != null && !customCtx.allowsSkill(name.trim())) {
+                        return "load_skill 失败: Custom SubAgent [" + customCtx.agentName()
+                                + "] 未授权 skill '" + name.trim()
+                                + "'（请在 AGENT.md 的 skills 白名单中声明）";
+                    }
                     Skill skill = skillRegistry.findSkill(name);
                     if (skill == null) {
                         Skill any = skillRegistry.findAnySkill(name);
@@ -974,6 +1010,60 @@ public class ToolRegistry {
                             + " bytes），将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
                 }
         ));
+    }
+
+    private void registerSubagentMemoryTool() {
+        tools.put("write_subagent_memory", new Tool(
+                "write_subagent_memory",
+                "将跨会话稳定偏好/经验追加写入当前 Custom SubAgent 的 MEMORY.md。"
+                        + "仅在 Custom SubAgent 执行中可用；不要写入密钥、一次性任务或猜测。",
+                createParameters(
+                        new Param("entry", "string", "要追加的精炼记忆条目（一两句即可）", true)
+                ),
+                args -> writeSubagentMemory(args)
+        ));
+    }
+
+    private String writeSubagentMemory(Map<String, String> args) {
+        String entry = args.get("entry");
+        if (entry == null || entry.isBlank()) {
+            return "write_subagent_memory 失败: entry 不能为空";
+        }
+        com.bettercli.subagent.CustomSubAgentRuntimeContext ctx = getCustomSubAgentContext();
+        if (ctx == null) {
+            return "write_subagent_memory 失败: 仅 Custom SubAgent 执行中可用";
+        }
+        Path memoryPath = ctx.memoryFilePath();
+        if (memoryPath == null) {
+            return "write_subagent_memory 失败: 未配置 MEMORY.md 路径";
+        }
+        String trimmed = entry.trim();
+        if (looksSensitive(trimmed)) {
+            return "write_subagent_memory 失败: 疑似包含密钥/凭证，已拒绝写入";
+        }
+        try {
+            Path parent = memoryPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            String stamp = java.time.LocalDate.now().toString();
+            String block = (Files.exists(memoryPath) && Files.size(memoryPath) > 0 ? "\n" : "")
+                    + "- [" + stamp + "] " + trimmed + "\n";
+            Files.writeString(memoryPath, block,
+                    java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            return "已追加到 " + memoryPath + "（Custom SubAgent: " + ctx.agentName() + "）";
+        } catch (Exception e) {
+            return "write_subagent_memory 失败: " + e.getMessage();
+        }
+    }
+
+    private static boolean looksSensitive(String text) {
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("api_key") || lower.contains("apikey")
+                || lower.contains("secret") || lower.contains("password")
+                || lower.contains("bearer ") || lower.matches("(?s).*sk-[a-z0-9]{10,}.*");
     }
 
     private void registerMemoryTools() {
@@ -1328,6 +1418,19 @@ public class ToolRegistry {
                 ),
                 args -> invokeRunTeam(args)
         ));
+        tools.put("run_subagent", new Tool(
+                "run_subagent",
+                "委托已注册的 Custom SubAgent 在独立上下文中执行子任务。"
+                        + "调用后立即得到异步占位，同轮其它工具可并行；本批次结束后系统回填真实结果供你汇总。"
+                        + "当用户任务匹配某个子 Agent 的 description，或用户自然语言点名某个子 Agent 时调用；"
+                        + "与 run_team（固定三角色团队）无关。可同一轮并行调用多个。"
+                        + "子 Agent 内不可再调用本工具。",
+                createParameters(
+                        new Param("name", "string", "Custom SubAgent 名称（与 AGENT.md frontmatter name 一致）", true),
+                        new Param("task", "string", "交给该子 Agent 的自包含任务描述", true)
+                ),
+                args -> invokeRunSubagent(args)
+        ));
     }
 
     private String invokeCreatePlan(Map<String, String> args) {
@@ -1357,6 +1460,25 @@ public class ToolRegistry {
             return runTeamHandler.apply(goal.trim());
         } catch (Exception e) {
             return "run_team 失败: " + e.getMessage();
+        }
+    }
+
+    private String invokeRunSubagent(Map<String, String> args) {
+        String name = args.get("name");
+        String task = args.get("task");
+        if (name == null || name.isBlank()) {
+            return "run_subagent 失败: name 不能为空";
+        }
+        if (task == null || task.isBlank()) {
+            return "run_subagent 失败: task 不能为空";
+        }
+        if (runSubagentHandler == null) {
+            return "run_subagent 失败: Custom SubAgent 能力未注入（请在 ReAct Agent 内使用）";
+        }
+        try {
+            return runSubagentHandler.apply(name.trim(), task.trim());
+        } catch (Exception e) {
+            return "run_subagent 失败: " + e.getMessage();
         }
     }
 
@@ -2033,6 +2155,8 @@ public class ToolRegistry {
                 // ask_peer 仅 Multi-Agent 模式可用：sharedState 未注入时（主 ReAct / 未 run 的 orchestrator）
                 // 不暴露给 LLM，避免调用即失败的工具污染 schema。
                 .filter(t -> !("ask_peer".equals(t.name()) && sharedState == null))
+                // write_subagent_memory 仅 Custom SubAgent 执行期可用（当前线程）
+                .filter(t -> !("write_subagent_memory".equals(t.name()) && getCustomSubAgentContext() == null))
                 .map(t -> new com.bettercli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }

@@ -49,6 +49,9 @@ final class CliCommandParser {
         SKILL_ON,
         SKILL_OFF,
         SKILL_RELOAD,
+        SUBAGENT_LIST,
+        SUBAGENT_RELOAD,
+        SUBAGENT_STATUS,
         CONFIG,
         LANG,
         EXPORT
@@ -317,6 +320,19 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/skill off ", 0, 11)) {
             return new ParsedCommand(CommandType.SKILL_OFF, trimmed.substring(11).trim());
+        }
+
+        // Custom Subagent：仅管理（list/reload），禁止 /subagent <name> <task> 执行
+        if (trimmed.equalsIgnoreCase("/subagent") || trimmed.equalsIgnoreCase("/subagent list")
+                || trimmed.equalsIgnoreCase("/sa") || trimmed.equalsIgnoreCase("/sa list")) {
+            return new ParsedCommand(CommandType.SUBAGENT_LIST, null);
+        }
+        if (trimmed.equalsIgnoreCase("/subagent reload") || trimmed.equalsIgnoreCase("/sa reload")) {
+            return new ParsedCommand(CommandType.SUBAGENT_RELOAD, null);
+        }
+        if (trimmed.equalsIgnoreCase("/subagent status") || trimmed.equalsIgnoreCase("/sa status")
+                || trimmed.equalsIgnoreCase("/sa-st")) {
+            return new ParsedCommand(CommandType.SUBAGENT_STATUS, null);
         }
 
         if (trimmed.equalsIgnoreCase("/export")) {
