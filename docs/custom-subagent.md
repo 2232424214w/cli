@@ -33,8 +33,17 @@
 
 ## 配置
 
-见 `.env.example`：`BETTERCLI_SUBAGENT_ROUTER_*`、`WEBHOOK_URL`、`SESSIONS_DIR`、`WECHAT_SUBAGENT_ROUTER`。
+见 `.env.example`：`BETTERCLI_SUBAGENT_ROUTER_*`、`WEBHOOK_URL`、`SESSIONS_DIR`、`WECHAT_SUBAGENT_ROUTER`、`WECHAT_QUEUE_TIMEOUT_SECONDS`。
+
+## 长任务后台（1024 后续）
+
+| 期 | 内容 | 状态 |
+|----|------|------|
+| A | 微信按 conversationId FIFO 串行 + 排队回执 + 超时踢出 | ✅ |
+| B | 真正后台模式 + 完成通知 + bg-react | 待做 |
+| C | running_agents_list / terminate_agent / steer_agent | 待做 |
+| D | 文档矩阵 + 测试收口 | 待做 |
 
 ## 实现
 
-`com.bettercli.subagent.*` · `Main` / `WechatAgentSession`
+`com.bettercli.subagent.*` · `Main` / `WechatAgentSession` / `ConversationMessageQueue`

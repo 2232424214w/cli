@@ -68,6 +68,10 @@ public class WechatAgentSession implements AutoCloseable {
         this.agent.setFallbackConversationId(conversationId);
     }
 
+    public String conversationId() {
+        return conversationId;
+    }
+
     public synchronized boolean isRunning() {
         return running != null && !running.isDone();
     }
