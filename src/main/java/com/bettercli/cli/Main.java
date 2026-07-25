@@ -357,8 +357,18 @@ public class Main {
             }
 
             // 历史会话消息存储（对标美团 1024 Agent session_messages + session_search）
+            // + session.jsonl 压缩检查点（粘性会话 ID，跨重启可 Resume）
             com.bettercli.memory.SessionMessageStore sessionMessageStore = null;
             com.bettercli.memory.SessionMessageIndexer sessionMessageIndexer = null;
+            com.bettercli.memory.SessionCheckpointStore sessionCheckpointStore = null;
+            com.bettercli.memory.SessionIdStore sessionIdStore = new com.bettercli.memory.SessionIdStore();
+            String conversationId = sessionIdStore.resolveOrCreate(false);
+            try {
+                Path sessionCheckpointPath = sessionIdStore.checkpointPathFor(conversationId);
+                sessionCheckpointStore = new com.bettercli.memory.SessionCheckpointStore(sessionCheckpointPath);
+            } catch (Exception e) {
+                startupNote = appendStartupNote(startupNote, "会话检查点存储初始化失败: " + e.getMessage());
+            }
             try {
                 sessionMessageStore = memoryFactory.createSessionMessageStore();
                 if (sessionMessageStore != null) {
@@ -373,7 +383,6 @@ public class Main {
                     } catch (Exception migEx) {
                         startupNote = appendStartupNote(startupNote, "会话消息迁移失败: " + migEx.getMessage());
                     }
-                    String conversationId = com.bettercli.memory.SessionMessageIndexer.generateConversationId();
                     sessionMessageIndexer = new com.bettercli.memory.SessionMessageIndexer(
                             sessionMessageStore, conversationId,
                             Path.of(".").toAbsolutePath().normalize().toString());
@@ -394,6 +403,9 @@ public class Main {
             reactAgent.setSkillContextBuffer(skillContextBuffer);
             if (sessionMessageIndexer != null) {
                 reactAgent.setSessionMessageIndexer(sessionMessageIndexer);
+            }
+            if (sessionCheckpointStore != null) {
+                reactAgent.setSessionCheckpointStore(sessionCheckpointStore);
             }
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
             taskManager.start();
@@ -497,6 +509,16 @@ public class Main {
                     case CLEAR -> {
                         reactAgent.clearHistory();
                         hitlHandler.clearApprovedAll();
+                        // /clear 轮换粘性会话：旧 session-*.jsonl 保留审计，新会话从空检查点开始
+                        try {
+                            String newId = sessionIdStore.rotate();
+                            conversationId = newId;
+                            sessionCheckpointStore = new com.bettercli.memory.SessionCheckpointStore(
+                                    sessionIdStore.checkpointPathFor(newId));
+                            reactAgent.setSessionCheckpointStore(sessionCheckpointStore);
+                        } catch (Exception rotateEx) {
+                            System.err.println("⚠️ 轮换会话检查点失败: " + rotateEx.getMessage());
+                        }
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         ui.println("🗑️ 当前对话历史已清空，长期记忆保持不变\n");
                         continue;

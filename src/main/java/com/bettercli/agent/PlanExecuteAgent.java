@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.bettercli.llm.LlmClient;
 import com.bettercli.llm.LlmTraceLogger;
 import com.bettercli.lsp.LspDiagnosticReport;
+import com.bettercli.memory.CompactConfig;
+import com.bettercli.memory.CompactTrigger;
 import com.bettercli.memory.ConversationHistoryCompactor;
 import com.bettercli.memory.MemoryManager;
 import com.bettercli.plan.*;
@@ -184,12 +186,28 @@ public class PlanExecuteAgent {
     }
 
     private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out) {
-        if (historyCompactor == null) return;
-        int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
+        maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, -1);
+    }
+
+    private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out,
+                                     CompactTrigger trigger, int currentUserIndex) {
+        if (historyCompactor == null || messages == null) {
+            return;
+        }
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(messages, trigger);
+            CompactConfig config = CompactConfig.from(memoryManager.getContextProfile());
+            int userIdx = currentUserIndex;
+            if (userIdx < 0) {
+                for (int i = 0; i < messages.size(); i++) {
+                    if ("user".equals(messages.get(i).role())) {
+                        userIdx = i;
+                        break;
+                    }
+                }
+            }
+            boolean compacted = historyCompactor.compact(messages, trigger, config, userIdx);
             if (compacted && out != null) {
-                out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+                out.println("📦 上下文接近窗口上限，已写入压缩检查点后继续。");
             }
         } catch (Exception e) {
             log.warn("conversationHistory compaction failed", e);
@@ -474,6 +492,7 @@ public class PlanExecuteAgent {
         StringBuilder allResults = new StringBuilder();
         int iteration = 0;
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
+        boolean preTurnDone = false;
 
         int totalInputTokens = 0;
         int totalOutputTokens = 0;
@@ -486,9 +505,11 @@ public class PlanExecuteAgent {
             }
             iteration++;
 
-            // 调 LLM 前评估 messages 是否接近 window 上限；超阈值压缩早期消息为摘要。
             injectPendingLspDiagnostics(messages, out);
-            maybeCompactHistory(messages, out);
+            if (!preTurnDone) {
+                maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, -1);
+                preTurnDone = true;
+            }
 
             LlmClient.ChatResponse response = llmClient.chat(
                     messages,
@@ -551,6 +572,7 @@ public class PlanExecuteAgent {
                 messages.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
             }
             appendImageToolMessages(messages, toolResults);
+            maybeCompactHistory(messages, out, CompactTrigger.MID_TURN, -1);
         }
 
         String fallbackResult = allResults.toString().trim();

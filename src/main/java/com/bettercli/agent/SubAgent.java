@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.bettercli.llm.LlmClient;
 import com.bettercli.llm.LlmTraceLogger;
 import com.bettercli.lsp.LspDiagnosticReport;
+import com.bettercli.memory.CompactConfig;
+import com.bettercli.memory.CompactTrigger;
 import com.bettercli.memory.ConversationHistoryCompactor;
 import com.bettercli.context.ContextProfile;
 import com.bettercli.prompt.PromptAssembler;
@@ -122,13 +124,29 @@ public class SubAgent implements Worker {
     }
 
     private void maybeCompactHistory(PrintStream out) {
-        if (historyCompactor == null) return;
+        maybeCompactHistory(out, CompactTrigger.PRE_TURN);
+    }
+
+    private void maybeCompactHistory(PrintStream out, CompactTrigger trigger) {
+        if (historyCompactor == null) {
+            return;
+        }
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
-        if (profile == null) return;
+        if (profile == null) {
+            return;
+        }
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, profile.compressionTriggerTokens());
+            int userIdx = -1;
+            for (int i = 0; i < conversationHistory.size(); i++) {
+                if ("user".equals(conversationHistory.get(i).role())) {
+                    userIdx = i;
+                    break;
+                }
+            }
+            boolean compacted = historyCompactor.compact(
+                    conversationHistory, trigger, CompactConfig.from(profile), userIdx);
             if (compacted && out != null) {
-                out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+                out.println("📦 [" + name + "] 上下文接近窗口上限，已写入压缩检查点后继续。");
             }
         } catch (Exception e) {
             log.warn("[{}] conversationHistory compaction failed", name, e);
@@ -207,6 +225,7 @@ public class SubAgent implements Worker {
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        boolean preTurnDone = false;
 
         // 与 Agent.java 对称：主退出条件 = LLM 自决，budget 仅在 token / 停滞 / 硬轮数兜底。
         while (true) {
@@ -223,9 +242,11 @@ public class SubAgent implements Worker {
 
             budget.beginIteration();
 
-            // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值压缩早期消息为摘要。
             injectPendingLspDiagnostics(out);
-            maybeCompactHistory(out);
+            if (!preTurnDone) {
+                maybeCompactHistory(out, CompactTrigger.PRE_TURN);
+                preTurnDone = true;
+            }
 
             try {
                 LlmClient.ChatResponse response = llmClient.chat(
@@ -258,6 +279,7 @@ public class SubAgent implements Worker {
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);
+                    maybeCompactHistory(out, CompactTrigger.MID_TURN);
                     continue;
                 }
 

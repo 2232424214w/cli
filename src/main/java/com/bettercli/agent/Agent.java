@@ -5,9 +5,12 @@ import com.bettercli.llm.LlmTraceLogger;
 import com.bettercli.context.ContextProfile;
 import com.bettercli.context.TokenUsageFormatter;
 import com.bettercli.lsp.LspDiagnosticReport;
+import com.bettercli.memory.CompactConfig;
+import com.bettercli.memory.CompactTrigger;
 import com.bettercli.memory.ConversationHistoryCompactor;
 import com.bettercli.memory.ExplicitMemoryHints;
 import com.bettercli.memory.MemoryManager;
+import com.bettercli.memory.SessionCheckpointStore;
 import com.bettercli.memory.SessionMessageIndexer;
 import com.bettercli.prompt.PromptAssembler;
 import com.bettercli.prompt.PromptContext;
@@ -58,6 +61,8 @@ public class Agent {
     private boolean returnFinalResponseWhenStreamed;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private SessionMessageIndexer sessionMessageIndexer;
+    /** 对标 1024 session.jsonl：compacted 检查点持久化与 Resume 快进。 */
+    private SessionCheckpointStore sessionCheckpointStore;
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。会话级内存态，不持久化；
     // 每次 Agent 实例独立持有，通过 toolRegistry 注入给 update_plan 工具读写。
     private final PlanStore planStore = new PlanStore();
@@ -68,6 +73,10 @@ public class Agent {
     private final ReflectionService reflectionService = new ReflectionService();
     /** run_team 嵌套深度，防止团队工具递归调用自己。 */
     private final java.util.concurrent.atomic.AtomicInteger teamNesting = new java.util.concurrent.atomic.AtomicInteger();
+    /** 本轮用户消息在 conversationHistory 中的下标（Pre-Turn 切割边界）。 */
+    private int currentTurnUserIndex = -1;
+    /** 最近一次 LLM 返回的精确 input tokens，供溢出双条件使用。 */
+    private Integer lastKnownInputTokens;
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -79,6 +88,11 @@ public class Agent {
         this.conversationHistory = new ArrayList<>();
         this.memoryManager = new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.historyCompactor.setCheckpointListener(checkpoint -> {
+            if (sessionCheckpointStore != null) {
+                sessionCheckpointStore.appendCompacted(checkpoint);
+            }
+        });
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
@@ -209,6 +223,31 @@ public class Agent {
     }
 
     /**
+     * 注入 session.jsonl 检查点存储。设置后会尝试 Resume 快进加载历史（保留当前 system）。
+     */
+    public void setSessionCheckpointStore(SessionCheckpointStore store) {
+        this.sessionCheckpointStore = store;
+        if (store == null) {
+            return;
+        }
+        try {
+            List<LlmClient.Message> loaded = store.loadHistory();
+            if (loaded.isEmpty()) {
+                return;
+            }
+            LlmClient.Message system = conversationHistory.isEmpty()
+                    ? LlmClient.Message.system(buildSystemPrompt(""))
+                    : conversationHistory.get(0);
+            conversationHistory.clear();
+            conversationHistory.add(system);
+            conversationHistory.addAll(loaded);
+            log.info("Resumed conversationHistory from session checkpoint: {} messages", loaded.size());
+        } catch (Exception e) {
+            log.warn("Failed to resume from session checkpoint store", e);
+        }
+    }
+
+    /**
      * 获取渲染器；首次调用时如果未设置，懒加载一个 {@link PlainRenderer} 兜底，
      * 保证旧调用方（构造 Agent 后没有 setRenderer 的代码、单测等）行为不变。
      */
@@ -220,7 +259,7 @@ public class Agent {
     }
 
     /**
-     * 运行 Agent 循环
+     * 运行 Agent 循环（上下文压缩对标 1024：Pre-Turn / Mid-Turn / API 兜底）。
      */
     public String run(String userInput) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
@@ -239,12 +278,19 @@ public class Agent {
         conversationHistory.add(ImageReferenceParser.userMessage(
                 userMessageContent,
                 Path.of(toolRegistry.getProjectPath())));
+        currentTurnUserIndex = conversationHistory.size() - 1;
+        if (sessionCheckpointStore != null) {
+            sessionCheckpointStore.appendMessage(conversationHistory.get(currentTurnUserIndex));
+        }
         StringBuilder reasoningTranscript = new StringBuilder();
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
 
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
         pushStatus(budget, startNanos, "running");
+
+        boolean preTurnDone = false;
+        boolean overflowRetryUsed = false;
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
@@ -254,11 +300,12 @@ public class Agent {
                 pushStatus(budget, startNanos, "idle");
                 return "⏹️ 已取消当前任务。";
             }
-            // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值就把早期消息压缩成摘要。
-            // 这是与第 3 期 Memory 短期记忆压缩并行的另一道压缩——后者只压 shortTermMemory，
-            // 真正决定下一轮 LLM input token 的是这里。
             injectPendingLspDiagnostics();
-            maybeCompactHistory();
+            // Pre-Turn：仅本轮首次 LLM 调用前检测（对标 1024）
+            if (!preTurnDone) {
+                maybeCompact(CompactTrigger.PRE_TURN);
+                preTurnDone = true;
+            }
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
                 String description = budget.describeExit(exitReason);
@@ -292,6 +339,10 @@ public class Agent {
                 }
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+                if (response.inputTokens() > 0) {
+                    lastKnownInputTokens = response.inputTokens();
+                }
+                overflowRetryUsed = false;
 
                 // 如果有工具调用
                 if (response.hasToolCalls()) {
@@ -304,6 +355,10 @@ public class Agent {
                             response.content(),
                             response.toolCalls()
                     ));
+                    if (sessionCheckpointStore != null) {
+                        sessionCheckpointStore.appendMessage(
+                                conversationHistory.get(conversationHistory.size() - 1));
+                    }
 
                     // 在工具执行前就 flush 本轮流式渲染器，避免 TerminalMarkdownRenderer
                     // 内部 pending 缓冲区（仅按换行 flush）里的文本被 HITL 提示"跨过"
@@ -315,10 +370,16 @@ public class Agent {
                     for (ToolExecutionResult toolResult : toolResults) {
                         memoryManager.addToolResult(toolResult.name(), toolResult.result());
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
+                        if (sessionCheckpointStore != null) {
+                            sessionCheckpointStore.appendMessage(
+                                    conversationHistory.get(conversationHistory.size() - 1));
+                        }
                     }
                     appendImageToolMessages(toolResults);
                     // 工具失败反思：本轮若有失败/拒绝/超时，注入反思提示引导 LLM 复述原因 + 改换策略
                     maybeInjectReflection(toolResults, iteration);
+                    // Mid-Turn：工具全部执行完后检测溢出，全量压缩后继续下一轮采样
+                    maybeCompact(CompactTrigger.MID_TURN);
                     pushStatus(budget, startNanos, "running");
 
                     // 继续循环，让 LLM 根据工具结果继续思考
@@ -328,6 +389,10 @@ public class Agent {
                 // 没有工具调用，直接返回结果
                 appendReasoning(reasoningTranscript, response.reasoningContent());
                 conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                if (sessionCheckpointStore != null) {
+                    sessionCheckpointStore.appendMessage(
+                            conversationHistory.get(conversationHistory.size() - 1));
+                }
 
                 // 存入记忆
                 memoryManager.addAssistantMessage(response.content());
@@ -361,8 +426,23 @@ public class Agent {
                 return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
 
             } catch (IOException e) {
+                CompactTrigger fallback = null;
+                if (ConversationHistoryCompactor.looksLikeContextWindowExceeded(e)) {
+                    fallback = CompactTrigger.CONTEXT_WINDOW_EXCEEDED;
+                } else if (ConversationHistoryCompactor.looksLikePromptTooLong(e)) {
+                    fallback = CompactTrigger.PROMPT_TOO_LONG;
+                }
+                if (fallback != null && !overflowRetryUsed) {
+                    overflowRetryUsed = true;
+                    log.warn("LLM context overflow ({}), compact-and-retry once", fallback);
+                    streamRenderer.resetBetweenIterations();
+                    if (maybeCompact(fallback)) {
+                        continue;
+                    }
+                }
                 log.error("LLM call failed in ReAct loop", e);
                 streamRenderer.finish();
+                pushStatus(budget, startNanos, "idle");
                 return "❌ 调用 LLM 失败: " + e.getMessage();
             }
         }
@@ -402,12 +482,12 @@ public class Agent {
     }
 
     /**
-     * 手动压缩当前 ReAct 对话历史，不等待上下文窗口阈值触发。
+     * 手动压缩当前 ReAct 对话历史，不等待上下文窗口阈值触发（全量 Mid-Turn 语义）。
      */
     public CompactionResult compactHistoryNow() {
         long beforeTokens = estimateCurrentContextTokens();
         try {
-            boolean compacted = historyCompactor.compactNow(conversationHistory);
+            boolean compacted = maybeCompact(CompactTrigger.MANUAL);
             return new CompactionResult(compacted, beforeTokens, estimateCurrentContextTokens(), null);
         } catch (Exception e) {
             log.warn("manual conversationHistory compaction failed", e);
@@ -448,16 +528,33 @@ public class Agent {
                 .build());
     }
 
-    private void maybeCompactHistory() {
-        if (historyCompactor == null) return;
-        int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
+    /**
+     * 按 1024 触发点执行检查点压缩；成功时提示用户。
+     *
+     * @return 是否真正压缩
+     */
+    private boolean maybeCompact(CompactTrigger trigger) {
+        if (historyCompactor == null || trigger == null) {
+            return false;
+        }
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, trigger);
+            CompactConfig config = CompactConfig.from(memoryManager.getContextProfile(), lastKnownInputTokens);
+            boolean compacted = historyCompactor.compact(
+                    conversationHistory, trigger, config, currentTurnUserIndex);
             if (compacted) {
-                renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+                String tip = switch (trigger) {
+                    case PRE_TURN -> "📦 Pre-Turn：上下文接近窗口上限，已写入压缩检查点后继续。";
+                    case MID_TURN -> "📦 Mid-Turn：工具结果已纳入摘要检查点，继续下一轮采样。";
+                    case PROMPT_TOO_LONG, CONTEXT_WINDOW_EXCEEDED ->
+                            "📦 模型确认上下文溢出，已强制压缩检查点并重试。";
+                    case MANUAL -> "📦 已手动压缩为上下文检查点。";
+                };
+                renderer().stream().println(tip);
             }
+            return compacted;
         } catch (Exception e) {
-            log.warn("conversationHistory compaction failed", e);
+            log.warn("conversationHistory compaction failed trigger={}", trigger, e);
+            return false;
         }
     }
 

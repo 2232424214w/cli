@@ -8,8 +8,9 @@ import com.bettercli.llm.LlmClient;
  * **设计原则**：没有"长 / 短 / 平衡"模式分档。所有参数都是 maxContextWindow 的简单函数，
  * 全模型走同一套行为，只是 window 大小不同导致触发时机和容量不同。
  *
- * 全局常量：
- * - 压缩触发阈值：预留摘要输出空间后，再保留 13k token 自动压缩缓冲
+ * 主轨压缩（对标 1024）：
+ * - 可用上限 = window − 压缩缓冲(20k) − 最大输出预留(8k)
+ * - 另需消息体（不含 system）≥ 有效压缩阈值(20k) 才触发，避免无效压缩
  *
  * 按 window 派生：
  * - 短期记忆预算 = window × 0.45
@@ -26,8 +27,18 @@ public record ContextProfile(
         boolean promptCachingSupported,
         String promptCacheMode
 ) {
-    public static final int MAX_SUMMARY_OUTPUT_RESERVE_TOKENS = 20_000;
-    public static final int AUTOCOMPACT_BUFFER_TOKENS = 13_000;
+    /** 对标 1024 compaction buffer */
+    public static final int COMPACTION_BUFFER_TOKENS = 20_000;
+    /** 对标 1024：消息体有效压缩阈值 */
+    public static final int MIN_MESSAGE_BODY_TOKENS = 20_000;
+    /** 最大输出预留（计入可用上限） */
+    public static final int MAX_OUTPUT_RESERVE_TOKENS = 8_192;
+    /** @deprecated 使用 {@link #COMPACTION_BUFFER_TOKENS} */
+    @Deprecated
+    public static final int MAX_SUMMARY_OUTPUT_RESERVE_TOKENS = COMPACTION_BUFFER_TOKENS;
+    /** @deprecated 1024 对齐后由 {@link #MAX_OUTPUT_RESERVE_TOKENS} 取代 */
+    @Deprecated
+    public static final int AUTOCOMPACT_BUFFER_TOKENS = MAX_OUTPUT_RESERVE_TOKENS;
     public static final double MIN_COMPRESSION_TRIGGER_RATIO = 0.50;
     private static final int MIN_WINDOW = 8_000;
     private static final int MCP_RESOURCE_INDEX_MIN_WINDOW = 32_000;
@@ -61,14 +72,31 @@ public record ContextProfile(
         );
     }
 
-    /** 触发压缩的绝对 token 阈值（占用 ≥ 此值即压缩） */
+    /**
+     * 主轨可用上限（对标 1024：window − buffer − maxOutput）。
+     * 总 token 超过此值且消息体超过 {@link #minMessageBodyTokens()} 时触发压缩。
+     */
     public int compressionTriggerTokens() {
-        return autoCompactTriggerTokens(maxContextWindow);
+        return availableLimitTokens(maxContextWindow);
+    }
+
+    public int minMessageBodyTokens() {
+        return MIN_MESSAGE_BODY_TOKENS;
+    }
+
+    public int compactionBufferTokens() {
+        return COMPACTION_BUFFER_TOKENS;
+    }
+
+    public int maxOutputReserveTokens() {
+        return MAX_OUTPUT_RESERVE_TOKENS;
     }
 
     public String summary() {
         return "window: " + maxContextWindow
-                + " | 压缩阈值: " + (int) (compressionTriggerRatio * 100) + "% (" + compressionTriggerTokens() + " tokens)"
+                + " | 可用上限: " + compressionTriggerTokens() + " tokens"
+                + " (buffer=" + COMPACTION_BUFFER_TOKENS + ", maxOut=" + MAX_OUTPUT_RESERVE_TOKENS + ")"
+                + " | 消息体阈值: " + MIN_MESSAGE_BODY_TOKENS
                 + " | 短期记忆预算: " + shortTermMemoryBudget
                 + " | MCP resource 索引: " + (mcpResourceIndexEnabled ? "on" : "off")
                 + " | prompt cache: " + promptCacheMode;
@@ -89,14 +117,12 @@ public record ContextProfile(
 
     private static double compressionTriggerRatio(int window) {
         return Math.max(MIN_COMPRESSION_TRIGGER_RATIO,
-                Math.min(0.99, autoCompactTriggerTokens(window) / (double) window));
+                Math.min(0.99, availableLimitTokens(window) / (double) window));
     }
 
-    private static int autoCompactTriggerTokens(int window) {
+    private static int availableLimitTokens(int window) {
         int safeWindow = Math.max(MIN_WINDOW, window);
-        int summaryReserve = Math.min(MAX_SUMMARY_OUTPUT_RESERVE_TOKENS, Math.max(1_000, safeWindow / 4));
-        int buffer = Math.min(AUTOCOMPACT_BUFFER_TOKENS, Math.max(1_000, safeWindow / 8));
-        int trigger = safeWindow - summaryReserve - buffer;
+        int trigger = safeWindow - COMPACTION_BUFFER_TOKENS - MAX_OUTPUT_RESERVE_TOKENS;
         return Math.max(1_000, Math.min(safeWindow - 1, trigger));
     }
 }

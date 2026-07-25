@@ -203,7 +203,7 @@ src/main/java/com/bettercli/
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
 - Agent 维护的事实记忆（`agent_memory`）由 Agent 自主读写，不需要用户确认；`confidence < 0.7` 不应保存，敏感词（API key/密码/Bearer）会被拦截；默认 1000 条上限，超限拒绝写入；`findSimilar` 自动去重；`/agent-memory` 命令组提供用户只读视图（list/search/stats/export/clear）
 - 两道压缩不要混淆：shortTermMemory 压缩 vs conversationHistory 压缩（后者是防 window 超限的关键）
-- 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
+- 主轨上下文压缩对标 1024 Context Checkpoint Compaction：双条件触发（总 token > `window − 20k buffer − 8k maxOut`，且消息体 ≥ 20k）；触发点为 Pre-Turn（本轮首次 LLM 前，保留当前用户消息）/ Mid-Turn（工具执行后全量压缩）/ `prompt_too_long` 与 `context_window_exceeded` 兜底重试；检查点为全 user-role（近期真实用户消息 + 中性前缀 AI 摘要），过滤反思/LSP/Skill 等注入；摘要失败走渐进裁剪再硬截断；`summaryMaxTokens` 默认 4000（`bettercli.compaction.summary.max.tokens` / `BETTERCLI_COMPACTION_SUMMARY_MAX_TOKENS` 可调）。成功后写入 `~/.bettercli/history/session-<id>.jsonl` 的 `compacted` 行（Resume 快进 + rotate）。粘性会话 ID 存于 `~/.bettercli/history/active-session.id`（可用 `BETTERCLI_SESSION_ID` 覆盖）；`/clear` 轮换新 ID。辅轨 `shortTermMemory` 仍由 `ContextCompressor` 独立压缩，不替代主轨。
 
 ### HITL + 策略层
 

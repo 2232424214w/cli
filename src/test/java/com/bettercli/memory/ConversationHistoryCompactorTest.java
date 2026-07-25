@@ -2,237 +2,191 @@ package com.bettercli.memory;
 
 import com.bettercli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class ConversationHistoryCompactorTest {
 
     @Test
-    void doesNothingWhenBelowTrigger() {
-        StubCompactor c = new StubCompactor("MOCK SUMMARY", 3);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("system"));
-        history.add(LlmClient.Message.user("hi"));
+    void dualConditionSkipsWhenMessageBodyTooSmall() {
+        StubCompactor c = new StubCompactor("SUMMARY");
+        List<LlmClient.Message> history = baseHistory(2, 100);
+        CompactConfig config = new CompactConfig(100_000, 8_192, 20_000, 20_000, 5_000, 4_000, 90_000);
 
-        boolean compacted = c.compactIfNeeded(history, 100_000);
-
-        assertFalse(compacted);
-        assertEquals(2, history.size());
+        assertFalse(c.needsCompaction(history, config, false));
+        assertFalse(c.compact(history, CompactTrigger.PRE_TURN, config, 1));
         assertEquals(0, c.summarizeCalls.get());
     }
 
     @Test
-    void compactNowIgnoresTriggerAndKeepsRecentTurns() {
-        StubCompactor c = new StubCompactor("MANUAL SUMMARY", 2);
+    void preTurnKeepsCurrentUserMessageAndBuildsUserRoleCheckpoint() {
+        StubCompactor c = new StubCompactor("HANDOFF SUMMARY");
         List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
-        for (int i = 0; i < 3; i++) {
-            history.add(LlmClient.Message.user("Q" + i));
-            history.add(LlmClient.Message.assistant("A" + i));
-        }
+        history.add(LlmClient.Message.system("SYSTEM"));
+        history.add(LlmClient.Message.user("old-1 " + longText(12_000)));
+        history.add(LlmClient.Message.assistant("a1 " + longText(12_000)));
+        history.add(LlmClient.Message.user("old-2 " + longText(12_000)));
+        history.add(LlmClient.Message.assistant("a2 " + longText(12_000)));
+        history.add(LlmClient.Message.user("CURRENT TURN"));
+        int currentIdx = history.size() - 1;
 
-        boolean compacted = c.compactNow(history);
+        CompactConfig config = new CompactConfig(80_000, 8_192, 20_000, 1_000, 5_000, 4_000, 70_000);
+        assertTrue(c.compact(history, CompactTrigger.PRE_TURN, config, currentIdx));
 
-        assertTrue(compacted);
-        assertEquals(1, c.summarizeCalls.get());
-        assertTrue(history.get(1).content().contains("MANUAL SUMMARY"));
-        assertEquals(5, history.size());
-        assertTrue(history.get(3).content().startsWith("Q2"));
-    }
-
-    @Test
-    void doesNothingWhenUserTurnsTooFew() {
-        // 只有 2 个 user message，retainRecent=3，不应该压缩（即使 token 超阈值）
-        StubCompactor c = new StubCompactor("MOCK SUMMARY", 3);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("system"));
-        history.add(LlmClient.Message.user(longText(20_000)));
-        history.add(LlmClient.Message.assistant(longText(20_000)));
-        history.add(LlmClient.Message.user(longText(20_000)));
-        history.add(LlmClient.Message.assistant(longText(20_000)));
-
-        boolean compacted = c.compactIfNeeded(history, 100);
-
-        assertFalse(compacted, "user turns 不够 retainRecent 时应跳过");
-        assertEquals(5, history.size());
-        assertEquals(0, c.summarizeCalls.get());
-    }
-
-    @Test
-    void compactsOldRoundsAndKeepsRecentTurns() {
-        StubCompactor c = new StubCompactor("MOCK SUMMARY OF OLD CONTENT", 2);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
-        // 6 轮 user/assistant
-        for (int i = 0; i < 6; i++) {
-            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
-            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
-        }
-
-        boolean compacted = c.compactIfNeeded(history, 100);
-
-        assertTrue(compacted);
-        assertEquals(1, c.summarizeCalls.get());
-
-        // 重建后结构：[system] + [user(摘要)] + [assistant(确认)] + [保留的 retainRecent=2 个 user 起算的尾部]
-        // 即 1 + 1 + 1 + (2 个 user × 2 行 = 4 条) = 7 条
-        assertEquals(7, history.size());
         assertEquals("system", history.get(0).role());
-        assertEquals("user", history.get(1).role());
-        assertTrue(history.get(1).content().contains("已压缩的历史对话摘要"));
-        assertTrue(history.get(1).content().contains("MOCK SUMMARY OF OLD CONTENT"));
-        assertEquals("assistant", history.get(2).role());
-
-        // 保留的最后两个 user message 仍是 Q4 / Q5（不是 Q3）
-        assertTrue(history.get(3).content().startsWith("Q4"));
-        assertTrue(history.get(5).content().startsWith("Q5"));
+        assertTrue(history.stream().allMatch(m ->
+                "system".equals(m.role()) || "user".equals(m.role())));
+        assertTrue(history.get(history.size() - 1).content().contains("CURRENT TURN"));
+        assertTrue(history.stream().anyMatch(m -> m.content() != null
+                && m.content().contains(ConversationHistoryCompactor.SUMMARY_MARKER)
+                && m.content().contains("HANDOFF SUMMARY")));
+        assertFalse(history.stream().anyMatch(m -> "assistant".equals(m.role())));
     }
 
     @Test
-    void preservesToolCallPairAtSplitBoundary() {
-        // 故意构造一个尾部带 tool_call/tool_result 的形态，验证不会被切断
-        StubCompactor c = new StubCompactor("SUMMARY", 2);
+    void midTurnCompressesEverythingIncludingToolResults() {
+        StubCompactor c = new StubCompactor("MID SUMMARY");
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("S"));
-        // 旧轮次（应当被压缩）
-        history.add(LlmClient.Message.user("OldQ1: " + longText(3_000)));
-        history.add(LlmClient.Message.assistant("OldA1"));
-        history.add(LlmClient.Message.user("OldQ2"));
-        history.add(LlmClient.Message.assistant("OldA2"));
-        // 保留的最近两轮，每轮带 tool_call
-        history.add(LlmClient.Message.user("RecentQ1"));
-        List<LlmClient.ToolCall> tcs1 = List.of(new LlmClient.ToolCall("c1",
+        history.add(LlmClient.Message.user("Q " + longText(10_000)));
+        List<LlmClient.ToolCall> tcs = List.of(new LlmClient.ToolCall("c1",
                 new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")));
-        history.add(LlmClient.Message.assistant(null, null, tcs1));
-        history.add(new LlmClient.Message("tool", "file content", null, null, "c1"));
-        history.add(LlmClient.Message.assistant("done1"));
-        history.add(LlmClient.Message.user("RecentQ2"));
-        history.add(LlmClient.Message.assistant("RecentA2"));
+        history.add(LlmClient.Message.assistant(null, null, tcs));
+        history.add(new LlmClient.Message("tool", "file " + longText(10_000), null, null, "c1"));
 
-        boolean compacted = c.compactIfNeeded(history, 100);
+        CompactConfig config = new CompactConfig(80_000, 8_192, 20_000, 1_000, 5_000, 4_000, 70_000);
+        assertTrue(c.compact(history, CompactTrigger.MID_TURN, config, -1));
 
-        assertTrue(compacted);
-        // 找到摘要后的第一个 user
-        int firstUserAfterSummary = -1;
-        for (int i = 0; i < history.size(); i++) {
-            if ("user".equals(history.get(i).role())
-                    && !history.get(i).content().contains("已压缩的历史对话摘要")) {
-                firstUserAfterSummary = i;
-                break;
-            }
-        }
-        assertTrue(firstUserAfterSummary > 0);
-        // splitIdx 必然落在 user 边界，紧随的 assistant(tool_call) 和 tool 配对应该完整保留
-        assertEquals("RecentQ1", history.get(firstUserAfterSummary).content());
-        assertEquals("assistant", history.get(firstUserAfterSummary + 1).role());
-        assertNotNull(history.get(firstUserAfterSummary + 1).toolCalls());
-        assertEquals("tool", history.get(firstUserAfterSummary + 2).role());
+        assertEquals(1, c.summarizeCalls.get());
+        assertEquals("system", history.get(0).role());
+        assertTrue(history.stream().anyMatch(m -> m.content() != null
+                && m.content().contains("MID SUMMARY")));
+        assertFalse(history.stream().anyMatch(m -> "tool".equals(m.role())));
     }
 
     @Test
-    void emptySummaryFallsBackToHardTruncate() {
-        StubCompactor c = new StubCompactor("", 2);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("S"));
-        for (int i = 0; i < 5; i++) {
-            history.add(LlmClient.Message.user("Q" + i + " " + longText(2_000)));
-            history.add(LlmClient.Message.assistant("A" + i));
-        }
-        int before = history.size();
-
-        boolean compacted = c.compactIfNeeded(history, 100);
-
-        assertTrue(compacted, "空摘要应走硬截断兜底");
-        assertTrue(history.size() < before);
-        assertTrue(history.get(1).content().contains("硬截断"));
-    }
-
-    @Test
-    void llmFailureFallsBackToHardTruncateWithoutLosingTail() {
-        StubCompactor c = new StubCompactor(null, 2) {
+    void progressiveTrimRetriesWhenSummaryFailsThenSucceeds() {
+        AtomicInteger attempts = new AtomicInteger();
+        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) throws IOException {
-                summarizeCalls.incrementAndGet();
-                throw new IOException("LLM unavailable");
+                int n = attempts.incrementAndGet();
+                if (n < 3) {
+                    throw new IOException("prompt is too long");
+                }
+                return "OK AFTER TRIM";
             }
         };
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("S"));
-        for (int i = 0; i < 5; i++) {
-            history.add(LlmClient.Message.user("Q" + i + " " + longText(2_000)));
-            history.add(LlmClient.Message.assistant("A" + i));
-        }
-        int before = history.size();
-
-        boolean compacted = c.compactIfNeeded(history, 100);
-
-        assertTrue(compacted);
-        assertTrue(history.size() < before);
-        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q3")));
-        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q4")));
-        assertFalse(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q0")));
+        List<LlmClient.Message> history = baseHistory(8, 3_000);
+        CompactConfig config = new CompactConfig(80_000, 8_192, 20_000, 1_000, 5_000, 4_000, null);
+        assertTrue(c.compact(history, CompactTrigger.MANUAL, config, -1));
+        assertTrue(attempts.get() >= 3);
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().contains("OK AFTER TRIM")));
     }
 
     @Test
-    void hardTruncatesWhenSummaryThrows() {
-        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 2) {
-            @Override
-            protected String summarize(List<LlmClient.Message> messages) throws IOException {
-                throw new IOException("LLM down");
-            }
-        };
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("SYSTEM"));
-        for (int i = 0; i < 5; i++) {
-            history.add(LlmClient.Message.user("Q" + i + " " + longText(3_000)));
-            history.add(LlmClient.Message.assistant("A" + i + " " + longText(3_000)));
-        }
-        int before = history.size();
-        boolean compacted = c.compactIfNeeded(history, 100);
-        assertTrue(compacted, "摘要失败应走硬截断兜底");
-        assertTrue(history.size() < before);
-        assertTrue(history.get(1).content().contains("硬截断"));
-        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q3")));
-        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q4")));
-        assertFalse(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Q0")));
+    void emptySummaryFallsBackToHardTruncateCheckpoint() {
+        StubCompactor c = new StubCompactor("   ");
+        List<LlmClient.Message> history = baseHistory(5, 4_000);
+        CompactConfig config = new CompactConfig(80_000, 8_192, 20_000, 1_000, 5_000, 4_000, null);
+        assertTrue(c.compact(history, CompactTrigger.MANUAL, config, -1));
+        assertTrue(history.get(1).content().contains(ConversationHistoryCompactor.HARD_TRUNCATE_MARKER)
+                || history.stream().anyMatch(m -> m.content() != null
+                && m.content().contains(ConversationHistoryCompactor.HARD_TRUNCATE_MARKER)));
     }
 
     @Test
-    void hardTruncatesWhenSummaryEmpty() {
-        StubCompactor c = new StubCompactor("   ", 2);
+    void filtersOldSummaryFromRecentUserMessages() {
+        StubCompactor c = new StubCompactor("NEW");
+        List<LlmClient.Message> toCompress = List.of(
+                LlmClient.Message.user(ConversationHistoryCompactor.SUMMARY_PREFIX + "old"),
+                LlmClient.Message.user("real-1"),
+                LlmClient.Message.user("[反思提示] ignore"),
+                LlmClient.Message.user("real-2")
+        );
+        List<LlmClient.Message> kept = c.extractRecentRealUserMessages(toCompress, 50_000);
+        assertEquals(2, kept.size());
+        assertEquals("real-1", kept.get(0).content());
+        assertEquals("real-2", kept.get(1).content());
+    }
+
+    @Test
+    void checkpointListenerReceivesSnapshot() {
+        StubCompactor c = new StubCompactor("SNAP");
+        AtomicReference<ConversationHistoryCompactor.CompactCheckpoint> seen = new AtomicReference<>();
+        c.setCheckpointListener(seen::set);
+        List<LlmClient.Message> history = baseHistory(4, 5_000);
+        CompactConfig config = new CompactConfig(80_000, 8_192, 20_000, 1_000, 5_000, 4_000, null);
+        assertTrue(c.compact(history, CompactTrigger.MANUAL, config, -1));
+        assertNotNull(seen.get());
+        assertEquals(CompactTrigger.MANUAL, seen.get().trigger());
+        assertFalse(seen.get().replacementHistory().isEmpty());
+    }
+
+    @Test
+    void sessionCheckpointStoreFastForwardOnLoad(@TempDir Path dir) {
+        SessionCheckpointStore store = new SessionCheckpointStore(dir.resolve("session.jsonl"));
+        store.appendMessage(LlmClient.Message.user("u1"));
+        store.appendMessage(LlmClient.Message.assistant("a1"));
+        store.appendCompacted(new ConversationHistoryCompactor.CompactCheckpoint(
+                CompactTrigger.MID_TURN,
+                ConversationHistoryCompactor.SUMMARY_PREFIX + "sum",
+                List.of(
+                        LlmClient.Message.user("kept-user"),
+                        LlmClient.Message.user(ConversationHistoryCompactor.SUMMARY_PREFIX + "sum")
+                )
+        ));
+        store.appendMessage(LlmClient.Message.user("after"));
+
+        List<LlmClient.Message> loaded = store.loadHistory();
+        assertEquals(3, loaded.size());
+        assertEquals("kept-user", loaded.get(0).content());
+        assertTrue(loaded.get(1).content().contains("sum"));
+        assertEquals("after", loaded.get(2).content());
+    }
+
+    @Test
+    void looksLikePromptTooLongDetectsCommonErrors() {
+        assertTrue(ConversationHistoryCompactor.looksLikePromptTooLong(
+                new IOException("API请求失败: prompt is too long")));
+        assertTrue(ConversationHistoryCompactor.looksLikeContextWindowExceeded(
+                new IOException("model_context_window_exceeded")));
+        assertFalse(ConversationHistoryCompactor.looksLikePromptTooLong(new IOException("timeout")));
+    }
+
+    private static List<LlmClient.Message> baseHistory(int rounds, int chars) {
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM"));
-        for (int i = 0; i < 4; i++) {
-            history.add(LlmClient.Message.user("U" + i + " " + longText(2_000)));
-            history.add(LlmClient.Message.assistant("R" + i));
+        for (int i = 0; i < rounds; i++) {
+            history.add(LlmClient.Message.user("Q" + i + " " + longText(chars)));
+            history.add(LlmClient.Message.assistant("A" + i + " " + longText(chars)));
         }
-        assertTrue(c.compactIfNeeded(history, 50));
-        assertTrue(history.get(1).content().contains("硬截断"));
+        return history;
     }
 
     private static String longText(int chars) {
-        StringBuilder sb = new StringBuilder(chars);
-        for (int i = 0; i < chars; i++) sb.append('x');
-        return sb.toString();
+        return "x".repeat(Math.max(0, chars));
     }
 
-    /** 测试用 stub：summarize 返回固定字符串，避免真实 LLM 依赖。 */
     private static class StubCompactor extends ConversationHistoryCompactor {
         final AtomicInteger summarizeCalls = new AtomicInteger();
         private final String mockSummary;
 
-        StubCompactor(String mockSummary, int retainRecent) {
-            super(null, retainRecent);
+        StubCompactor(String mockSummary) {
+            super(null);
             this.mockSummary = mockSummary;
         }
 
         @Override
-        protected String summarize(List<LlmClient.Message> messages) throws IOException {
+        protected String summarize(List<LlmClient.Message> messages) {
             summarizeCalls.incrementAndGet();
             return mockSummary;
         }

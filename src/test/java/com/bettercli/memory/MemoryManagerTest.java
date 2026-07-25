@@ -91,9 +91,9 @@ class MemoryManagerTest {
         // 验证：长 window 模型也使用自动压缩阈值，没有"长模式不压缩"的二元开关
         MemoryManager memoryManager = new MemoryManager(new GLMClient("test-key"));
 
-        assertEquals(0.835, memoryManager.getContextProfile().compressionTriggerRatio(), 0.001);
+        assertEquals(0.859, memoryManager.getContextProfile().compressionTriggerRatio(), 0.001);
         assertEquals(200000, memoryManager.getTokenBudget().getContextWindow());
-        assertEquals(167000, memoryManager.getContextProfile().compressionTriggerTokens());
+        assertEquals(171808, memoryManager.getContextProfile().compressionTriggerTokens());
     }
 
     private static final class StubGLMClient extends GLMClient {
