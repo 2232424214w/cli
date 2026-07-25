@@ -26,7 +26,9 @@ public record CustomSubAgentDefinition(
         String soulMd,
         String identityMd,
         Source source,
-        Path agentMdPath
+        Path agentMdPath,
+        /** 本地继承基座名（frontmatter {@code from} / {@code extends}），对标文档 platform 复用。 */
+        String extendsFrom
 ) {
 
     /** 子 Agent 内禁止再委托 / 拉起团队，防止递归。 */
@@ -80,6 +82,46 @@ public record CustomSubAgentDefinition(
         if (identityMd == null) {
             identityMd = "";
         }
+        if (extendsFrom != null && extendsFrom.isBlank()) {
+            extendsFrom = null;
+        }
+    }
+
+    /**
+     * 以 {@code base} 为底、本定义为覆盖层合并（非空/非空列表优先本定义）。
+     */
+    public CustomSubAgentDefinition mergeOver(CustomSubAgentDefinition base) {
+        if (base == null) {
+            return this;
+        }
+        return new CustomSubAgentDefinition(
+                name,
+                blankTo(description, base.description()),
+                blankTo(body, base.body()),
+                firstNonBlank(model, base.model()),
+                maxTurns != null ? maxTurns : base.maxTurns(),
+                timeoutSeconds != null ? timeoutSeconds : base.timeoutSeconds(),
+                allowedTools.isEmpty() ? base.allowedTools() : allowedTools,
+                disallowedTools.isEmpty() ? base.disallowedTools() : disallowedTools,
+                skills.isEmpty() ? base.skills() : skills,
+                blankTo(memoryMd, base.memoryMd()),
+                blankTo(soulMd, base.soulMd()),
+                blankTo(identityMd, base.identityMd()),
+                source,
+                agentMdPath,
+                extendsFrom
+        );
+    }
+
+    private static String blankTo(String primary, String fallback) {
+        return primary == null || primary.isBlank() ? (fallback == null ? "" : fallback) : primary;
+    }
+
+    private static String firstNonBlank(String primary, String fallback) {
+        if (primary != null && !primary.isBlank()) {
+            return primary;
+        }
+        return fallback;
     }
 
     public String displaySource() {

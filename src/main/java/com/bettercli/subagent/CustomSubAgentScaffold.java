@@ -234,6 +234,7 @@ public final class CustomSubAgentScaffold {
                     # model: glm
                     # timeoutSeconds: 300
                     # skills: []
+                    # from: code-reviewer
                     ---
 
                     你是 Custom SubAgent「%s」。

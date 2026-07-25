@@ -120,7 +120,7 @@ public class WechatAgentSession implements AutoCloseable {
             String answer = customSubAgentRunner.runDirect(
                     name, ingress.effectiveMessage(), llmClient,
                     agent.getToolRegistry(), null, null, history, null);
-            agent.recordExternalTurn(ingress.effectiveMessage(), answer);
+            agent.recordExternalTurn(ingress.effectiveMessage(), answer, name);
             return answer;
         }
         return agent.run(ingress.effectiveMessage());

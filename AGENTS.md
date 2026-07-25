@@ -245,13 +245,9 @@ src/main/java/com/bettercli/
 ### Custom Subagent
 
 - 与 `/team` Multi-Agent 并存、不融合；任务由主模型语义调用 `run_subagent`、轻量路由 LLM、或消息前缀 `/subagent:name` 触发
-- `/subagent list|reload|status|create|templates|audit` 与 `/sa-l` `/sa-st` 仅管理；禁止空格 `/subagent name task`
-- `/subagent create` 生成 AGENT.md 脚手架（blank / code-reviewer / researcher）；路由可配专用 provider/model
-- 定义见 `~/.bettercli/agents/<name>/AGENT.md` 与项目级 `.bettercli/agents/`
-- `run_subagent` 异步占位 + 批次回填；RuntimeContext ThreadLocal 支持同轮并行
-- 路由默认开启（`bettercli.subagent.router.enabled`）；置信度门控（`min.confidence` 默认 0.70）；可选 `router.provider`/`router.model`；`@main`/`/main` 强制主 Agent
-- 可选 Webhook：`BETTERCLI_SUBAGENT_WEBHOOK_URL`（fail-open）；微信硬指定可用，路由默认关（`BETTERCLI_WECHAT_SUBAGENT_ROUTER`）
-- 对齐矩阵见 `docs/custom-subagent.md`；RoleHub / HA 续跑不做
+- `/subagent list|reload|status|create|templates|audit|show` 与 `/sa-l` `/sa-st` 仅管理；禁止空格 `/subagent name task`
+- `/subagent create` 生成脚手架；`from`/`extends` 本地继承基座（对标 platform 复用）；内置 code-reviewer / researcher
+- 路由/硬指定回复写入主会话时标注 `[via:name]`；可选 Webhook；微信硬指定可用
 
 ## 修改时的硬规则
 

@@ -55,6 +55,7 @@ final class CliCommandParser {
         SUBAGENT_CREATE,
         SUBAGENT_TEMPLATES,
         SUBAGENT_AUDIT,
+        SUBAGENT_SHOW,
         CONFIG,
         LANG,
         EXPORT
@@ -353,6 +354,15 @@ final class CliCommandParser {
         }
         if (trimmed.regionMatches(true, 0, "/sa audit ", 0, 10)) {
             return new ParsedCommand(CommandType.SUBAGENT_AUDIT, trimmed.substring(10).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/subagent show ", 0, 15)) {
+            return new ParsedCommand(CommandType.SUBAGENT_SHOW, trimmed.substring(15).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/sa show ", 0, 9)) {
+            return new ParsedCommand(CommandType.SUBAGENT_SHOW, trimmed.substring(9).trim());
+        }
+        if (trimmed.equalsIgnoreCase("/subagent show") || trimmed.equalsIgnoreCase("/sa show")) {
+            return new ParsedCommand(CommandType.SUBAGENT_SHOW, "");
         }
         if (trimmed.regionMatches(true, 0, "/subagent create", 0, 16)) {
             String rest = trimmed.length() > 16 ? trimmed.substring(16).trim() : "";

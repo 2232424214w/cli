@@ -62,6 +62,57 @@ final class SubagentCommandHandler {
         return sb.toString();
     }
 
+    static String show(CustomSubAgentRegistry registry, String name) {
+        if (name == null || name.isBlank()) {
+            return "用法: /subagent show <name>";
+        }
+        if (registry == null) {
+            return "🧩 Custom SubAgent 注册表未初始化";
+        }
+        CustomSubAgentDefinition d = registry.find(name.trim());
+        if (d == null) {
+            return "❌ 未找到子 Agent \"" + name.trim() + "\"\n" + list(registry);
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("🧩 Custom SubAgent「").append(d.name()).append("」\n");
+        sb.append("  source: ").append(d.displaySource()).append('\n');
+        if (d.extendsFrom() != null) {
+            sb.append("  from: ").append(d.extendsFrom()).append('\n');
+        }
+        sb.append("  description: ").append(d.description() == null ? "" : d.description()).append('\n');
+        if (d.model() != null && !d.model().isBlank()) {
+            sb.append("  model: ").append(d.model()).append('\n');
+        }
+        if (d.maxTurns() != null) {
+            sb.append("  maxTurns: ").append(d.maxTurns()).append('\n');
+        }
+        sb.append("  timeoutSeconds: ").append(d.resolveTimeoutSeconds()).append('\n');
+        if (!d.allowedTools().isEmpty()) {
+            sb.append("  allowedTools: ").append(d.allowedTools()).append('\n');
+        }
+        if (!d.disallowedTools().isEmpty()) {
+            sb.append("  disallowedTools: ").append(d.disallowedTools()).append('\n');
+        }
+        if (!d.skills().isEmpty()) {
+            sb.append("  skills: ").append(d.skills()).append('\n');
+        }
+        if (d.agentMdPath() != null) {
+            sb.append("  path: ").append(d.agentMdPath()).append('\n');
+        }
+        boolean hasSoul = d.soulMd() != null && !d.soulMd().isBlank();
+        boolean hasIdentity = d.identityMd() != null && !d.identityMd().isBlank();
+        boolean hasMemory = d.memoryMd() != null && !d.memoryMd().isBlank();
+        sb.append("  sidecars: soul=").append(hasSoul)
+                .append(" identity=").append(hasIdentity)
+                .append(" memory=").append(hasMemory).append('\n');
+        String body = d.body() == null ? "" : d.body().trim();
+        if (body.length() > 800) {
+            body = body.substring(0, 800) + "\n…";
+        }
+        sb.append("\n--- AGENT body ---\n").append(body);
+        return sb.toString();
+    }
+
     static String audit(int limit) {
         return com.bettercli.subagent.CustomSubAgentAudit.formatTail(limit);
     }

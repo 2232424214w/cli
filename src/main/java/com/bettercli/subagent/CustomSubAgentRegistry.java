@@ -7,9 +7,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -21,6 +23,9 @@ import java.util.stream.Collectors;
  *   <li>user：{@code ~/.bettercli/agents/<name>/AGENT.md}</li>
  *   <li>project：{@code <project>/.bettercli/agents/<name>/AGENT.md}</li>
  * </ol>
+ *
+ * <p>支持 frontmatter {@code from} / {@code extends}：在全部层加载后按名字继承本地基座
+ * （CLI 侧对标文档 {@code platform} 复用，不接 RoleHub）。
  */
 public final class CustomSubAgentRegistry {
 
@@ -43,6 +48,7 @@ public final class CustomSubAgentRegistry {
         loadDirectory(builtinAgentsDir, CustomSubAgentDefinition.Source.BUILTIN);
         loadDirectory(userAgentsDir, CustomSubAgentDefinition.Source.USER);
         loadDirectory(projectAgentsDir, CustomSubAgentDefinition.Source.PROJECT);
+        resolveInheritance();
     }
 
     public synchronized List<CustomSubAgentDefinition> all() {
@@ -60,6 +66,41 @@ public final class CustomSubAgentRegistry {
 
     public synchronized List<String> warnings() {
         return List.copyOf(warnings);
+    }
+
+    /** 解析 {@code from}/{@code extends}，检测环与缺失基座。 */
+    private void resolveInheritance() {
+        List<String> names = new ArrayList<>(byName.keySet());
+        for (String name : names) {
+            CustomSubAgentDefinition def = byName.get(name);
+            if (def == null || def.extendsFrom() == null || def.extendsFrom().isBlank()) {
+                continue;
+            }
+            Set<String> seen = new HashSet<>();
+            seen.add(name);
+            CustomSubAgentDefinition merged = def;
+            String cursor = def.extendsFrom().trim();
+            int depth = 0;
+            while (cursor != null && !cursor.isBlank() && depth < 8) {
+                if (!seen.add(cursor)) {
+                    String msg = "Custom SubAgent [" + name + "] from 存在循环: " + cursor;
+                    warnings.add(msg);
+                    System.err.println("⚠️ " + msg);
+                    break;
+                }
+                CustomSubAgentDefinition base = byName.get(cursor);
+                if (base == null) {
+                    String msg = "Custom SubAgent [" + name + "] from=\"" + cursor + "\" 未找到基座";
+                    warnings.add(msg);
+                    System.err.println("⚠️ " + msg);
+                    break;
+                }
+                merged = merged.mergeOver(base);
+                cursor = base.extendsFrom();
+                depth++;
+            }
+            byName.put(name, merged);
+        }
     }
 
     private void loadDirectory(Path dir, CustomSubAgentDefinition.Source source) {
@@ -121,6 +162,10 @@ public final class CustomSubAgentRegistry {
         List<String> allowedTools = listField(fm, "allowedTools");
         List<String> disallowedTools = listField(fm, "disallowedTools");
         List<String> skills = listField(fm, "skills");
+        String extendsFrom = stringField(fm, "from");
+        if (extendsFrom == null || extendsFrom.isBlank()) {
+            extendsFrom = stringField(fm, "extends");
+        }
 
         String memoryMd = readOptionalSidecar(agentDir, "MEMORY.md");
         String soulMd = readOptionalSidecar(agentDir, "SOUL.md");
@@ -140,7 +185,8 @@ public final class CustomSubAgentRegistry {
                 soulMd,
                 identityMd,
                 source,
-                agentMd
+                agentMd,
+                extendsFrom
         );
     }
 

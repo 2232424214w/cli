@@ -320,20 +320,12 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             // === Custom SubAgent 系统初始化（与 Multi-Agent /team 独立）===
-            Path agentsCacheDir = home.resolve(".bettercli/agents-cache");
-            Path userAgentsDir = home.resolve(".bettercli/agents");
-            Path projectAgentsDir = Path.of(".bettercli/agents").toAbsolutePath();
-            try {
-                new com.bettercli.subagent.CustomSubAgentBuiltinExtractor(agentsCacheDir).extractAll();
-            } catch (Exception e) {
-                startupNote = appendStartupNote(startupNote, "内置 Custom SubAgent 解压失败: " + e.getMessage());
-            }
-            com.bettercli.subagent.CustomSubAgentRegistry customSubAgentRegistry =
-                    new com.bettercli.subagent.CustomSubAgentRegistry(
-                            agentsCacheDir, userAgentsDir, projectAgentsDir);
-            customSubAgentRegistry.reload();
-            com.bettercli.subagent.CustomSubAgentRunner customSubAgentRunner =
-                    new com.bettercli.subagent.CustomSubAgentRunner(customSubAgentRegistry);
+            com.bettercli.subagent.CustomSubAgentBootstrap.Bundle subagentBundle =
+                    com.bettercli.subagent.CustomSubAgentBootstrap.create(Path.of(".").toAbsolutePath().normalize());
+            Path userAgentsDir = subagentBundle.userAgentsDir();
+            Path projectAgentsDir = subagentBundle.projectAgentsDir();
+            com.bettercli.subagent.CustomSubAgentRegistry customSubAgentRegistry = subagentBundle.registry();
+            com.bettercli.subagent.CustomSubAgentRunner customSubAgentRunner = subagentBundle.runner();
 
             // 记忆存储后端（对标美团 1024 Agent，可插拔：sqlite/postgres，默认 sqlite）
             File memoryDir = new File(new File(System.getProperty("user.home"), ".bettercli"), "memory");
@@ -962,6 +954,10 @@ public class Main {
                         ui.println(SubagentCommandHandler.audit(limit));
                         continue;
                     }
+                    case SUBAGENT_SHOW -> {
+                        ui.println(SubagentCommandHandler.show(customSubAgentRegistry, command.payload()));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -1124,7 +1120,7 @@ public class Main {
                                     routedName, effectiveTask, activeClient,
                                     reactAgent.getToolRegistry(),
                                     progress, parentId, history, null);
-                            reactAgent.recordExternalTurn(effectiveTask, answer);
+                            reactAgent.recordExternalTurn(effectiveTask, answer, routedName);
                             return answer;
                         };
                     } else {
@@ -1975,6 +1971,7 @@ public class Main {
                 new SlashCommandHint("/subagent status", "/subagent status", "查看运行中的 Custom SubAgent 委托"),
                 new SlashCommandHint("/sa-st", "/sa-st", "同 /subagent status"),
                 new SlashCommandHint("/subagent audit", "/subagent audit", "查看 Custom SubAgent 审计日志"),
+                new SlashCommandHint("/subagent show", "/subagent show", "查看某个 Custom SubAgent 定义"),
                 new SlashCommandHint("/sa-st", "/sa-st", "查看运行中的 Custom SubAgent 委托"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
                 new SlashCommandHint("/exit", "/exit", "退出 BetterCLI"),

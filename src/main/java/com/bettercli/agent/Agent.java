@@ -640,11 +640,24 @@ public class Agent {
      * 路由命中 Custom SubAgent 后，把本轮 user/assistant 写入主会话，保持对话连续。
      */
     public void recordExternalTurn(String userInput, String assistantReply) {
+        recordExternalTurn(userInput, assistantReply, null);
+    }
+
+    /**
+     * 路由/硬指定命中后写入主会话；{@code viaSubagent} 非空时在 assistant 内容前标注来源（对标文档可观测）。
+     */
+    public void recordExternalTurn(String userInput, String assistantReply, String viaSubagent) {
         if (userInput != null && !userInput.isBlank()) {
             memoryManager.addUserMessage(userInput);
             conversationHistory.add(LlmClient.Message.user(userInput));
         }
         String reply = assistantReply == null ? "" : assistantReply;
+        if (viaSubagent != null && !viaSubagent.isBlank()) {
+            String tag = "[via:" + viaSubagent.trim() + "]\n";
+            if (!reply.startsWith(tag) && !reply.startsWith("[via:")) {
+                reply = tag + reply;
+            }
+        }
         memoryManager.addAssistantMessage(reply);
         conversationHistory.add(LlmClient.Message.assistant(reply));
         if (sessionMessageIndexer != null) {

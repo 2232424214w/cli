@@ -140,10 +140,33 @@ class CustomSubAgentRegistryTest {
                 "x", "d", "body", null, null, null,
                 List.of(), List.of("write_file"), List.of(), "",
                 "", "",
-                CustomSubAgentDefinition.Source.USER, null);
+                CustomSubAgentDefinition.Source.USER, null, null);
         Set<String> effective = def.resolveEffectiveTools(
                 Set.of("read_file", "write_file", "run_subagent", "run_team"));
         assertEquals(Set.of("read_file"), effective);
+    }
+
+    @Test
+    void inheritsFromBaseAgent(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        writeAgent(user, "code-reviewer", "base review", "base body");
+        Path child = user.resolve("strict-reviewer");
+        Files.createDirectories(child);
+        Files.writeString(child.resolve("AGENT.md"), """
+                ---
+                name: strict-reviewer
+                from: code-reviewer
+                description: stricter review
+                ---
+                """);
+
+        CustomSubAgentRegistry registry = new CustomSubAgentRegistry(null, user, null);
+        registry.reload();
+        CustomSubAgentDefinition def = registry.find("strict-reviewer");
+        assertNotNull(def);
+        assertEquals("stricter review", def.description());
+        assertTrue(def.body().contains("base body"));
+        assertEquals("code-reviewer", def.extendsFrom());
     }
 
     private static void writeAgent(Path root, String name, String desc, String body) throws IOException {

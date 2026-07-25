@@ -212,7 +212,11 @@ final class BetterCliCompleter implements Completer {
                     option("status", "查看运行中委托"),
                     option("create", "生成 AGENT.md 脚手架"),
                     option("templates", "列出脚手架模板"),
-                    option("audit", "查看审计日志"));
+                    option("audit", "查看审计日志"),
+                    option("show", "查看某个 SubAgent 定义"));
+            return true;
+        }
+        if (parts.length >= 1 && "show".equalsIgnoreCase(parts[0])) {
             return true;
         }
         if (parts.length >= 1 && "create".equalsIgnoreCase(parts[0])) {

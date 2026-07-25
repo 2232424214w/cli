@@ -137,6 +137,6 @@ class CustomSubAgentRouterTest {
                 name, desc, "body", null, null, null,
                 List.of(), List.of(), List.of(), "",
                 "", "",
-                CustomSubAgentDefinition.Source.USER, null);
+                CustomSubAgentDefinition.Source.USER, null, null);
     }
 }

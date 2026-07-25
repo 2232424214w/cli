@@ -124,7 +124,7 @@ class CustomSubAgentRunnerTest {
                 List.of("read_file", "run_subagent", "run_team", "create_plan"),
                 List.of(), List.of(), "",
                 "", "",
-                CustomSubAgentDefinition.Source.USER, null);
+                CustomSubAgentDefinition.Source.USER, null, null);
         Set<String> effective = def.resolveEffectiveTools(Set.of(
                 "read_file", "run_subagent", "run_team", "create_plan"));
         assertEquals(Set.of("read_file"), effective);

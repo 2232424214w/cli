@@ -8,68 +8,57 @@
 
 | 文档能力 | BetterCLI | 说明 |
 |----------|-----------|------|
-| 独立 prompt / 工具 / 模型 / maxTurns / skills / MEMORY | ✅ | `AGENT.md` + sidecar |
+| 独立 prompt / 工具 / 模型 / maxTurns / skills / MEMORY / SOUL / IDENTITY | ✅ | `AGENT.md` + sidecar |
 | 方式一：`run_subagent` 委托 + 并发 + 隔离历史 | ✅ | 异步占位 + 批次回填 |
 | 方式二：路由 LLM 跳过主 Agent | ✅ | 置信度门控 + sticky + 专用模型可配 |
-| 方式三：`/subagent:name` / `/sa:name` 硬指定 | ✅ | **消息前缀**；空格 `/subagent name task` 仍禁止（管理命名空间） |
+| 方式三：`/subagent:name` / `/sa:name` 硬指定 | ✅ | **消息前缀**；空格形式仍禁止 |
 | 未找到时列出可用 | ✅ | |
 | `@main` / `/main` 强制主 Agent | ✅ | |
 | 禁止递归 / 停止联动 / 超时 | ✅ | |
-| 作用域覆盖 | ✅ | builtin &lt; user &lt; project（对标 PaaS/用户） |
-| `/sa-l` `/sa-st` | ✅ | list / status 别名 |
-| 审计 `subagent_name` / `parent_conversation_id` | ✅ | JSONL + `/subagent audit` |
+| 作用域覆盖 | ✅ | builtin &lt; user &lt; project |
+| 本地复用基座（对标 platform） | ✅ | frontmatter `from` / `extends` |
+| `/sa-l` `/sa-st` / `show` | ✅ | list / status / 查看定义 |
+| 审计 + 主会话 `via:` 标注 | ✅ | JSONL + `/subagent audit`；回复前缀 `[via:name]` |
 | Webhook `SUBAGENT_*` | ✅ 轻量 | `BETTERCLI_SUBAGENT_WEBHOOK_URL`，5s fail-open |
-| 脚手架 | ✅ | `/subagent create` / `templates` |
-| 微信通道 | ✅ | 硬指定始终可用；路由默认关（`BETTERCLI_WECHAT_SUBAGENT_ROUTER=true` 开） |
-| RoleHub / platform 类型 / belongPaas | ❌ | 平台专属 |
-| 进程崩溃 HA 续跑 | ❌ | CLI 不做；可用审计回溯 |
+| 脚手架 + 内置样例 | ✅ | create/templates；builtin `code-reviewer` / `researcher` |
+| 微信通道 | ✅ | 硬指定始终可用；路由默认关 |
+| RoleHub / belongPaas / 云端 HA | ❌ | 平台专属；CLI 不做崩溃续跑 |
 
 ## 触发原则（入站优先级 = 文档 §4.1）
 
 1. `/subagent:name …` 或 `/sa:name …` → 硬指定直达  
-2. 路由 LLM（可关 / 可配专用模型）→ 命中则直达  
+2. 路由 LLM → 命中则直达  
 3. 主 Agent（可再 `run_subagent`）
 
-| 方式 | 是否支持 | 说明 |
-|------|----------|------|
-| 主 Agent 语义委托 `run_subagent` | 是 | 异步占位 → 批次结束回填；状态栏 `sa:name` / `sa×N` |
-| 轻量路由 LLM | 是 | 置信度默认 ≥0.70；sticky；fail-open |
-| 消息前缀硬指定 | 是 | `/subagent:name` / `/sa:name` |
-| `/subagent <name> <task>` 空格硬指定 | **否** | 与管理命令冲突，未知命令 |
-| 管理命令 | 是 | list / reload / status / create / templates / audit；`/sa-l` `/sa-st` |
+管理命令：`list` / `reload` / `status` / `create` / `templates` / `audit` / `show`；别名 `/sa-l` `/sa-st`。
 
-配置：
+## 定义与继承
 
-- `bettercli.subagent.router.enabled` / `BETTERCLI_SUBAGENT_ROUTER_ENABLED`（默认 true）
-- `bettercli.subagent.router.min.confidence` / `BETTERCLI_SUBAGENT_ROUTER_MIN_CONFIDENCE`（默认 0.70）
-- `bettercli.subagent.router.provider` / `BETTERCLI_SUBAGENT_ROUTER_PROVIDER`
-- `bettercli.subagent.router.model` / `BETTERCLI_SUBAGENT_ROUTER_MODEL`
-- `bettercli.subagent.webhook.url` / `BETTERCLI_SUBAGENT_WEBHOOK_URL`
-- `bettercli.wechat.subagent.router` / `BETTERCLI_WECHAT_SUBAGENT_ROUTER`（默认 false）
+```yaml
+---
+name: strict-reviewer
+from: code-reviewer          # 或 extends
+description: 更严格的审查口径
+# 未写的字段（tools/model/body…）从基座继承；本文件非空字段覆盖基座
+---
+```
 
-## 定义位置
+内置：`code-reviewer`、`researcher`（解压到 `~/.bettercli/agents-cache/`）。
 
-后者覆盖同名：builtin cache → `~/.bettercli/agents/` → `.bettercli/agents/`。
-
-同目录可选 `SOUL.md` / `IDENTITY.md` / `MEMORY.md`。
-
-### 脚手架
+## 脚手架
 
 ```text
 /subagent create <name> [--project|--user] [--template blank|code-reviewer|researcher] [--force]
+/subagent show <name>
 /subagent templates
 ```
 
-## 执行约束
+## 配置
 
-- 禁止递归；ThreadLocal；进出还原 `currentModel`
-- 异步占位 `CUSTOM_SUBAGENT_PENDING:` + `materializeAsyncResults`
-- 路由/硬指定：`seedParentHistory`；未命中清空 sticky
-- ESC/`/cancel` → `cancelAllPending`
-- 独立 `SkillContextBuffer`
-- `write_subagent_memory` 路径围栏
-- 审计 JSONL + 可选 Webhook
+- `BETTERCLI_SUBAGENT_ROUTER_*`（enabled / min.confidence / provider / model）
+- `BETTERCLI_SUBAGENT_WEBHOOK_URL`
+- `BETTERCLI_WECHAT_SUBAGENT_ROUTER`（默认 false）
 
 ## 实现入口
 
-`com.bettercli.subagent.*` · `CustomSubAgentBootstrap` · `Main` / `WechatAgentSession` 入站 · `SubAgent.seedParentHistory`
+`com.bettercli.subagent.*` · `CustomSubAgentBootstrap` · `Main` / `WechatAgentSession`
