@@ -8,7 +8,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -22,7 +21,8 @@ import java.util.List;
  * ReAct 会话 JSONL 持久化：普通消息行 + {@code compacted} 检查点行。
  *
  * <p>加载时遇到 {@code compacted} 用内嵌快照整表替换历史，再追加其后新消息（对标 1024 Resume 快进）。
- * Rotate：有检查点时从最新 compacted 起保留；无检查点则按最近 N 行截断。
+ * Rotate：有检查点时从最新 compacted 起整段保留（只丢检查点前 raw 行）；
+ * 若文件仍从首行 compacted 起膨胀，则物理合并为单行快照（不丢 Resume 内容）；无检查点则按最近 N 行截断。
  */
 public class SessionCheckpointStore {
 
@@ -56,6 +56,7 @@ public class SessionCheckpointStore {
             node.put("type", message.role());
             writeMessageFields(node, message);
             appendLine(node);
+            maybeRotate();
         } catch (Exception e) {
             log.warn("appendMessage failed: {}", e.toString());
         }
@@ -91,42 +92,12 @@ public class SessionCheckpointStore {
         if (!Files.isRegularFile(file)) {
             return List.of();
         }
-        List<LlmClient.Message> history = new ArrayList<>();
-        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isBlank()) {
-                    continue;
-                }
-                JsonNode node = MAPPER.readTree(line);
-                String type = text(node, "type");
-                if ("compacted".equals(type)) {
-                    history.clear();
-                    JsonNode snap = node.get("history");
-                    if (snap != null && snap.isArray()) {
-                        for (JsonNode item : snap) {
-                            LlmClient.Message msg = readMessage(item);
-                            if (msg != null) {
-                                history.add(msg);
-                            }
-                        }
-                    } else {
-                        String summary = text(node, "summary");
-                        if (summary != null && !summary.isBlank()) {
-                            history.add(LlmClient.Message.user(summary));
-                        }
-                    }
-                    continue;
-                }
-                LlmClient.Message msg = readMessage(node);
-                if (msg != null) {
-                    history.add(msg);
-                }
-            }
+        try {
+            return reconstructHistory(Files.readAllLines(file, StandardCharsets.UTF_8));
         } catch (Exception e) {
             log.warn("loadHistory failed: {}", e.toString());
+            return List.of();
         }
-        return history;
     }
 
     public synchronized void maybeRotate() {
@@ -148,10 +119,25 @@ public class SessionCheckpointStore {
             }
             List<String> kept;
             if (lastCompacted >= 0) {
-                kept = new ArrayList<>(lines.subList(lastCompacted, lines.size()));
+                // 对标 1024：从最新 compacted 起整段保留（含其后全部消息），只丢掉检查点之前的 raw 行。
+                if (lastCompacted == 0) {
+                    if (lines.size() <= rotateKeepLines * 2) {
+                        return;
+                    }
+                    // 首行已是最新检查点且文件仍膨胀：把有效 Resume 历史物理合并成单行 compacted
+                    kept = List.of(serializeCompactedSnapshot(
+                            CompactTrigger.MANUAL.name(),
+                            "[上下文检查点] （session 物理合并，内容未再摘要）\n",
+                            reconstructHistory(lines)));
+                } else {
+                    kept = new ArrayList<>(lines.subList(lastCompacted, lines.size()));
+                }
             } else {
                 int from = Math.max(0, lines.size() - rotateKeepLines);
                 kept = new ArrayList<>(lines.subList(from, lines.size()));
+            }
+            if (kept.size() >= lines.size()) {
+                return;
             }
             Path tmp = file.resolveSibling(file.getFileName() + ".rotate.tmp");
             Files.write(tmp, kept, StandardCharsets.UTF_8,
@@ -162,6 +148,58 @@ public class SessionCheckpointStore {
         } catch (Exception e) {
             log.warn("session rotate failed: {}", e.toString());
         }
+    }
+
+    private static List<LlmClient.Message> reconstructHistory(List<String> lines) throws IOException {
+        List<LlmClient.Message> history = new ArrayList<>();
+        for (String line : lines) {
+            if (line == null || line.isBlank()) {
+                continue;
+            }
+            JsonNode node = MAPPER.readTree(line);
+            String type = text(node, "type");
+            if ("compacted".equals(type)) {
+                history.clear();
+                JsonNode snap = node.get("history");
+                if (snap != null && snap.isArray()) {
+                    for (JsonNode item : snap) {
+                        LlmClient.Message msg = readMessage(item);
+                        if (msg != null) {
+                            history.add(msg);
+                        }
+                    }
+                } else {
+                    String summary = text(node, "summary");
+                    if (summary != null && !summary.isBlank()) {
+                        history.add(LlmClient.Message.user(summary));
+                    }
+                }
+                continue;
+            }
+            LlmClient.Message msg = readMessage(node);
+            if (msg != null) {
+                history.add(msg);
+            }
+        }
+        return history;
+    }
+
+    private static String serializeCompactedSnapshot(String trigger,
+                                                     String summary,
+                                                     List<LlmClient.Message> history) throws IOException {
+        ObjectNode node = MAPPER.createObjectNode();
+        node.put("type", "compacted");
+        node.put("trigger", trigger == null ? "MANUAL" : trigger);
+        node.put("summary", summary == null ? "" : summary);
+        ArrayNode snapshot = node.putArray("history");
+        if (history != null) {
+            for (LlmClient.Message msg : history) {
+                ObjectNode item = snapshot.addObject();
+                item.put("role", msg.role());
+                writeMessageFields(item, msg);
+            }
+        }
+        return MAPPER.writeValueAsString(node);
     }
 
     private void appendLine(ObjectNode node) throws IOException {

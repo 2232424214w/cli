@@ -7,6 +7,7 @@ import com.bettercli.context.TokenUsageFormatter;
 import com.bettercli.lsp.LspDiagnosticReport;
 import com.bettercli.memory.CompactConfig;
 import com.bettercli.memory.CompactTrigger;
+import com.bettercli.memory.CompactionSupport;
 import com.bettercli.memory.ConversationHistoryCompactor;
 import com.bettercli.memory.ExplicitMemoryHints;
 import com.bettercli.memory.MemoryManager;
@@ -77,6 +78,8 @@ public class Agent {
     private int currentTurnUserIndex = -1;
     /** 最近一次 LLM 返回的精确 input tokens，供溢出双条件使用。 */
     private Integer lastKnownInputTokens;
+    /** /clear 后轮换粘性会话（CLI/TUI 注入）。 */
+    private Runnable afterClearHook;
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -92,9 +95,15 @@ public class Agent {
             if (sessionCheckpointStore != null) {
                 sessionCheckpointStore.appendCompacted(checkpoint);
             }
+            if (sessionMessageIndexer != null) {
+                // 同步落库：/compact 在 run() 外调用时也保证摘要可被 session_search 立刻检索
+                sessionMessageIndexer.indexCompactedSync(checkpoint, List.copyOf(conversationHistory));
+            }
         });
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
-        this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        if (llmClient != null) {
+            this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        }
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
         this.toolRegistry.setScopedMemorySaver(memoryManager::storeFact);
         this.toolRegistry.setPlanStore(this.planStore);
@@ -108,7 +117,9 @@ public class Agent {
         this.memoryManager.setLlmClient(llmClient);
         this.historyCompactor.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
-        this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        if (llmClient != null) {
+            this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        }
         wireModeCapabilityTools();
     }
 
@@ -222,12 +233,24 @@ public class Agent {
         this.sessionMessageIndexer = indexer;
     }
 
+    /** 注入 /clear 后的粘性会话轮换（换 session id / 空检查点 / 新 indexer）。 */
+    public void setAfterClearHook(Runnable afterClearHook) {
+        this.afterClearHook = afterClearHook;
+    }
+
     /**
-     * 注入 session.jsonl 检查点存储。设置后会尝试 Resume 快进加载历史（保留当前 system）。
+     * 注入 session.jsonl 检查点存储。默认会尝试 Resume 快进加载历史（保留当前 system）。
      */
     public void setSessionCheckpointStore(SessionCheckpointStore store) {
+        setSessionCheckpointStore(store, true);
+    }
+
+    /**
+     * @param resume 为 false 时只换绑存储（用于 /clear 轮换后的空检查点），避免误把旧内容灌回已清空的内存历史
+     */
+    public void setSessionCheckpointStore(SessionCheckpointStore store, boolean resume) {
         this.sessionCheckpointStore = store;
-        if (store == null) {
+        if (!resume || store == null) {
             return;
         }
         try {
@@ -241,6 +264,10 @@ public class Agent {
             conversationHistory.clear();
             conversationHistory.add(system);
             conversationHistory.addAll(loaded);
+            if (sessionMessageIndexer != null) {
+                // Resume：从 0 回填 FTS，避免中途崩溃导致 jsonl 有而检索永久盲区
+                sessionMessageIndexer.reindexFromStart(conversationHistory);
+            }
             log.info("Resumed conversationHistory from session checkpoint: {} messages", loaded.size());
         } catch (Exception e) {
             log.warn("Failed to resume from session checkpoint store", e);
@@ -275,13 +302,10 @@ public class Agent {
 
         // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）
         String userMessageContent = prependSkillBodies(userInput);
-        conversationHistory.add(ImageReferenceParser.userMessage(
+        persistMessage(ImageReferenceParser.userMessage(
                 userMessageContent,
                 Path.of(toolRegistry.getProjectPath())));
         currentTurnUserIndex = conversationHistory.size() - 1;
-        if (sessionCheckpointStore != null) {
-            sessionCheckpointStore.appendMessage(conversationHistory.get(currentTurnUserIndex));
-        }
         StringBuilder reasoningTranscript = new StringBuilder();
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
 
@@ -294,6 +318,7 @@ public class Agent {
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
+        try {
         while (true) {
             if (CancellationContext.isCancelled()) {
                 log.info("ReAct run cancelled before iteration");
@@ -350,15 +375,11 @@ public class Agent {
                     log.info("LLM requested {} tool call(s) in iteration {}", response.toolCalls().size(), iteration);
                     budget.recordToolCalls(response.toolCalls());
                     // 添加助手消息（包含工具调用）
-                    conversationHistory.add(LlmClient.Message.assistant(
+                    persistMessage(LlmClient.Message.assistant(
                             response.reasoningContent(),
                             response.content(),
                             response.toolCalls()
                     ));
-                    if (sessionCheckpointStore != null) {
-                        sessionCheckpointStore.appendMessage(
-                                conversationHistory.get(conversationHistory.size() - 1));
-                    }
 
                     // 在工具执行前就 flush 本轮流式渲染器，避免 TerminalMarkdownRenderer
                     // 内部 pending 缓冲区（仅按换行 flush）里的文本被 HITL 提示"跨过"
@@ -369,11 +390,7 @@ public class Agent {
                     List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls(), iteration);
                     for (ToolExecutionResult toolResult : toolResults) {
                         memoryManager.addToolResult(toolResult.name(), toolResult.result());
-                        conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
-                        if (sessionCheckpointStore != null) {
-                            sessionCheckpointStore.appendMessage(
-                                    conversationHistory.get(conversationHistory.size() - 1));
-                        }
+                        persistMessage(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);
                     // 工具失败反思：本轮若有失败/拒绝/超时，注入反思提示引导 LLM 复述原因 + 改换策略
@@ -388,23 +405,10 @@ public class Agent {
 
                 // 没有工具调用，直接返回结果
                 appendReasoning(reasoningTranscript, response.reasoningContent());
-                conversationHistory.add(LlmClient.Message.assistant(response.content()));
-                if (sessionCheckpointStore != null) {
-                    sessionCheckpointStore.appendMessage(
-                            conversationHistory.get(conversationHistory.size() - 1));
-                }
+                persistMessage(LlmClient.Message.assistant(response.content()));
 
                 // 存入记忆
                 memoryManager.addAssistantMessage(response.content());
-
-                // 异步索引本轮新增消息到 SessionMessageStore（不阻塞主路径）
-                if (sessionMessageIndexer != null) {
-                    try {
-                        sessionMessageIndexer.indexIncremental(new ArrayList<>(conversationHistory));
-                    } catch (Exception e) {
-                        log.debug("异步索引会话消息失败: {}", e.getMessage());
-                    }
-                }
 
                 // 记录 token 使用
                 memoryManager.recordTokenUsage(budget.totalInputTokens(), budget.totalOutputTokens(), budget.totalCachedInputTokens());
@@ -426,12 +430,7 @@ public class Agent {
                 return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
 
             } catch (IOException e) {
-                CompactTrigger fallback = null;
-                if (ConversationHistoryCompactor.looksLikeContextWindowExceeded(e)) {
-                    fallback = CompactTrigger.CONTEXT_WINDOW_EXCEEDED;
-                } else if (ConversationHistoryCompactor.looksLikePromptTooLong(e)) {
-                    fallback = CompactTrigger.PROMPT_TOO_LONG;
-                }
+                CompactTrigger fallback = CompactionSupport.overflowTrigger(e);
                 if (fallback != null && !overflowRetryUsed) {
                     overflowRetryUsed = true;
                     log.warn("LLM context overflow ({}), compact-and-retry once", fallback);
@@ -445,6 +444,21 @@ public class Agent {
                 pushStatus(budget, startNanos, "idle");
                 return "❌ 调用 LLM 失败: " + e.getMessage();
             }
+        }
+        } finally {
+            flushSessionIndex();
+        }
+    }
+
+    /** 任意退出路径都 flush 一次会话索引（成功 / 取消 / 失败 / 预算耗尽）。 */
+    private void flushSessionIndex() {
+        if (sessionMessageIndexer == null) {
+            return;
+        }
+        try {
+            sessionMessageIndexer.indexIncrementalSync(List.copyOf(conversationHistory));
+        } catch (Exception e) {
+            log.debug("flush session index failed: {}", e.getMessage());
         }
     }
 
@@ -463,6 +477,19 @@ public class Agent {
         // 清空 ReAct 规划（对标 /clear 清空其它会话级状态）
         planStore.clear();
         sessionNotebook.clear();
+        reflectionService.reset();
+        lastKnownInputTokens = null;
+        currentTurnUserIndex = -1;
+        if (sessionMessageIndexer != null) {
+            sessionMessageIndexer.resetIndex(conversationHistory.size());
+        }
+        if (afterClearHook != null) {
+            try {
+                afterClearHook.run();
+            } catch (Exception e) {
+                log.warn("afterClearHook failed: {}", e.toString());
+            }
+        }
     }
 
     /**
@@ -538,18 +565,38 @@ public class Agent {
             return false;
         }
         try {
-            CompactConfig config = CompactConfig.from(memoryManager.getContextProfile(), lastKnownInputTokens);
+            CompactConfig config = CompactConfig.from(
+                    memoryManager.getContextProfile(),
+                    lastKnownInputTokens,
+                    estimateToolsSchemaTokens());
+            boolean force = trigger == CompactTrigger.MANUAL
+                    || trigger == CompactTrigger.PROMPT_TOO_LONG
+                    || trigger == CompactTrigger.CONTEXT_WINDOW_EXCEEDED;
+            // 主轨即将有损压缩前，可选把稳定事实抽进长期记忆（默认关闭）
+            if (historyCompactor.needsCompaction(conversationHistory, config, force)) {
+                memoryManager.maybeExtractFacts();
+            }
             boolean compacted = historyCompactor.compact(
                     conversationHistory, trigger, config, currentTurnUserIndex);
             if (compacted) {
-                String tip = switch (trigger) {
-                    case PRE_TURN -> "📦 Pre-Turn：上下文接近窗口上限，已写入压缩检查点后继续。";
-                    case MID_TURN -> "📦 Mid-Turn：工具结果已纳入摘要检查点，继续下一轮采样。";
-                    case PROMPT_TOO_LONG, CONTEXT_WINDOW_EXCEEDED ->
-                            "📦 模型确认上下文溢出，已强制压缩检查点并重试。";
-                    case MANUAL -> "📦 已手动压缩为上下文检查点。";
-                };
-                renderer().stream().println(tip);
+                // 压缩后 usage 失效；清掉以免下一轮 max(旧 usage, 估算) 误触发
+                lastKnownInputTokens = null;
+                if (trigger == CompactTrigger.PRE_TURN) {
+                    currentTurnUserIndex = CompactionSupport.findLastUserIndex(conversationHistory);
+                }
+                // MANUAL 由 /compact 调用方自己打印带 token 数字的结果，避免重复提示
+                if (trigger != CompactTrigger.MANUAL) {
+                    String tip = switch (trigger) {
+                        case PRE_TURN -> "📦 Pre-Turn：上下文接近窗口上限，已写入压缩检查点后继续。";
+                        case MID_TURN -> "📦 Mid-Turn：工具结果已纳入摘要检查点，继续下一轮采样。";
+                        case PROMPT_TOO_LONG, CONTEXT_WINDOW_EXCEEDED ->
+                                "📦 模型确认上下文溢出，已强制压缩检查点并重试。";
+                        case MANUAL -> "";
+                    };
+                    if (!tip.isEmpty()) {
+                        renderer().stream().println(tip);
+                    }
+                }
             }
             return compacted;
         } catch (Exception e) {
@@ -582,7 +629,7 @@ public class Agent {
         if (report == null || report.isEmpty()) {
             return;
         }
-        conversationHistory.add(LlmClient.Message.user(report.promptText()));
+        persistMessage(LlmClient.Message.user(report.promptText()));
         renderer().stream().println(report.displayText());
         log.info("Injected LSP diagnostics into ReAct conversation");
     }
@@ -600,7 +647,7 @@ public class Agent {
         if (prompt == null || prompt.isBlank()) {
             return;
         }
-        conversationHistory.add(LlmClient.Message.user(prompt));
+        persistMessage(LlmClient.Message.user(prompt));
         renderer().stream().println(AnsiStyle.subtle("  ↻ " + prompt.split("\n", 2)[0]));
         log.info("Injected reflection prompt at iteration={} (consecutive={})",
                 iteration, reflectionService.consecutiveReflections());
@@ -737,10 +784,21 @@ public class Agent {
         sb.append("    ─────────────────────────────────\n");
         sb.append(String.format("    合计:              %8s  (%4.1f%%)%n",
                 formatTokens(total), ratio * 100));
-        sb.append(String.format("%n  压缩阈值: %s (%d%%)   距压缩还有: %s%n",
-                formatTokens(triggerTokens),
-                (int) (profile.compressionTriggerRatio() * 100),
-                formatTokens(triggerRemaining)));
+        sb.append(String.format("%n  压缩双条件（对标 1024）:%n"));
+        sb.append(String.format("    可用上限: %s  (= window − buffer 20k − maxOut 8k)%n",
+                formatTokens(triggerTokens)));
+        sb.append(String.format("    消息体阈值: %s  (当前消息体: %s)%n",
+                formatTokens(profile.minMessageBodyTokens()),
+                formatTokens(messagesTokens)));
+        int resolved = historyCompactor.resolveTotalTokens(
+                conversationHistory,
+                CompactConfig.from(profile, lastKnownInputTokens, toolsSchemaTokens));
+        sb.append(String.format("    判定总量: %s  (usage=%s, 估算含 schema)%n",
+                formatTokens(resolved),
+                lastKnownInputTokens == null ? "无" : formatTokens(lastKnownInputTokens)));
+        sb.append(String.format("    距压缩还有: %s   summaryMaxTokens: %s%n",
+                formatTokens(triggerRemaining),
+                formatTokens(CompactConfig.from(profile).summaryMaxTokens())));
         sb.append("  MCP resources 自动索引: ")
                 .append(profile.mcpResourceIndexEnabled() ? "开启" : "关闭（window 不足 32k）")
                 .append("\n");
@@ -756,12 +814,10 @@ public class Agent {
     }
 
     private int estimateToolsSchemaTokens() {
-        try {
-            return com.bettercli.memory.MemoryEntry.estimateTokens(
-                    new ObjectMapper().writeValueAsString(toolRegistry.getToolDefinitions()));
-        } catch (Exception e) {
-            return 0;
-        }
+        return CompactionSupport.estimateToolsSchemaTokens(
+                llmClient != null && llmClient.supportsTools()
+                        ? toolRegistry.getToolDefinitions()
+                        : null);
     }
 
     private long estimateCurrentContextTokens() {
@@ -1043,7 +1099,18 @@ public class Agent {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            conversationHistory.add(LlmClient.Message.user(parts));
+            persistMessage(LlmClient.Message.user(parts));
+        }
+    }
+
+    /** 写入 conversationHistory，并同步追加到 session.jsonl（system 除外）。 */
+    private void persistMessage(LlmClient.Message message) {
+        if (message == null) {
+            return;
+        }
+        conversationHistory.add(message);
+        if (sessionCheckpointStore != null && !"system".equals(message.role())) {
+            sessionCheckpointStore.appendMessage(message);
         }
     }
 

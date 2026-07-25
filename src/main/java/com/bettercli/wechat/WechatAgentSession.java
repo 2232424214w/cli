@@ -4,10 +4,17 @@ import com.bettercli.agent.Agent;
 import com.bettercli.config.BetterCliConfig;
 import com.bettercli.llm.LlmClient;
 import com.bettercli.llm.LlmClientFactory;
+import com.bettercli.memory.MemoryStoreFactory;
+import com.bettercli.memory.SessionCheckpointStore;
+import com.bettercli.memory.SessionIdStore;
+import com.bettercli.memory.SessionMessageIndexer;
+import com.bettercli.memory.SessionMessageStore;
+import com.bettercli.memory.StickySessionRotator;
 import com.bettercli.render.Renderer;
 import com.bettercli.runtime.CancellationContext;
 import com.bettercli.runtime.CancellationToken;
 
+import java.io.File;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -16,6 +23,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class WechatAgentSession implements AutoCloseable {
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
@@ -48,6 +56,47 @@ public class WechatAgentSession implements AutoCloseable {
         this.agent = new Agent(client, registry);
         this.agent.setRenderer(renderer);
         this.agent.setReturnFinalResponseWhenStreamed(true);
+        wireStickySession(account, workspace);
+    }
+
+    private void wireStickySession(WechatAccount account, Path workspace) {
+        try {
+            String safeAccount = account.accountId() == null || account.accountId().isBlank()
+                    ? "default"
+                    : account.accountId().replaceAll("[^a-zA-Z0-9._-]", "-");
+            Path historyDir = Path.of(System.getProperty("user.home"), ".bettercli", "history");
+            // 与 CLI 隔离：独立 active-session.id，避免互相抢粘性会话
+            SessionIdStore idStore = new SessionIdStore(
+                    historyDir.resolve("wechat-" + safeAccount + "-active-session.id"));
+            String conversationId = idStore.resolveOrCreate(false);
+            SessionCheckpointStore checkpointStore =
+                    new SessionCheckpointStore(idStore.checkpointPathFor(conversationId));
+            AtomicReference<SessionCheckpointStore> storeRef = new AtomicReference<>(checkpointStore);
+            AtomicReference<SessionMessageIndexer> indexerRef = new AtomicReference<>();
+
+            SessionMessageStore messageStore = null;
+            try {
+                File memoryDir = new File(System.getProperty("user.home"), ".bettercli/memory");
+                messageStore = new MemoryStoreFactory(workspace.toString(), memoryDir)
+                        .createSessionMessageStore();
+                if (messageStore != null) {
+                    SessionMessageIndexer indexer = new SessionMessageIndexer(
+                            messageStore, conversationId, workspace.toString());
+                    indexerRef.set(indexer);
+                    // 先挂 indexer，再 Resume，确保 reindexFromStart 生效
+                    agent.setSessionMessageIndexer(indexer);
+                }
+            } catch (Exception e) {
+                messageStore = null;
+            }
+
+            agent.setSessionCheckpointStore(checkpointStore);
+            StickySessionRotator rotator = new StickySessionRotator(
+                    idStore, messageStore, storeRef, indexerRef, agent, workspace::toString);
+            agent.setAfterClearHook(rotator::rotate);
+        } catch (Exception ignored) {
+            // 微信通道降级：无检查点仍可对话
+        }
     }
 
     public synchronized boolean isRunning() {

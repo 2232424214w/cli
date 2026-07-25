@@ -360,12 +360,17 @@ public class Main {
             // + session.jsonl 压缩检查点（粘性会话 ID，跨重启可 Resume）
             com.bettercli.memory.SessionMessageStore sessionMessageStore = null;
             com.bettercli.memory.SessionMessageIndexer sessionMessageIndexer = null;
+            java.util.concurrent.atomic.AtomicReference<com.bettercli.memory.SessionMessageIndexer> sessionMessageIndexerRef =
+                    new java.util.concurrent.atomic.AtomicReference<>();
             com.bettercli.memory.SessionCheckpointStore sessionCheckpointStore = null;
+            java.util.concurrent.atomic.AtomicReference<com.bettercli.memory.SessionCheckpointStore> sessionCheckpointStoreRef =
+                    new java.util.concurrent.atomic.AtomicReference<>();
             com.bettercli.memory.SessionIdStore sessionIdStore = new com.bettercli.memory.SessionIdStore();
             String conversationId = sessionIdStore.resolveOrCreate(false);
             try {
                 Path sessionCheckpointPath = sessionIdStore.checkpointPathFor(conversationId);
                 sessionCheckpointStore = new com.bettercli.memory.SessionCheckpointStore(sessionCheckpointPath);
+                sessionCheckpointStoreRef.set(sessionCheckpointStore);
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote, "会话检查点存储初始化失败: " + e.getMessage());
             }
@@ -387,9 +392,14 @@ public class Main {
                             sessionMessageStore, conversationId,
                             Path.of(".").toAbsolutePath().normalize().toString());
                     final com.bettercli.memory.SessionMessageStore storeRef2 = sessionMessageStore;
-                    final com.bettercli.memory.SessionMessageIndexer indexerRef = sessionMessageIndexer;
+                    final java.util.concurrent.atomic.AtomicReference<com.bettercli.memory.SessionMessageIndexer> indexerRef =
+                            sessionMessageIndexerRef;
+                    indexerRef.set(sessionMessageIndexer);
                     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                        indexerRef.close();
+                        com.bettercli.memory.SessionMessageIndexer idx = indexerRef.get();
+                        if (idx != null) {
+                            idx.close();
+                        }
                         storeRef2.close();
                     }, "bettercli-session-messages-shutdown"));
                 }
@@ -407,6 +417,21 @@ public class Main {
             if (sessionCheckpointStore != null) {
                 reactAgent.setSessionCheckpointStore(sessionCheckpointStore);
             }
+            com.bettercli.memory.StickySessionRotator stickySessionRotator =
+                    new com.bettercli.memory.StickySessionRotator(
+                            sessionIdStore,
+                            sessionMessageStore,
+                            sessionCheckpointStoreRef,
+                            sessionMessageIndexerRef,
+                            reactAgent,
+                            () -> Path.of(reactAgent.getToolRegistry().getProjectPath())
+                                    .toAbsolutePath().normalize().toString());
+            reactAgent.setAfterClearHook(() -> {
+                com.bettercli.memory.StickySessionRotator.RotateResult rotated = stickySessionRotator.rotate();
+                if (rotated.warning() != null && !rotated.warning().isBlank()) {
+                    System.err.println("⚠️ " + rotated.warning());
+                }
+            });
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
             taskManager.start();
             Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "bettercli-task-shutdown"));
@@ -507,18 +532,9 @@ public class Main {
                         continue;
                     }
                     case CLEAR -> {
-                        reactAgent.clearHistory();
                         hitlHandler.clearApprovedAll();
-                        // /clear 轮换粘性会话：旧 session-*.jsonl 保留审计，新会话从空检查点开始
-                        try {
-                            String newId = sessionIdStore.rotate();
-                            conversationId = newId;
-                            sessionCheckpointStore = new com.bettercli.memory.SessionCheckpointStore(
-                                    sessionIdStore.checkpointPathFor(newId));
-                            reactAgent.setSessionCheckpointStore(sessionCheckpointStore);
-                        } catch (Exception rotateEx) {
-                            System.err.println("⚠️ 轮换会话检查点失败: " + rotateEx.getMessage());
-                        }
+                        // clearHistory 内触发 StickySessionRotator（CLI/TUI 共用）
+                        reactAgent.clearHistory();
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         ui.println("🗑️ 当前对话历史已清空，长期记忆保持不变\n");
                         continue;

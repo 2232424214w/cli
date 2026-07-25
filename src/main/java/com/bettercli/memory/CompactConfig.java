@@ -12,20 +12,31 @@ public record CompactConfig(
         int minMessageBodyTokens,
         int recentUserMessageBudgetTokens,
         int summaryMaxTokens,
-        Integer lastKnownTotalTokens
+        Integer lastKnownTotalTokens,
+        int toolsSchemaTokens
 ) {
     public static final int DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
     public static final int DEFAULT_COMPACTION_BUFFER_TOKENS = 20_000;
     public static final int DEFAULT_MIN_MESSAGE_BODY_TOKENS = 20_000;
     public static final int DEFAULT_RECENT_USER_BUDGET_TOKENS = 5_000;
-    /** 对标 1024 compaction.summaryMaxTokens，默认 4000，可用属性调到 4000~8000 */
-    public static final int DEFAULT_SUMMARY_MAX_TOKENS = 4_000;
+    /** 对标 1024 compaction.summaryMaxTokens，默认 6000（文档建议 4000~8000） */
+    public static final int DEFAULT_SUMMARY_MAX_TOKENS = 6_000;
+
+    public CompactConfig {
+        toolsSchemaTokens = Math.max(0, toolsSchemaTokens);
+    }
 
     public static CompactConfig from(ContextProfile profile) {
-        return from(profile, null);
+        return from(profile, null, 0);
     }
 
     public static CompactConfig from(ContextProfile profile, Integer lastKnownTotalTokens) {
+        return from(profile, lastKnownTotalTokens, 0);
+    }
+
+    public static CompactConfig from(ContextProfile profile,
+                                     Integer lastKnownTotalTokens,
+                                     int toolsSchemaTokens) {
         int window = profile == null ? 128_000 : profile.maxContextWindow();
         return new CompactConfig(
                 window,
@@ -34,7 +45,8 @@ public record CompactConfig(
                 DEFAULT_MIN_MESSAGE_BODY_TOKENS,
                 DEFAULT_RECENT_USER_BUDGET_TOKENS,
                 readSummaryMaxTokens(),
-                lastKnownTotalTokens
+                lastKnownTotalTokens,
+                toolsSchemaTokens
         );
     }
 

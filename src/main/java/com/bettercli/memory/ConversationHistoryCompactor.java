@@ -28,6 +28,7 @@ public class ConversationHistoryCompactor {
     private static final Logger log = LoggerFactory.getLogger(ConversationHistoryCompactor.class);
 
     private static final int MAX_SUMMARY_INPUT_CHARS = 60_000;
+    private static final int MIN_SUMMARY_INPUT_CHARS = 8_000;
     private static final double PROGRESSIVE_FLOOR_RATIO = 0.25;
 
     /** 摘要前缀：中性交接（CLI 多为同一主模型自压自接，不暗示跨模型）。 */
@@ -39,14 +40,15 @@ public class ConversationHistoryCompactor {
     public static final String HARD_TRUNCATE_MARKER = "[历史对话已硬截断]";
 
     private static final String SUMMARY_PROMPT = """
-            请把下面的对话历史压缩成一份任务交接摘要，保留：
-            1. 当前进展与关键决策
-            2. 重要背景信息、约束条件、用户偏好
-            3. 尚未完成的内容（后续步骤）
-            4. 继续工作所需的关键数据或参考资料
+            请把下面的对话历史压缩成一份任务交接摘要。必须按以下小节输出（无内容写「无」），不要加其它前缀：
+
+            【任务目标】用户最初要完成什么（原话意图，勿扩写）
+            【关键约束】必须遵守的限制、偏好、禁止项
+            【当前进展】已完成事项与关键决策
+            【未完成待办】后续步骤（按优先级）
+            【关键数据】继续工作必需的路径、标识、配置或参考（无则写无）
 
             不要复述每条原文，不要列举所有工具调用，不要保留无关闲聊。
-            输出 1-3 段中文，不要用列表，不要加任何前缀或元描述。
             控制在约 %d tokens 以内（约 %d 汉字）。
 
             === 待压缩的对话 ===
@@ -57,6 +59,7 @@ public class ConversationHistoryCompactor {
     private LlmClient llmClient;
     private Consumer<CompactCheckpoint> checkpointListener;
     private int activeSummaryMaxTokens = CompactConfig.DEFAULT_SUMMARY_MAX_TOKENS;
+    private int activeSummaryInputCharLimit = MAX_SUMMARY_INPUT_CHARS;
 
     public ConversationHistoryCompactor(LlmClient llmClient) {
         this.llmClient = llmClient;
@@ -86,14 +89,28 @@ public class ConversationHistoryCompactor {
             return false;
         }
         int systemEnd = systemEnd(history);
+        // 消息体不含 System / Tools Schema（对标 1024 条件二）
         int bodyTokens = TokenBudget.estimateMessagesTokens(history.subList(systemEnd, history.size()));
         if (bodyTokens < config.minMessageBodyTokens()) {
             return false;
         }
-        int totalTokens = config.lastKnownTotalTokens() != null
-                ? config.lastKnownTotalTokens()
-                : TokenBudget.estimateMessagesTokens(history);
-        return totalTokens > config.availableLimitTokens();
+        return resolveTotalTokens(history, config) > config.availableLimitTokens();
+    }
+
+    /**
+     * 解析用于条件一的总 token。
+     * <p>估算 = 消息 + Tools Schema；若有 API usage 则取 {@code max(usage, 估算)}，
+     * 避免 Mid-Turn 工具结果写入后仍沿用工具执行前的过期 usage 而漏触发。
+     */
+    public int resolveTotalTokens(List<LlmClient.Message> history, CompactConfig config) {
+        if (history == null || history.isEmpty() || config == null) {
+            return 0;
+        }
+        int estimated = TokenBudget.estimateMessagesTokens(history) + Math.max(0, config.toolsSchemaTokens());
+        if (config.lastKnownTotalTokens() == null) {
+            return estimated;
+        }
+        return Math.max(config.lastKnownTotalTokens(), estimated);
     }
 
     /**
@@ -119,6 +136,7 @@ public class ConversationHistoryCompactor {
             return false;
         }
         this.activeSummaryMaxTokens = Math.max(500, config.summaryMaxTokens());
+        this.activeSummaryInputCharLimit = summaryInputCharLimit(config);
 
         int systemEnd = systemEnd(history);
         int splitIdx;
@@ -179,12 +197,16 @@ public class ConversationHistoryCompactor {
         history.clear();
         history.addAll(rebuilt);
 
+        // 持久化快照必须含 retain（Pre-Turn 下为本轮用户消息），否则 Resume 快进会丢掉
+        List<LlmClient.Message> persistedHistory = new ArrayList<>(checkpoint.size() + retain.size());
+        persistedHistory.addAll(checkpoint);
+        persistedHistory.addAll(retain);
         CompactCheckpoint persisted = new CompactCheckpoint(
                 trigger,
                 SUMMARY_PREFIX + (summary == null || summary.isBlank()
                         ? "（摘要不可用，已硬截断较早历史）"
                         : summary.trim()),
-                List.copyOf(checkpoint)
+                List.copyOf(persistedHistory)
         );
         notifyCheckpoint(persisted);
 
@@ -228,7 +250,8 @@ public class ConversationHistoryCompactor {
                 1, // 旧 API 已用 triggerTokens 判定，此处放宽消息体条件
                 CompactConfig.DEFAULT_RECENT_USER_BUDGET_TOKENS,
                 CompactConfig.DEFAULT_SUMMARY_MAX_TOKENS,
-                estimated
+                estimated,
+                0
         );
         return compact(history, CompactTrigger.PRE_TURN, config, splitIdx);
     }
@@ -293,12 +316,47 @@ public class ConversationHistoryCompactor {
             if (working.size() <= floor) {
                 break;
             }
-            working.remove(0);
-            log.info("progressive trim: dropped oldest message, remaining={}", working.size());
+            int before = working.size();
+            dropOldestTurn(working);
+            log.info("progressive trim: dropped oldest turn ({} -> {}), remaining={}",
+                    before, working.size(), working.size());
         }
         toCompress.clear();
         toCompress.addAll(working);
         return null;
+    }
+
+    /**
+     * 按「轮次」丢弃最旧内容：从头部删到下一条真实用户消息之前（含首条），
+     * 避免单条删除造成 tool_call / tool_result 孤儿对。
+     */
+    static void dropOldestTurn(List<LlmClient.Message> working) {
+        if (working == null || working.isEmpty()) {
+            return;
+        }
+        int end = 1;
+        if (isRealUserMessage(working.get(0))) {
+            while (end < working.size() && !isRealUserMessage(working.get(end))) {
+                end++;
+            }
+        } else {
+            while (end < working.size() && !isRealUserMessage(working.get(end))) {
+                end++;
+            }
+        }
+        working.subList(0, Math.min(end, working.size())).clear();
+    }
+
+    /** 摘要请求正文上限：随窗口收紧，避免摘要调用本身再撞窗。 */
+    static int summaryInputCharLimit(CompactConfig config) {
+        if (config == null) {
+            return MAX_SUMMARY_INPUT_CHARS;
+        }
+        int reservedTokens = Math.max(1_000, config.summaryMaxTokens()) + 2_000;
+        int availableTokens = Math.max(4_000,
+                config.contextWindow() - reservedTokens - Math.max(0, config.compactionBufferTokens() / 4));
+        int chars = (int) (availableTokens * 2.5);
+        return Math.min(MAX_SUMMARY_INPUT_CHARS, Math.max(MIN_SUMMARY_INPUT_CHARS, chars));
     }
 
     private List<LlmClient.Message> buildCheckpoint(List<LlmClient.Message> toCompress,
@@ -321,8 +379,11 @@ public class ConversationHistoryCompactor {
     }
 
     /**
-     * 从待压缩段贪心保留最近真实用户消息，直到超出 token 预算。
-     * 过滤系统注入消息与旧摘要，避免摘要叠摘要。
+     * 分级保留真实用户消息（过滤系统注入与旧摘要，避免摘要叠摘要）：
+     * <ol>
+     *   <li>任务种子：待压缩段中<strong>最早</strong>一条真实用户消息（任务目标）优先钉住</li>
+     *   <li>近期：在剩余预算内从后往前贪心保留</li>
+     * </ol>
      */
     List<LlmClient.Message> extractRecentRealUserMessages(List<LlmClient.Message> toCompress, int budgetTokens) {
         List<LlmClient.Message> candidates = new ArrayList<>();
@@ -331,12 +392,43 @@ public class ConversationHistoryCompactor {
                 candidates.add(msg);
             }
         }
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        int budget = Math.max(0, budgetTokens);
+        LlmClient.Message seed = candidates.get(0);
+        int seedTokens = TokenBudget.estimateMessagesTokens(List.of(seed));
+        boolean pinSeed = candidates.size() > 1 && seedTokens > 0 && seedTokens <= budget;
+        int recentBudget = pinSeed ? Math.max(0, budget - seedTokens) : budget;
+
+        List<LlmClient.Message> recent = greedyKeepFromEnd(candidates, recentBudget, pinSeed ? 0 : -1);
+        if (!pinSeed) {
+            return recent;
+        }
+        List<LlmClient.Message> kept = new ArrayList<>();
+        kept.add(seed);
+        kept.addAll(recent);
+        return kept;
+    }
+
+    /** 从后往前贪心保留；{@code skipIndex} >=0 时跳过该候选下标（通常为种子）。 */
+    private static List<LlmClient.Message> greedyKeepFromEnd(List<LlmClient.Message> candidates,
+                                                             int budgetTokens,
+                                                             int skipIndex) {
         List<LlmClient.Message> kept = new ArrayList<>();
         int used = 0;
         for (int i = candidates.size() - 1; i >= 0; i--) {
+            if (i == skipIndex) {
+                continue;
+            }
             LlmClient.Message msg = candidates.get(i);
             int tokens = TokenBudget.estimateMessagesTokens(List.of(msg));
             if (!kept.isEmpty() && used + tokens > budgetTokens) {
+                break;
+            }
+            if (kept.isEmpty() && tokens > budgetTokens) {
+                // 单条已超预算：仍保留最近一条，避免检查点完全没有用户原文
+                kept.add(0, msg);
                 break;
             }
             kept.add(0, msg);
@@ -414,7 +506,7 @@ public class ConversationHistoryCompactor {
                 }
             }
             sb.append("\n\n");
-            if (sb.length() > MAX_SUMMARY_INPUT_CHARS) {
+            if (sb.length() > activeSummaryInputCharLimit) {
                 sb.append("...(超长内容已截断)\n");
                 break;
             }
@@ -424,7 +516,7 @@ public class ConversationHistoryCompactor {
                 Math.max(200, activeSummaryMaxTokens * 2 / 3),
                 sb.toString());
         List<LlmClient.Message> req = List.of(
-                LlmClient.Message.system("你是一个对话摘要助手，只输出摘要本身，不输出元描述。"),
+                LlmClient.Message.system("你是一个对话摘要助手，按指定小节输出交接摘要，不输出元描述。"),
                 LlmClient.Message.user(prompt)
         );
         LlmClient.ChatResponse response = llmClient.chat(req, null);

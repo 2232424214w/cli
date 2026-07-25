@@ -261,29 +261,31 @@
 
 ### 维度三、上下文管理
 
-**现状：** `ContextProfile` 是唯一策略中枢，所有参数是 `maxContextWindow` 的纯函数（如 `trigger = window - min(20k,window/4) - min(13k,window/8)`）；`ConversationHistoryCompactor` 在触发阈值时把 system 之后、最近 3 个 user 轮次之前的历史**有损摘要**成 1-3 段中文，分割点强制落在 user 边界以保护 `tool_call/result` 成对；prompt 分层组装（base→personality→mode→approvals→runtime→project→skills→context-management→handoff），支持用户/项目 override。token 全靠字符估算（中文 1.5 字/token）。
+**现状：** `ContextProfile` 是唯一策略中枢，参数由 `maxContextWindow` 推导；主轨可用上限 = `window − 20k − 8k`，另需消息体 ≥ 20k；`ConversationHistoryCompactor` 执行 Context Checkpoint Compaction（Pre-Turn / Mid-Turn / API 兜底），摘要失败走渐进裁剪再硬截断；总量取 `max(API usage, 估算+schema)`。prompt 分层组装；token 仍以字符估算为主，API usage 优先。检查点写入 `session-*.jsonl`，`/clear` 经 `StickySessionRotator` 轮换。
+
+**已落地：** 硬截断兜底、Session Notebook（`notebook_write/read`）、session.jsonl 检查点 Resume、压缩摘要进 `session_search`、Tools Schema 计入溢出判定。
 
 **业界前沿（Anthropic·官方）：** 核心心智是 **context 是有限资源、存在 context rot（越长召回越差）与 attention budget**。四大策略：
 
-* **Compaction（压缩）：** 接近窗口时摘要历史——本项目已做。
-* **Structured note-taking（结构化笔记/记事本）：** 把关键信息 offload 到 context 外（文件/notes），需要时再读取，避免有损摘要丢信息。
+* **Compaction（压缩）：** 接近窗口时摘要历史——本项目主轨已对齐 1024 Checkpoint。
+* **Structured note-taking（结构化笔记/记事本）：** 把关键信息 offload 到 context 外（文件/notes），需要时再读取，避免有损摘要丢信息——本项目已有 Session Notebook。
 * **Just-in-time 检索：** 维护轻量标识符（路径/查询），运行时按需加载，而非预加载。
 * **Sub-agent 隔离：** 用子 agent 承接高 token 子任务，只回传摘要。
 
 **差距（基于代码实读，按严重程度排序）：**
 
-1. **压缩失败会直接撞窗口崩溃（硬伤）：** `ConversationHistoryCompactor.compact()` 里摘要 LLM 调用抛 `IOException` 或返回空时，是 `return false` 直接跳过压缩——历史继续膨胀，下一轮就可能超窗口报错。唯一的“保命”路径失败后没有任何降级兜底。
-2. **只有“有损摘要”一条路径，信息不可逆丢失：** 摘要把原文揉成 1-3 段中文，关键决策/文件路径/待办一旦没被摘进去就永远丢了。缺 Anthropic 四策略里的 **structured note-taking**（把关键信息 offload 到 context 外，需要时读回）。
-3. **压缩是“一刀切时间线”，不区分信息价值：** 最近 3 轮之前的历史一视同仁全摘掉，但任务目标、关键约束这类信息其实该跨压缩长期保留。
-4. **token 全靠字符估算（中文/1.5 + 其它/4），** 而整个压缩触发时机都依赖它：对代码/JSON/混合文本误差大，估偏则过早压缩（浪费）或过晚（撞窗口）。
-5. **prompt 九层全量拼接无总长度护栏：** `PromptAssembler` 的 project context + skills 注入无硬预算（仅记忆检索侧有 token 上限），项目记忆一大就变成挤占注意力的 token 噪音。
+1. ~~压缩失败撞窗口~~（已硬截断兜底）。
+2. ~~缺 structured note-taking~~（已有 `notebook_write/read`）。
+3. **压缩仍偏时间线切分，对「任务目标 / 关键约束」缺少显式分级保留**（记事本可补；主轨检查点已钉住最早真实用户消息 + 摘要强制分节）。
+4. **token 仍以字符估算为主，** API usage 已接入但仍有 Mid-Turn 后估算误差。
+5. **prompt 九层全量拼接无总长度护栏：** `PromptAssembler` 的 project context + skills 注入无硬预算（仅记忆检索侧有 token 上限）。
 
 **最适合本项目的方向：**
 
-* 🟢 **压缩失败兜底（先堵硬伤）：** `compact()` 摘要失败时不再直接返回，退化为“保留最近 N 轮 + 硬截断/丢弃早期消息（仍守 user 边界）”，保证任何情况下都能把 token 压回窗口内，不崩。改动集中在一个方法，成本极低、收益是“从会崩到不崩”。
-* 🟢 **引入 structured note-taking（记事本）：** 压缩前把关键事实/决策/待办/文件路径 offload 到一个会话 notes（文件或长期记忆），压缩后仍可用 just-in-time `read_file` 读回。直接补上 Anthropic 四策略里唯一缺失且高价值的一条，复用已有 `read_file`/记忆设施，与维度四记忆、维度一 §1.y 失败记忆化天然协同。
-* 🟡 **分级保留而非一刀切：** 压缩时对“任务目标 / 关键约束 / 未完成待办”做识别并原样保留，只对过程性对话做有损摘要，缓解“越压越忘目标”。
-* 🟡 **prompt 组装加总长度护栏：** project context + skills 注入硬预算，超限按优先级裁剪，防止项目记忆变 token 噪音。
+* ✅ 压缩失败硬截断兜底（已做）。
+* ✅ Session Notebook structured note-taking（已做）。
+* 🟡 **分级保留：** 压缩时钉住最早真实用户消息（任务种子）+ 近期用户原文；摘要提示强制「任务目标 / 关键约束 / 进展 / 未完成 / 关键数据」分节。记事本仍可补结构化笔记。
+* 🟡 **prompt 组装加总长度护栏：** project context + skills 注入硬预算，超限按优先级裁剪。
 * ⚪ **接入真实 tokenizer(BPE)替代字符估算：** 更准但工程量大、收益边际，优先级低。
 
 **能讲什么：** “我发现项目唯一的上下文保命路径——压缩——在摘要 LLM 失败时会直接跳过导致撞窗口崩溃；我加了硬截断兜底把它从‘会崩’变成‘必不崩’；再引入记事本把有损摘要升级为‘摘要 + 可读回的结构化笔记’，让长任务里关键决策不再丢失。”——能讲清 context rot、attention budget、有损压缩的信息损失代价，并用 Eval 量化‘长任务成功率 / 撞窗口率’的改善，是很有区分度的上下文工程深度故事。

@@ -69,4 +69,12 @@ class ContextProfileTest {
         assertEquals(99_808, profile.compressionTriggerTokens());
         assertFalse(profile.promptCachingSupported());
     }
+
+    @Test
+    void defaultSearchTopKScalesWithWindow() {
+        assertEquals(5, ContextProfile.custom(16_000, 1_000).defaultSearchTopK());
+        assertEquals(10, ContextProfile.custom(64_000, 1_000).defaultSearchTopK());
+        assertEquals(20, ContextProfile.custom(200_000, 1_000).defaultSearchTopK());
+        assertEquals(20, ContextProfile.from(new DeepSeekClient("k")).defaultSearchTopK());
+    }
 }

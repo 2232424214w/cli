@@ -7,6 +7,7 @@ import com.bettercli.llm.LlmTraceLogger;
 import com.bettercli.lsp.LspDiagnosticReport;
 import com.bettercli.memory.CompactConfig;
 import com.bettercli.memory.CompactTrigger;
+import com.bettercli.memory.CompactionSupport;
 import com.bettercli.memory.ConversationHistoryCompactor;
 import com.bettercli.context.ContextProfile;
 import com.bettercli.prompt.PromptAssembler;
@@ -56,6 +57,8 @@ public class SubAgent implements Worker {
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private Integer lastKnownInputTokens;
+    private int currentTurnUserIndex = -1;
     private SubAgentResult lastResult;
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
@@ -123,33 +126,52 @@ public class SubAgent implements Worker {
         };
     }
 
-    private void maybeCompactHistory(PrintStream out) {
-        maybeCompactHistory(out, CompactTrigger.PRE_TURN);
+    private boolean maybeCompactHistory(PrintStream out) {
+        return maybeCompactHistory(out, CompactTrigger.PRE_TURN);
     }
 
-    private void maybeCompactHistory(PrintStream out, CompactTrigger trigger) {
+    private boolean maybeCompactHistory(PrintStream out, CompactTrigger trigger) {
         if (historyCompactor == null) {
-            return;
+            return false;
         }
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) {
-            return;
+            profile = ContextProfile.from(llmClient);
         }
         try {
-            int userIdx = -1;
-            for (int i = 0; i < conversationHistory.size(); i++) {
-                if ("user".equals(conversationHistory.get(i).role())) {
-                    userIdx = i;
-                    break;
+            int userIdx = currentTurnUserIndex;
+            if (userIdx < 0 && trigger == CompactTrigger.PRE_TURN) {
+                userIdx = CompactionSupport.findLastUserIndex(conversationHistory);
+            }
+            CompactConfig config = CompactConfig.from(
+                    profile,
+                    lastKnownInputTokens,
+                    CompactionSupport.estimateToolsSchemaTokens(
+                            llmClient != null && llmClient.supportsTools()
+                                    ? toolRegistry.getToolDefinitions(role.allowedTools())
+                                    : null));
+            boolean compacted = historyCompactor.compact(
+                    conversationHistory, trigger, config, userIdx);
+            if (compacted) {
+                lastKnownInputTokens = null;
+                if (trigger == CompactTrigger.PRE_TURN) {
+                    currentTurnUserIndex = CompactionSupport.findLastUserIndex(conversationHistory);
+                }
+                if (out != null) {
+                    String tip = switch (trigger) {
+                        case PRE_TURN -> "📦 [" + name + "] Pre-Turn：上下文接近窗口上限，已写入压缩检查点后继续。";
+                        case MID_TURN -> "📦 [" + name + "] Mid-Turn：工具结果已纳入摘要检查点，继续下一轮采样。";
+                        case PROMPT_TOO_LONG, CONTEXT_WINDOW_EXCEEDED ->
+                                "📦 [" + name + "] 模型确认上下文溢出，已强制压缩检查点并重试。";
+                        case MANUAL -> "📦 [" + name + "] 已手动写入压缩检查点。";
+                    };
+                    out.println(tip);
                 }
             }
-            boolean compacted = historyCompactor.compact(
-                    conversationHistory, trigger, CompactConfig.from(profile), userIdx);
-            if (compacted && out != null) {
-                out.println("📦 [" + name + "] 上下文接近窗口上限，已写入压缩检查点后继续。");
-            }
+            return compacted;
         } catch (Exception e) {
             log.warn("[{}] conversationHistory compaction failed", name, e);
+            return false;
         }
     }
 
@@ -221,11 +243,13 @@ public class SubAgent implements Worker {
         conversationHistory.add(ImageReferenceParser.userMessage(
                 taskContent,
                 Path.of(toolRegistry.getProjectPath())));
+        currentTurnUserIndex = conversationHistory.size() - 1;
 
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
         boolean preTurnDone = false;
+        boolean overflowRetryUsed = false;
 
         // 与 Agent.java 对称：主退出条件 = LLM 自决，budget 仅在 token / 停滞 / 硬轮数兜底。
         while (true) {
@@ -260,6 +284,10 @@ public class SubAgent implements Worker {
                         response.reasoningContent());
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+                if (response.inputTokens() > 0) {
+                    lastKnownInputTokens = response.inputTokens();
+                }
+                overflowRetryUsed = false;
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
@@ -292,6 +320,15 @@ public class SubAgent implements Worker {
                 return AgentMessage.result(name, role, response.content());
 
             } catch (IOException e) {
+                CompactTrigger fallback = CompactionSupport.overflowTrigger(e);
+                if (fallback != null && !overflowRetryUsed) {
+                    overflowRetryUsed = true;
+                    log.warn("[{}] LLM context overflow ({}), compact-and-retry once", name, fallback);
+                    streamRenderer.resetBetweenIterations();
+                    if (maybeCompactHistory(out, fallback)) {
+                        continue;
+                    }
+                }
                 log.error("[{}] LLM call failed", name, e);
                 streamRenderer.finish();
                 String errorMsg = "LLM 调用失败: " + e.getMessage();

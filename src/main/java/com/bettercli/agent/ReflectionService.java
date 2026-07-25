@@ -229,4 +229,9 @@ public class ReflectionService {
     /** 测试可见。 */
     int consecutiveReflections() { return consecutiveReflections; }
     boolean enabled() { return enabled; }
+
+    /** /clear 或新会话时重置反螺旋计数。 */
+    public void reset() {
+        consecutiveReflections = 0;
+    }
 }

@@ -88,20 +88,21 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Long Context Engineering
 
-- `ContextProfile` 计算 short/balanced/long 模式
+- `ContextProfile` 参数由 `maxContextWindow` 统一推导（不再分 short/balanced/long）
 - GLM-5.1: 200k / DeepSeek V4: 1M / Agnes: 1M / StepFun: 256k / Kimi K2.6: 256k / FreeLLMAPI: 128k
-- long 模式(>=100k)：跳过 Memory 自动摘要，search_code 语义辅助 topK=20，MCP resources 自动索引；精确代码定位仍优先实时 glob/grep/read
+- window ≥ 32k：MCP resources 自动索引；`search_code` 未传 `top_k` 时按窗口自适应（约 5 / 10 / 20）；精确代码定位仍优先实时 glob/grep/read
 - prompt caching：能力声明 + cached usage 解析
-- 自动压缩阈值按 Claude Code 风格预留空间：`maxContextWindow - min(20k, window/4) - min(13k, window/8)`；200k 窗口约 167k 触发，1M 窗口约 967k 触发，小窗口会按比例缩小预留。
+- 自动压缩阈值对标 1024：可用上限 = `maxContextWindow − 20k buffer − 8k maxOut`，且消息体（不含 system / tools schema）≥ 20k；总量取 `max(API usage, 消息估算 + Tools Schema)`。
 
 ### Memory System
 
 - 两道压缩：
-  1. `ContextCompressor` 压缩 shortTermMemory
-  2. `ConversationHistoryCompactor` 压缩 conversationHistory（真正发给 LLM 的消息）
-- 第二道压缩切割在 user message 边界，保留最近 3 个 user 起算的尾部
-- 三条路径(ReAct/Plan/SubAgent)都接入第二道压缩
-- `/compact` 可手动压缩当前 ReAct conversationHistory，不等待 token 阈值触发，保留最近 1 个 user 轮次；Plan/SubAgent 仍只走调 LLM 前的自动压缩
+  1. `ContextCompressor` 压缩 shortTermMemory（辅轨）
+  2. `ConversationHistoryCompactor` 压缩 conversationHistory（主轨，真正发给 LLM 的消息）
+- 主轨为 Context Checkpoint Compaction：Pre-Turn（保留当前用户消息）/ Mid-Turn（工具后全量）/ API 溢出兜底 / `/compact` 手动全量
+- 检查点为全 user-role（近期真实用户消息 + 中性前缀摘要）；成功后写入 `session-*.jsonl` 的 `compacted` 行，Resume 快进；摘要同步进 `session_messages` 供检索
+- 三条路径(ReAct/Plan/SubAgent)都接入主轨压缩（含 API 兜底）
+- `/clear` 清空内存历史并轮换粘性会话检查点（`StickySessionRotator`，CLI/TUI 共用）
 - 长期记忆只通过 `/save` 或用户明确要求保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆管理命令：`/memory list`、`/memory search <关键词>`、`/memory delete <id>`、`/memory clear`
@@ -183,8 +184,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
 - InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`
 - BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd。关键字段可用 JLine `AttributedString` 做克制彩色高亮，但纯文本格式和列宽裁剪仍要稳定。`ctx` 只表示当前仍会带入下一轮请求的上下文估算，`in/out/cache` 表示最近任务调用统计。
-- `/clear` 清空当前 ReAct conversationHistory、shortTermMemory 和待注入 SkillContextBuffer，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留，后续只会按新查询重新检索注入。
-- `/compact` 手动压缩当前 ReAct conversationHistory，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空 shortTermMemory、长期记忆或待注入 SkillContextBuffer。
+- `/clear` 清空当前 ReAct conversationHistory、shortTermMemory 和待注入 SkillContextBuffer，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留；同时经 `StickySessionRotator` 轮换粘性会话检查点（CLI/TUI/微信共用钩子）。
+- `/compact` 手动强制全量 Context Checkpoint Compaction，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空 shortTermMemory、长期记忆或待注入 SkillContextBuffer。
 - `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.bettercli/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。

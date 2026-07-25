@@ -116,11 +116,11 @@ mvn test -DskipTests=false
 - `LlmClient` 声明模型能力：`maxContextWindow()`、`supportsPromptCaching()`、`promptCacheMode()`
 - GLM-5.1 默认 200k window，DeepSeek V4 默认 1M window，Agnes 2.0 Flash 默认 1M window，StepFun 默认 256k window，Kimi K2.6 默认 256k window，FreeLLMAPI 默认按 128k 保守预算
 - `AgentBudget` 按当前模型动态计算预算，默认 `80% * maxContextWindow`，仍可用系统属性覆盖
-- short / balanced / long 三种上下文模式：长上下文模式跳过摘要压缩，语义检索 topK 可提升到 20
-- `search_code` 未显式传 `top_k` 时按上下文模式自适应；默认代码定位仍优先实时 grep/read
-- 长上下文模式下自动把 MCP resources 的 URI / 描述索引注入 system prompt，不自动注入正文
+- 上下文策略由 `maxContextWindow` 统一推导（不再分 short/balanced/long 档）；主轨 Context Checkpoint Compaction 对标 1024：双条件触发、Pre-Turn / Mid-Turn / API 兜底；`/compact` 可手动压缩
+- `search_code` 未显式传 `top_k` 时按窗口自适应；默认代码定位仍优先实时 grep/read
+- window ≥ 32k 时自动把 MCP resources 的 URI / 描述索引注入 system prompt，不自动注入正文
 - inline 模式下 Token / cached input tokens / 估算成本 / 耗时进入底部状态栏，避免占用正文输出区
-- `/context` 会显示当前上下文模式、prompt cache 模式、RAG topK、resources 自动索引状态
+- `/context` 显示窗口、可用压缩上限、消息体阈值、Tools Schema、prompt cache、resources 索引状态
 
 ### 第十三期：Chrome DevTools MCP
 
@@ -861,7 +861,7 @@ src/main/java/com/bettercli
 │   ├── FreeLlmApiClient.java   # 本地 FreeLLMAPI OpenAI-compatible 网关客户端
 │   └── AgnesClient.java        # Agnes AI OpenAI-compatible 客户端
 ├── context/
-│   ├── ContextMode.java        # short / balanced / long 模式
+│   ├── ContextProfile.java     # 由 maxContextWindow 推导的上下文策略
 │   ├── ContextProfile.java     # 模型窗口与上下文策略
 │   └── TokenUsageFormatter.java # Token / cache / 成本展示
 ├── memory/

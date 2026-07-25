@@ -53,7 +53,7 @@ PAICLI 的优势在 `AgentBudget` 的"停滞检测"——连续 3 轮用完全�
 
 **PAICLI**：记忆是它的重头戏，分四层：
 - `MemoryManager` 门面：短期（`ConversationMemory`）+ 长期（`LongTermMemory`）+ 压缩（`ContextCompressor`）+ 检索（`MemoryRetriever`），项目作用域 key 用 realPath。
-- `ConversationHistoryCompactor`：调 LLM 前压缩 conversationHistory（这才是决定下一轮 input token 的关键），分割点落在 user 边界，保留最近 1 个 user 轮次和 tool_call/tool_result 边界。
+- `ConversationHistoryCompactor`：主轨 Context Checkpoint Compaction（对标 1024）。Pre-Turn 保留当前用户消息，Mid-Turn / MANUAL / API 兜底全量压缩；检查点为近期真实用户消息 + 摘要（全 user-role），写入 `session-*.jsonl` 的 `compacted` 行供 Resume。
 - `SqliteAgentMemoryStore`：SQLite FTS5 BM25 + confidence 加权（`final = -bm25 * (0.5 + confidence)`）+ user_vocabulary boost + 1000 条容量护栏 + BM25 相似度自动去重 + TTL 清理 + json 迁移。对标美团 1024 Agent `agent_memory` 表。
 - `SessionMessageStore` + `SessionMessageIndexer`：会话消息异步索引到独立 SQLite，`session_search` 五阶段管道（检索→按 conversation_id 分组→加载完整会话→截断预览→返回）。
 

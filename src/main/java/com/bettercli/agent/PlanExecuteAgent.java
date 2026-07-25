@@ -7,6 +7,7 @@ import com.bettercli.llm.LlmTraceLogger;
 import com.bettercli.lsp.LspDiagnosticReport;
 import com.bettercli.memory.CompactConfig;
 import com.bettercli.memory.CompactTrigger;
+import com.bettercli.memory.CompactionSupport;
 import com.bettercli.memory.ConversationHistoryCompactor;
 import com.bettercli.memory.MemoryManager;
 import com.bettercli.plan.*;
@@ -186,31 +187,63 @@ public class PlanExecuteAgent {
     }
 
     private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out) {
-        maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, -1);
+        maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, -1, null);
     }
 
     private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out,
                                      CompactTrigger trigger, int currentUserIndex) {
+        maybeCompactHistory(messages, out, trigger, currentUserIndex, null);
+    }
+
+    /**
+     * @param lastKnownInputTokensHolder 长度 1：可读写的最近一次 API input tokens；压缩成功后清零
+     * @return 是否真正压缩
+     */
+    private boolean maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out,
+                                     CompactTrigger trigger, int currentUserIndex,
+                                     Integer[] lastKnownInputTokensHolder) {
         if (historyCompactor == null || messages == null) {
-            return;
+            return false;
         }
         try {
-            CompactConfig config = CompactConfig.from(memoryManager.getContextProfile());
+            Integer lastKnown = lastKnownInputTokensHolder == null ? null : lastKnownInputTokensHolder[0];
+            CompactConfig config = CompactConfig.from(
+                    memoryManager.getContextProfile(),
+                    lastKnown,
+                    CompactionSupport.estimateToolsSchemaTokens(
+                            llmClient != null && llmClient.supportsTools()
+                                    ? toolRegistry.getToolDefinitions()
+                                    : null));
             int userIdx = currentUserIndex;
-            if (userIdx < 0) {
-                for (int i = 0; i < messages.size(); i++) {
-                    if ("user".equals(messages.get(i).role())) {
-                        userIdx = i;
-                        break;
-                    }
-                }
+            if (userIdx < 0 && trigger == CompactTrigger.PRE_TURN) {
+                userIdx = CompactionSupport.findLastUserIndex(messages);
+            }
+            boolean force = trigger == CompactTrigger.MANUAL
+                    || trigger == CompactTrigger.PROMPT_TOO_LONG
+                    || trigger == CompactTrigger.CONTEXT_WINDOW_EXCEEDED;
+            if (historyCompactor.needsCompaction(messages, config, force)) {
+                memoryManager.maybeExtractFacts();
             }
             boolean compacted = historyCompactor.compact(messages, trigger, config, userIdx);
-            if (compacted && out != null) {
-                out.println("📦 上下文接近窗口上限，已写入压缩检查点后继续。");
+            if (compacted) {
+                if (lastKnownInputTokensHolder != null) {
+                    lastKnownInputTokensHolder[0] = null;
+                }
+                if (out != null) {
+                    String tip = switch (trigger) {
+                        case PRE_TURN -> "📦 Pre-Turn：上下文接近窗口上限，已写入压缩检查点后继续。";
+                        case MID_TURN -> "📦 Mid-Turn：工具结果已纳入摘要检查点，继续下一轮采样。";
+                        case PROMPT_TOO_LONG, CONTEXT_WINDOW_EXCEEDED ->
+                                "📦 模型确认上下文溢出，已强制压缩检查点并重试。";
+                        case MANUAL -> "📦 已手动写入压缩检查点。";
+                    };
+                    out.println(tip);
+                }
             }
+            return compacted;
         } catch (Exception e) {
             log.warn("conversationHistory compaction failed", e);
+            return false;
         }
     }
 
@@ -488,11 +521,14 @@ public class PlanExecuteAgent {
                         taskInput,
                         Path.of(toolRegistry.getProjectPath()))
         ));
+        int currentUserIndex = messages.size() - 1;
 
         StringBuilder allResults = new StringBuilder();
         int iteration = 0;
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
         boolean preTurnDone = false;
+        boolean overflowRetryUsed = false;
+        Integer[] lastKnownInputTokens = {null};
 
         int totalInputTokens = 0;
         int totalOutputTokens = 0;
@@ -507,15 +543,30 @@ public class PlanExecuteAgent {
 
             injectPendingLspDiagnostics(messages, out);
             if (!preTurnDone) {
-                maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, -1);
+                maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, currentUserIndex, lastKnownInputTokens);
                 preTurnDone = true;
             }
 
-            LlmClient.ChatResponse response = llmClient.chat(
-                    messages,
-                    llmClient.supportsTools() ? toolRegistry.getToolDefinitions() : null,
-                    streamRenderer
-            );
+            LlmClient.ChatResponse response;
+            try {
+                response = llmClient.chat(
+                        messages,
+                        llmClient.supportsTools() ? toolRegistry.getToolDefinitions() : null,
+                        streamRenderer
+                );
+            } catch (IOException e) {
+                CompactTrigger fallback = CompactionSupport.overflowTrigger(e);
+                if (fallback != null && !overflowRetryUsed) {
+                    overflowRetryUsed = true;
+                    log.warn("Plan task {} context overflow ({}), compact-and-retry once", task.getId(), fallback);
+                    streamRenderer.resetBetweenIterations();
+                    if (maybeCompactHistory(messages, out, fallback, currentUserIndex, lastKnownInputTokens)) {
+                        iteration--;
+                        continue;
+                    }
+                }
+                throw e;
+            }
             LlmTraceLogger.logReasoning(log,
                     "plan-task task=" + task.getId() + " iteration=" + iteration,
                     llmClient,
@@ -528,6 +579,10 @@ public class PlanExecuteAgent {
             totalInputTokens += response.inputTokens();
             totalOutputTokens += response.outputTokens();
             totalCachedInputTokens += response.cachedInputTokens();
+            if (response.inputTokens() > 0) {
+                lastKnownInputTokens[0] = response.inputTokens();
+            }
+            overflowRetryUsed = false;
 
             log.info("Task {} iteration {} response: toolCalls={}, reasoningChars={}, contentChars={}",
                     task.getId(),
@@ -572,7 +627,7 @@ public class PlanExecuteAgent {
                 messages.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
             }
             appendImageToolMessages(messages, toolResults);
-            maybeCompactHistory(messages, out, CompactTrigger.MID_TURN, -1);
+            maybeCompactHistory(messages, out, CompactTrigger.MID_TURN, -1, lastKnownInputTokens);
         }
 
         String fallbackResult = allResults.toString().trim();

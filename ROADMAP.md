@@ -283,9 +283,9 @@
 
 **功能迭代**（详细开发任务见 `docs/phase-12-long-context.md`）：
 - `LlmClient` 接口扩展能力声明：`maxContextWindow()` / `supportsPromptCaching()` / `promptCacheMode()`
-- `ContextProfile` 统一管理 short / balanced / long 三种上下文模式
+- `ContextProfile` 统一管理上下文策略（初版 short/balanced/long；**现状**改为由 `maxContextWindow` 推导，主轨对齐 1024 Checkpoint Compaction）
 - `AgentBudget` token 预算从写死 300K 改为按当前模型动态计算（默认 80% × maxContextWindow，仍支持系统属性覆盖）
-- 长 / 短上下文双模式：
+- 长 / 短上下文双模式（历史描述；现状主轨始终可压缩，辅轨 shortTerm 按占用率压缩，RAG topK 按窗口自适应）：
   - 短 / balanced：保留第 3 期 Memory 摘要压缩策略
   - long（≥ 100k window）：跳过摘要压缩，提高 RAG 默认 topK（20），扩大短期记忆预算
 - prompt caching 接入：

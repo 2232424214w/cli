@@ -92,6 +92,20 @@ public record ContextProfile(
         return MAX_OUTPUT_RESERVE_TOKENS;
     }
 
+    /**
+     * {@code search_code} 未传 top_k 时的默认值：随窗口放大，避免长上下文仍只用 5 条。
+     * &lt;32k → 5；32k–100k → 10；≥100k → 20。
+     */
+    public int defaultSearchTopK() {
+        if (maxContextWindow >= 100_000) {
+            return 20;
+        }
+        if (maxContextWindow >= 32_000) {
+            return 10;
+        }
+        return 5;
+    }
+
     public String summary() {
         return "window: " + maxContextWindow
                 + " | 可用上限: " + compressionTriggerTokens() + " tokens"

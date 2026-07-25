@@ -849,14 +849,14 @@ public class ToolRegistry {
     private void registerRagTools() {
         tools.put("search_code", new Tool(
                 "search_code",
-                "RAG 语义辅助检索代码库，根据自然语言描述查找相关代码块；精确符号/字符串定位请优先用 grep_code/glob_files/read_file；默认 top_k=5，可显式指定（上限 30）",
+                "RAG 语义辅助检索代码库，根据自然语言描述查找相关代码块；精确符号/字符串定位请优先用 grep_code/glob_files/read_file；未传 top_k 时按模型窗口自适应（约 5/10/20）",
                 createParameters(
                         new Param("query", "string", "自然语言查询描述，例如'用户登录的实现'", true),
-                        new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false)
+                        new Param("top_k", "integer", "返回结果数量（未传则按上下文窗口自适应，上限 30）", false)
                 ),
                 args -> {
                     String query = args.get("query");
-                    int topK = 5;
+                    int topK = contextProfile == null ? 5 : contextProfile.defaultSearchTopK();
                     try {
                         if (args.containsKey("top_k")) {
                             topK = Integer.parseInt(args.get("top_k"));

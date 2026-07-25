@@ -357,6 +357,26 @@ class SqliteSessionMessageStoreTest {
         }
     }
 
+    @Test
+    void migrateFromJsonlReadsHyphenSessionAndCompacted() throws SQLException, IOException {
+        Path jsonl = tempDir.resolve("session-abc123.jsonl");
+        Files.writeString(jsonl, """
+                {"type":"user","content":"before compact"}
+                {"type":"compacted","trigger":"MID_TURN","summary":"[上下文检查点] handoff about FTS","history":[{"role":"user","content":"kept-user"},{"role":"user","content":"[上下文检查点] handoff about FTS"}]}
+                {"type":"user","content":"after compact"}
+                """);
+
+        try (SqliteSessionMessageStore store = newStore()) {
+            int migrated = store.migrateFromJsonl(tempDir.toFile());
+            assertTrue(migrated >= 3);
+            var hits = store.search(SessionMessageSearchQuery.builder()
+                    .query("handoff FTS")
+                    .limit(5)
+                    .build());
+            assertFalse(hits.isEmpty());
+        }
+    }
+
     private void writeJsonlLine(Path file, String role, String content, long timestamp) throws IOException {
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("role", role);

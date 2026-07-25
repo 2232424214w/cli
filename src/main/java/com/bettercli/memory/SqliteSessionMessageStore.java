@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import java.sql.*;
 import java.time.Instant;
 import java.util.*;
-import java.util.stream.StreamSupport;
 
 /**
  * SQLite FTS5 实现的历史会话消息存储（对标美团 1024 Agent session_messages + session_search）。
@@ -453,17 +452,21 @@ public class SqliteSessionMessageStore implements SessionMessageStore {
         if (historyDir == null || !historyDir.isDirectory()) return 0;
         java.io.File marker = new java.io.File(historyDir, MIGRATION_MARKER);
         if (marker.exists()) {
-            log.debug("session_*.jsonl 已迁移过，跳过");
+            log.debug("session_*.jsonl / session-*.jsonl 已迁移过，跳过");
             return 0;
         }
 
         int totalMigrated = 0;
+        Set<Path> files = new LinkedHashSet<>();
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(historyDir.toPath(), "session_*.jsonl")) {
-            List<Path> files = new ArrayList<>(StreamSupport.stream(stream.spliterator(), false).toList());
-            for (Path file : files) {
-                String conversationId = file.getFileName().toString().replace(".jsonl", "");
-                totalMigrated += migrateOneJsonl(file, conversationId);
-            }
+            stream.forEach(files::add);
+        }
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(historyDir.toPath(), "session-*.jsonl")) {
+            stream.forEach(files::add);
+        }
+        for (Path file : files) {
+            String conversationId = file.getFileName().toString().replace(".jsonl", "");
+            totalMigrated += migrateOneJsonl(file, conversationId);
         }
 
         // 写 marker
@@ -474,7 +477,7 @@ public class SqliteSessionMessageStore implements SessionMessageStore {
         }
 
         if (totalMigrated > 0) {
-            log.info("从 session_*.jsonl 迁移了 {} 条消息到 SQLite", totalMigrated);
+            log.info("从 session*.jsonl 迁移了 {} 条消息到 SQLite", totalMigrated);
         }
         return totalMigrated;
     }
@@ -489,9 +492,67 @@ public class SqliteSessionMessageStore implements SessionMessageStore {
                 try {
                     @SuppressWarnings("unchecked")
                     Map<String, Object> record = mapper.readValue(line, Map.class);
-                    String role = String.valueOf(record.getOrDefault("role", "user"));
+                    String type = String.valueOf(record.getOrDefault("type",
+                            record.getOrDefault("role", "user")));
+                    if ("compacted".equals(type)) {
+                        String summary = String.valueOf(record.getOrDefault("summary", ""));
+                        if (summary != null && !summary.isBlank() && !"null".equals(summary)) {
+                            batch.add(SessionMessage.builder()
+                                    .id(conversationId + "-compacted-" + index)
+                                    .conversationId(conversationId)
+                                    .role("user")
+                                    .content(summary)
+                                    .createdAt(Instant.now())
+                                    .build());
+                            index++;
+                        }
+                        Object historyNode = record.get("history");
+                        if (historyNode instanceof List<?> hist) {
+                            for (Object item : hist) {
+                                if (!(item instanceof Map<?, ?> raw)) {
+                                    continue;
+                                }
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> m = (Map<String, Object>) raw;
+                                Object roleObj = m.get("role");
+                                if (roleObj == null) {
+                                    roleObj = m.get("type");
+                                }
+                                String role = roleObj == null ? "user" : String.valueOf(roleObj);
+                                if ("system".equals(role) || "compacted".equals(role)) {
+                                    continue;
+                                }
+                                Object contentObj = m.get("content");
+                                String content = contentObj == null ? "" : String.valueOf(contentObj);
+                                if (content.isBlank() || "null".equals(content)) {
+                                    continue;
+                                }
+                                batch.add(SessionMessage.builder()
+                                        .id(conversationId + "-" + index)
+                                        .conversationId(conversationId)
+                                        .role(role)
+                                        .content(content)
+                                        .createdAt(Instant.now())
+                                        .build());
+                                index++;
+                            }
+                        }
+                        continue;
+                    }
+                    if ("system".equals(type)) {
+                        continue;
+                    }
+                    String role = type;
+                    if (record.containsKey("role") && record.get("role") != null) {
+                        role = String.valueOf(record.get("role"));
+                    }
                     String content = String.valueOf(record.getOrDefault("content", ""));
-                    long timestamp = record.get("timestamp") instanceof Number n ? n.longValue() : System.currentTimeMillis();
+                    if (content == null || content.isBlank() || "null".equals(content)) {
+                        continue;
+                    }
+                    long timestamp = record.get("timestamp") instanceof Number n
+                            ? n.longValue()
+                            : System.currentTimeMillis();
                     Instant createdAt = Instant.ofEpochMilli(timestamp);
                     String id = conversationId + "-" + index;
                     batch.add(SessionMessage.builder()

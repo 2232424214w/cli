@@ -172,4 +172,180 @@ class SessionMessageIndexerTest {
             assertNotNull(conv.get(1).getToolCallsJson());
         }
     }
+
+    @Test
+    void indexCompactedResetsCursorAndWritesSummary() throws SQLException {
+        try (SqliteSessionMessageStore store = newStore()) {
+            SessionMessageIndexer indexer = new SessionMessageIndexer(store, "c1", "/proj");
+            List<LlmClient.Message> history = new ArrayList<>();
+            history.add(LlmClient.Message.user("old-1"));
+            history.add(LlmClient.Message.assistant("old-a"));
+            history.add(LlmClient.Message.user("old-2"));
+            history.add(LlmClient.Message.assistant("old-b"));
+            indexer.indexIncrementalSync(history);
+            assertEquals(4, indexer.getLastIndex());
+
+            // 模拟压缩后 history 缩短
+            history.clear();
+            history.add(LlmClient.Message.user("kept"));
+            history.add(LlmClient.Message.user(ConversationHistoryCompactor.SUMMARY_PREFIX + "handoff"));
+            var checkpoint = new ConversationHistoryCompactor.CompactCheckpoint(
+                    CompactTrigger.MID_TURN,
+                    ConversationHistoryCompactor.SUMMARY_PREFIX + "handoff about SQLite FTS",
+                    List.copyOf(history)
+            );
+            int written = indexer.indexCompactedSync(checkpoint, history);
+            assertTrue(written >= 1);
+            assertEquals(2, indexer.getLastIndex());
+
+            // 压缩后新增消息应能继续索引
+            history.add(LlmClient.Message.user("after-compact"));
+            int more = indexer.indexIncrementalSync(history);
+            assertEquals(1, more);
+            assertTrue(store.size() >= 5);
+
+            var hits = store.search(SessionMessageSearchQuery.builder()
+                    .query("handoff SQLite")
+                    .limit(5)
+                    .build());
+            assertFalse(hits.isEmpty());
+        }
+    }
+
+    @Test
+    void indexCompactedIndexesPreTurnRetainUser() throws SQLException {
+        try (SqliteSessionMessageStore store = newStore()) {
+            SessionMessageIndexer indexer = new SessionMessageIndexer(store, "c2", "/proj");
+            List<LlmClient.Message> history = new ArrayList<>();
+            history.add(LlmClient.Message.system("S"));
+            history.add(LlmClient.Message.user("old"));
+            history.add(LlmClient.Message.assistant("a"));
+            history.add(LlmClient.Message.user("CURRENT TURN unique-retain-token"));
+            indexer.indexIncrementalSync(history);
+
+            List<LlmClient.Message> after = new ArrayList<>();
+            after.add(LlmClient.Message.system("S"));
+            after.add(LlmClient.Message.user(ConversationHistoryCompactor.SUMMARY_PREFIX + "sum"));
+            after.add(LlmClient.Message.user("CURRENT TURN unique-retain-token"));
+            var checkpoint = new ConversationHistoryCompactor.CompactCheckpoint(
+                    CompactTrigger.PRE_TURN,
+                    ConversationHistoryCompactor.SUMMARY_PREFIX + "sum",
+                    List.of(after.get(1), after.get(2))
+            );
+            indexer.indexCompactedSync(checkpoint, after);
+
+            var hits = store.search(SessionMessageSearchQuery.builder()
+                    .query("unique-retain-token")
+                    .limit(5)
+                    .build());
+            assertFalse(hits.isEmpty());
+        }
+    }
+
+    @Test
+    void incrementalAfterShrinkRealignsInsteadOfNoOp() throws Exception {
+        try (SqliteSessionMessageStore store = newStore()) {
+            SessionMessageIndexer indexer = new SessionMessageIndexer(store, "race", "/proj");
+            List<LlmClient.Message> history = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                history.add(LlmClient.Message.user("msg-" + i));
+            }
+            indexer.indexIncrementalSync(history);
+            assertEquals(6, indexer.getLastIndex());
+
+            // 模拟 Mid-Turn 压缩缩短 history，但 end-of-turn 增量先于 compacted 完成时的旧游标
+            List<LlmClient.Message> shrunk = new ArrayList<>();
+            shrunk.add(LlmClient.Message.user(ConversationHistoryCompactor.SUMMARY_PREFIX + "sum"));
+            shrunk.add(LlmClient.Message.user("after-tool-result unique-race-token"));
+            int written = indexer.indexIncrementalSync(shrunk);
+            assertTrue(written >= 1, "缩短后应换 epoch 重建索引，不能静默跳过");
+            assertEquals(2, indexer.getLastIndex());
+
+            var hits = store.search(SessionMessageSearchQuery.builder()
+                    .query("unique-race-token")
+                    .limit(5)
+                    .build());
+            assertFalse(hits.isEmpty());
+        }
+    }
+
+    @Test
+    void reindexFromStartRebuildsSearchableContent() throws SQLException {
+        try (SqliteSessionMessageStore store = newStore()) {
+            SessionMessageIndexer indexer = new SessionMessageIndexer(store, "resume", "/proj");
+            List<LlmClient.Message> history = new ArrayList<>();
+            history.add(LlmClient.Message.system("sys"));
+            history.add(LlmClient.Message.user("resume-unique-token alpha"));
+            history.add(LlmClient.Message.assistant("resume-unique-token beta"));
+            // 模拟错误地以为已索引完
+            indexer.resetIndex(history.size());
+            assertEquals(0, indexer.indexIncrementalSync(history));
+
+            int written = indexer.reindexFromStart(history);
+            assertTrue(written >= 2);
+            var hits = store.search(SessionMessageSearchQuery.builder()
+                    .query("resume-unique-token")
+                    .limit(5)
+                    .build());
+            assertFalse(hits.isEmpty());
+        }
+    }
+
+    @Test
+    void indexBatchFailureDoesNotAdvanceCursor() {
+        SessionMessageStore failing = new SessionMessageStore() {
+            @Override
+            public void index(SessionMessage message) {
+                throw new RuntimeException("boom");
+            }
+
+            @Override
+            public int indexBatch(List<SessionMessage> messages) {
+                throw new RuntimeException("boom");
+            }
+
+            @Override
+            public List<SessionMessageSearchResult> search(SessionMessageSearchQuery query) {
+                return List.of();
+            }
+
+            @Override
+            public List<SessionMessage> loadConversation(String conversationId) {
+                return List.of();
+            }
+
+            @Override
+            public List<String> listConversations(int limit) {
+                return List.of();
+            }
+
+            @Override
+            public int deleteConversation(String conversationId) {
+                return 0;
+            }
+
+            @Override
+            public int size() {
+                return 0;
+            }
+
+            @Override
+            public int conversationCount() {
+                return 0;
+            }
+
+            @Override
+            public int migrateFromJsonl(java.io.File historyDir) {
+                return 0;
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        SessionMessageIndexer indexer = new SessionMessageIndexer(failing, "fail", "/proj");
+        List<LlmClient.Message> history = List.of(LlmClient.Message.user("should-retry-later"));
+        assertEquals(0, indexer.indexIncrementalSync(history));
+        assertEquals(0, indexer.getLastIndex(), "写库失败不得推进游标");
+    }
 }
