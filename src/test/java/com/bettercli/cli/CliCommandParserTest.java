@@ -545,6 +545,11 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SUBAGENT_RESUME,
                 CliCommandParser.parse("/subagent resume").type());
         assertEquals("sub_x", CliCommandParser.parse("/subagent resume sub_x").payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_STATS,
+                CliCommandParser.parse("/subagent stats").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_DELETE,
+                CliCommandParser.parse("/subagent delete foo --force").type());
+        assertEquals("foo --force", CliCommandParser.parse("/subagent delete foo --force").payload());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE, CliCommandParser.parse("/subagent create").type());
         assertEquals("", CliCommandParser.parse("/subagent create").payload());
         CliCommandParser.ParsedCommand create = CliCommandParser.parse(

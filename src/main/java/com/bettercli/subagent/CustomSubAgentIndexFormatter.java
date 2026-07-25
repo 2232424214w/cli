@@ -47,7 +47,8 @@ public final class CustomSubAgentIndexFormatter {
         sb.append('\n');
         sb.append("判断准则：当用户任务匹配某个子 Agent 的专长描述，或用户自然语言明确点名某个 name 时，")
                 .append("调用 run_subagent(name, task) 委托执行；未命中则用普通工具自行处理。")
-                .append("不要用斜杠命令假设子 Agent 已切换；任务触发只能通过本工具或系统路由。")
+                .append("用户也可用消息前缀 `/subagent:name …` 或 `/sa:name …` 硬指定（由系统入站路由处理，不必再调本工具）。")
+                .append("不要用空格形式 `/subagent name task`（那是管理命令命名空间）。")
                 .append("run_subagent 立即异步启动，可同轮并行多个；本批次结束后结果会回填，由你汇总回复用户。\n");
 
         if (sb.length() > MAX_INDEX_CHARS) {

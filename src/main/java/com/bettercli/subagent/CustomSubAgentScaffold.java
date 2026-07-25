@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -41,6 +42,7 @@ public final class CustomSubAgentScaffold {
         TEMPLATES.put("blank", new Template("blank", "空白", "最小可运行定义，自行补全职责与工具"));
         TEMPLATES.put("code-reviewer", new Template("code-reviewer", "只读审查", "只读工具审查代码，禁止写文件/执行命令"));
         TEMPLATES.put("researcher", new Template("researcher", "调研", "只读本地探索 + 联网搜索/抓取"));
+        TEMPLATES.put("sql-analyzer", new Template("sql-analyzer", "SQL 分析", "慢 SQL / 执行计划建议，只读"));
     }
 
     private CustomSubAgentScaffold() {
@@ -144,9 +146,9 @@ public final class CustomSubAgentScaffold {
     }
 
     public static String usage() {
-        return "用法: /subagent create <name> [--project|--user] [--template blank|code-reviewer|researcher] [--force]\n"
+        return "用法: /subagent create <name> [--project|--user] [--template blank|code-reviewer|researcher|sql-analyzer] [--force]\n"
                 + "  默认写入 .bettercli/agents/<name>/（--user 写到 ~/.bettercli/agents/）\n"
-                + "  /subagent templates 查看模板；创建后自动可 /subagent reload";
+                + "  /subagent templates 查看模板；/subagent delete <name> --force 删除；创建后自动可 /subagent reload";
     }
 
     public static String templatesHelp() {
@@ -159,6 +161,67 @@ public final class CustomSubAgentScaffold {
         }
         sb.append('\n').append(usage());
         return sb.toString().trim();
+    }
+
+    /**
+     * 删除 user/project 下的定义目录（不可删 builtin cache）。
+     * @param force 必须 true 才执行删除
+     */
+    public static String delete(String name, boolean force, boolean preferUser,
+                                Path userAgentsDir, Path projectAgentsDir,
+                                CustomSubAgentRegistry registry) throws IOException {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("用法: /subagent delete <name> --force [--user|--project]");
+        }
+        if (!isValidName(name.trim())) {
+            throw new IllegalArgumentException("非法 name：" + name);
+        }
+        if (!force) {
+            throw new IllegalArgumentException("删除需加 --force。例: /subagent delete " + name.trim() + " --force");
+        }
+        String n = name.trim();
+        Path userDir = userAgentsDir == null ? null : userAgentsDir.resolve(n).toAbsolutePath().normalize();
+        Path projectDir = projectAgentsDir == null ? null : projectAgentsDir.resolve(n).toAbsolutePath().normalize();
+        Path target = null;
+        String scope = null;
+        if (preferUser && userDir != null && Files.isDirectory(userDir)) {
+            target = userDir;
+            scope = "user";
+        } else if (!preferUser && projectDir != null && Files.isDirectory(projectDir)) {
+            target = projectDir;
+            scope = "project";
+        } else if (projectDir != null && Files.isDirectory(projectDir)) {
+            target = projectDir;
+            scope = "project";
+        } else if (userDir != null && Files.isDirectory(userDir)) {
+            target = userDir;
+            scope = "user";
+        }
+        if (target == null) {
+            throw new IllegalStateException("未找到可删除的目录（builtin 不可删）：" + n);
+        }
+        Path parent = scope.equals("user") ? userAgentsDir.toAbsolutePath().normalize()
+                : projectAgentsDir.toAbsolutePath().normalize();
+        if (!target.startsWith(parent)) {
+            throw new IllegalArgumentException("拒绝路径逃逸: " + target);
+        }
+        deleteRecursive(target);
+        if (registry != null) {
+            registry.reload();
+        }
+        return "✅ 已删除 Custom SubAgent「" + n + "」(" + scope + ")\n   路径: " + target;
+    }
+
+    private static void deleteRecursive(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (var walk = Files.walk(dir)) {
+            List<Path> paths = walk.sorted(java.util.Comparator.reverseOrder()).toList();
+            for (Path p : paths) {
+                Files.deleteIfExists(p);
+            }
+        }
     }
 
     private static String normalizeTemplateId(String raw) {
@@ -223,6 +286,31 @@ public final class CustomSubAgentScaffold {
                     2. **证据**（本地路径或 URL）
                     3. **缺口 / 风险**
                     4. **建议下一步**
+                    """.formatted(name);
+            case "sql-analyzer" -> """
+                    ---
+                    name: %s
+                    description: 分析慢 SQL、解释执行计划、指出索引与写法问题；只读不改库
+                    maxTurns: 20
+                    allowedTools: [read_file, grep_code, glob_files, list_dir]
+                    disallowedTools: [execute_command, write_file, create_project]
+                    ---
+
+                    你是 SQL 分析专家（Custom SubAgent）。
+
+                    ## 职责
+
+                    - 阅读用户给出的 SQL / 相关代码中的查询语句
+                    - 指出性能风险（全表扫、隐式转换、缺失索引、N+1 等）
+                    - 给出改写建议与验证思路（EXPLAIN / 索引）
+                    - **不**执行命令、不改文件、不连真实数据库
+
+                    ## 输出格式
+
+                    1. **问题摘要**
+                    2. **风险列表**（严重度 + 原因）
+                    3. **改写建议**
+                    4. **验证步骤**
                     """.formatted(name);
             default -> """
                     ---

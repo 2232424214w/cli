@@ -13,10 +13,10 @@ import java.util.List;
  */
 public final class CustomSubAgentBuiltinExtractor {
 
-    private static final List<String> BUILTIN_AGENTS = List.of("code-reviewer", "researcher");
+    private static final List<String> BUILTIN_AGENTS = List.of("code-reviewer", "researcher", "sql-analyzer");
 
     /**  bump 以强制覆盖已解压的内置 AGENT.md */
-    public static final String CURRENT_VERSION = "1.1.0";
+    public static final String CURRENT_VERSION = "1.2.0";
 
     private final Path cacheRoot;
 

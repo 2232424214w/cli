@@ -215,7 +215,9 @@ final class BetterCliCompleter implements Completer {
                     option("audit", "查看审计日志"),
                     option("show", "查看某个 SubAgent 定义"),
                     option("sessions", "列出落盘会话（轻量 HA）"),
-                    option("resume", "从落盘会话续跑"));
+                    option("resume", "从落盘会话续跑"),
+                    option("stats", "审计事件统计"),
+                    option("delete", "删除 user/project 定义（需 --force）"));
             return true;
         }
         if (parts.length >= 1 && "show".equalsIgnoreCase(parts[0])) {
@@ -235,7 +237,8 @@ final class BetterCliCompleter implements Completer {
                 addMatching(candidates, "模板", "",
                         option("blank", "空白模板"),
                         option("code-reviewer", "只读审查"),
-                        option("researcher", "调研（只读+联网）"));
+                        option("researcher", "调研（只读+联网）"),
+                        option("sql-analyzer", "SQL 分析"));
                 return true;
             }
         }

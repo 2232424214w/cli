@@ -89,6 +89,47 @@ public final class CustomSubAgentAudit {
         return sb.toString().trim();
     }
 
+    /** 按 event / subagent_name 聚合最近审计（默认扫全部可读 jsonl，上限约 5000 行）。 */
+    public static String formatStats() {
+        List<String> lines = readRecentLines(5000);
+        if (lines.isEmpty()) {
+            return "🧩 Custom SubAgent 统计: 暂无审计记录（目录 " + auditDir() + "）";
+        }
+        java.util.Map<String, Integer> byEvent = new java.util.LinkedHashMap<>();
+        java.util.Map<String, Integer> byAgent = new java.util.LinkedHashMap<>();
+        int parsed = 0;
+        for (String line : lines) {
+            if (line == null || line.isBlank() || line.startsWith("（")) {
+                continue;
+            }
+            try {
+                var node = MAPPER.readTree(line);
+                String event = node.path("event").asText("unknown");
+                byEvent.merge(event, 1, Integer::sum);
+                if (node.hasNonNull("subagent_name")) {
+                    byAgent.merge(node.get("subagent_name").asText(), 1, Integer::sum);
+                }
+                parsed++;
+            } catch (Exception ignored) {
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("🧩 Custom SubAgent 统计（解析 ").append(parsed).append(" 条）:\n");
+        sb.append("  按事件:\n");
+        byEvent.entrySet().stream()
+                .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                .forEach(e -> sb.append("    - ").append(e.getKey()).append(": ").append(e.getValue()).append('\n'));
+        if (!byAgent.isEmpty()) {
+            sb.append("  按子 Agent:\n");
+            byAgent.entrySet().stream()
+                    .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                    .limit(20)
+                    .forEach(e -> sb.append("    - ").append(e.getKey()).append(": ").append(e.getValue()).append('\n'));
+        }
+        sb.append("目录: ").append(auditDir());
+        return sb.toString().trim();
+    }
+
     static List<String> readRecentLines(int limit) {
         Path dir = auditDir();
         if (!Files.isDirectory(dir)) {

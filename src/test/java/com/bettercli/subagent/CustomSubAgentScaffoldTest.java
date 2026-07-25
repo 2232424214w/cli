@@ -86,6 +86,22 @@ class CustomSubAgentScaffoldTest {
     }
 
     @Test
+    void deleteRequiresForceAndRemovesDir() throws Exception {
+        Path user = temp.resolve("u");
+        Path project = temp.resolve("p");
+        CustomSubAgentScaffold.create(
+                new CustomSubAgentScaffold.CreateRequest("tmp-bot", CustomSubAgentScaffold.Scope.PROJECT,
+                        "blank", false),
+                user, project);
+        assertTrue(Files.isDirectory(project.resolve("tmp-bot")));
+        assertThrows(IllegalArgumentException.class, () ->
+                CustomSubAgentScaffold.delete("tmp-bot", false, false, user, project, null));
+        String msg = CustomSubAgentScaffold.delete("tmp-bot", true, false, user, project, null);
+        assertTrue(msg.contains("已删除"));
+        assertFalse(Files.exists(project.resolve("tmp-bot")));
+    }
+
+    @Test
     void rejectsInvalidName() {
         assertFalse(CustomSubAgentScaffold.isValidName("1bad"));
         assertFalse(CustomSubAgentScaffold.isValidName("../x"));

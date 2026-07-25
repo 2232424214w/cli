@@ -174,6 +174,7 @@ public final class CustomSubAgentRunner {
                 p.future().cancel(true);
             }
             activeRuns.remove(e.getKey());
+            sessionStore.finish(e.getKey(), CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
             CustomSubAgentAudit.record("SUBAGENT_CANCELLED",
                     p == null ? null : p.name(), e.getKey(), null, null);
         }

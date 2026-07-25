@@ -983,6 +983,17 @@ public class Main {
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
+                    case SUBAGENT_STATS -> {
+                        ui.println(SubagentCommandHandler.stats());
+                        continue;
+                    }
+                    case SUBAGENT_DELETE -> {
+                        ui.println(SubagentCommandHandler.delete(
+                                command.payload(), userAgentsDir, projectAgentsDir, customSubAgentRegistry));
+                        reactAgent.setCustomSubAgentRunner(customSubAgentRunner);
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;

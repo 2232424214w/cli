@@ -127,6 +127,44 @@ final class SubagentCommandHandler {
         return runner.sessionStore().formatList(limit);
     }
 
+    static String stats() {
+        return com.bettercli.subagent.CustomSubAgentAudit.formatStats();
+    }
+
+    static String delete(String payload, Path userAgentsDir, Path projectAgentsDir,
+                         CustomSubAgentRegistry registry) {
+        try {
+            if (payload == null || payload.isBlank()) {
+                return "❌ 用法: /subagent delete <name> --force [--user|--project]";
+            }
+            String[] tokens = payload.trim().split("\\s+");
+            String name = null;
+            boolean force = false;
+            boolean preferUser = false;
+            boolean preferProject = false;
+            for (String t : tokens) {
+                if (t.equalsIgnoreCase("--force") || t.equalsIgnoreCase("-f")) {
+                    force = true;
+                } else if (t.equalsIgnoreCase("--user") || t.equalsIgnoreCase("-u")) {
+                    preferUser = true;
+                } else if (t.equalsIgnoreCase("--project") || t.equalsIgnoreCase("-p")) {
+                    preferProject = true;
+                } else if (t.startsWith("-")) {
+                    return "❌ 未知选项: " + t;
+                } else if (name == null) {
+                    name = t;
+                } else {
+                    return "❌ 多余参数: " + t;
+                }
+            }
+            boolean preferUserFinal = preferUser && !preferProject;
+            return CustomSubAgentScaffold.delete(name, force, preferUserFinal,
+                    userAgentsDir, projectAgentsDir, registry);
+        } catch (Exception e) {
+            return "❌ " + e.getMessage();
+        }
+    }
+
     static String audit(int limit) {
         return com.bettercli.subagent.CustomSubAgentAudit.formatTail(limit);
     }
