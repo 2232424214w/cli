@@ -49,7 +49,9 @@ public final class CustomSubAgentIndexFormatter {
                 .append("调用 run_subagent(name, task) 委托执行；未命中则用普通工具自行处理。")
                 .append("用户也可用消息前缀 `/subagent:name …` 或 `/sa:name …` 硬指定（由系统入站路由处理，不必再调本工具）。")
                 .append("不要用空格形式 `/subagent name task`（那是管理命令命名空间）。")
-                .append("run_subagent 立即异步启动，可同轮并行多个；本批次结束后结果会回填，由你汇总回复用户。\n");
+                .append("run_subagent 默认同轮前台异步（可并行，批次结束回填）；"
+                        + "mode=background 时先 accepted，完成后写入完成通知并 bg-react 汇总。"
+                        + "微信通道默认 background。\n");
 
         if (sb.length() > MAX_INDEX_CHARS) {
             String truncated = sb.substring(0, MAX_INDEX_CHARS) + "\n...(Custom Subagent 索引段被截断)\n";

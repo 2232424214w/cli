@@ -20,6 +20,9 @@ import com.bettercli.runtime.CancellationContext;
 import com.bettercli.skill.SkillContextBuffer;
 import com.bettercli.skill.SkillIndexFormatter;
 import com.bettercli.skill.SkillRegistry;
+import com.bettercli.subagent.BgReactCoordinator;
+import com.bettercli.subagent.CustomSubAgentCompletionEvent;
+import com.bettercli.subagent.CustomSubAgentCompletionNotice;
 import com.bettercli.subagent.CustomSubAgentIndexFormatter;
 import com.bettercli.subagent.CustomSubAgentRunner;
 import com.bettercli.util.AnsiStyle;
@@ -56,6 +59,13 @@ public class Agent {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private CustomSubAgentRunner customSubAgentRunner;
+    private final BgReactCoordinator bgReactCoordinator = new BgReactCoordinator();
+    private final java.util.concurrent.atomic.AtomicBoolean inRun =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 微信等通道默认后台委托；CLI 默认前台。 */
+    private volatile boolean subagentBackgroundDefault;
+    /** bg-react 汇总文本消费者（微信推送）；null 则只走 renderer。 */
+    private volatile java.util.function.Consumer<String> bgReactReplyConsumer;
     private Renderer renderer;
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
@@ -116,7 +126,20 @@ public class Agent {
      */
     public void setCustomSubAgentRunner(CustomSubAgentRunner customSubAgentRunner) {
         this.customSubAgentRunner = customSubAgentRunner;
+        if (customSubAgentRunner != null) {
+            customSubAgentRunner.setCompletionListener(this::onSubAgentBackgroundComplete);
+        }
         refreshSystemPromptAfterSubagentChange();
+    }
+
+    /** 微信等通道可设为 true，使 run_subagent 默认 background。 */
+    public void setSubagentBackgroundDefault(boolean backgroundDefault) {
+        this.subagentBackgroundDefault = backgroundDefault;
+    }
+
+    /** bg-react 结果推送（如微信 send）；未设置时走 renderer.stream。 */
+    public void setBgReactReplyConsumer(java.util.function.Consumer<String> consumer) {
+        this.bgReactReplyConsumer = consumer;
     }
 
     private void refreshSystemPromptAfterSubagentChange() {
@@ -183,7 +206,7 @@ public class Agent {
         }
     }
 
-    private String runSubagentViaTool(String name, String task) {
+    private String runSubagentViaTool(String name, String task, String mode) {
         if (customSubAgentRunner == null) {
             return "run_subagent 失败: Custom SubAgent 未初始化";
         }
@@ -195,8 +218,102 @@ public class Agent {
         }
         String parentConversationId = sessionMessageIndexer == null
                 ? fallbackConversationId : sessionMessageIndexer.getConversationId();
-        // 立即返回占位，后台执行；executeToolCalls 结束后 materialize 回填
-        return customSubAgentRunner.startAsync(name, task, llmClient, toolRegistry, progress, parentConversationId);
+        boolean background = resolveSubagentBackground(mode);
+        return customSubAgentRunner.startAsync(
+                name, task, llmClient, toolRegistry, progress, parentConversationId, background, null);
+    }
+
+    private boolean resolveSubagentBackground(String mode) {
+        if (mode != null && !mode.isBlank()) {
+            String m = mode.trim().toLowerCase(java.util.Locale.ROOT);
+            if ("background".equals(m) || "bg".equals(m) || "async".equals(m)) {
+                return true;
+            }
+            if ("foreground".equals(m) || "fg".equals(m) || "sync".equals(m)) {
+                return false;
+            }
+        }
+        String env = System.getProperty("bettercli.subagent.default.mode");
+        if (env == null || env.isBlank()) {
+            env = System.getenv("BETTERCLI_SUBAGENT_DEFAULT_MODE");
+        }
+        if (env != null && !env.isBlank()) {
+            String m = env.trim().toLowerCase(java.util.Locale.ROOT);
+            if ("background".equals(m) || "bg".equals(m)) {
+                return true;
+            }
+            if ("foreground".equals(m) || "fg".equals(m)) {
+                return false;
+            }
+        }
+        return subagentBackgroundDefault;
+    }
+
+    private void onSubAgentBackgroundComplete(CustomSubAgentCompletionEvent event) {
+        if (event == null) {
+            return;
+        }
+        String notice = CustomSubAgentCompletionNotice.format(event);
+        synchronized (conversationHistory) {
+            conversationHistory.add(LlmClient.Message.user(notice));
+        }
+        String parentId = event.parentConversationId();
+        bgReactCoordinator.markSessionWrite(parentId);
+        bgReactCoordinator.enqueue(parentId, new BgReactCoordinator.BgReactTask() {
+            @Override
+            public String run() throws Exception {
+                waitUntilAgentIdle(60_000);
+                if (CancellationContext.isCancelled()) {
+                    return "";
+                }
+                return runBgReactTurn();
+            }
+
+            @Override
+            public void onReply(String reply) {
+                deliverBgReactReply(reply);
+            }
+        });
+    }
+
+    private void waitUntilAgentIdle(long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + Math.max(1_000, timeoutMs);
+        while (inRun.get() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+    }
+
+    private String runBgReactTurn() {
+        log.info("bg-react start");
+        String prompt = "[bg-react] 请根据最新的 SubAgent 完成通知处理："
+                + "若所有预期子任务已完成则汇总回复用户；"
+                + "若仍有未完成则只输出空或极短确认且不要重复已推送内容；"
+                + "若结果已在之前回复中体现则静默（可只回复 OK）。";
+        return run(prompt);
+    }
+
+    private void deliverBgReactReply(String reply) {
+        if (reply == null || reply.isBlank()) {
+            return;
+        }
+        String trimmed = reply.trim();
+        if ("OK".equalsIgnoreCase(trimmed) || "ok.".equalsIgnoreCase(trimmed)) {
+            return;
+        }
+        java.util.function.Consumer<String> consumer = bgReactReplyConsumer;
+        if (consumer != null) {
+            try {
+                consumer.accept(trimmed);
+                return;
+            } catch (Exception e) {
+                log.debug("bg-react consumer failed: {}", e.getMessage());
+            }
+        }
+        try {
+            renderer().stream().println(trimmed);
+        } catch (Exception e) {
+            log.debug("bg-react renderer failed: {}", e.getMessage());
+        }
     }
 
     /** 暴露 ReAct 规划存储，供渲染层/状态栏展示进度；不应被外部修改。 */
@@ -265,6 +382,15 @@ public class Agent {
      * 运行 Agent 循环
      */
     public String run(String userInput) {
+        inRun.set(true);
+        try {
+            return runInternal(userInput);
+        } finally {
+            inRun.set(false);
+        }
+    }
+
+    private String runInternal(String userInput) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         pruneHistoricalImagePayloads();
         // 存入短期记忆

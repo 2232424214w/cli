@@ -11,7 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -109,6 +112,47 @@ class CustomSubAgentRunnerTest {
                 || done.get(0).result().contains("done"), done.get(0).result());
         assertTrue(done.get(1).result().contains("Custom SubAgent") || done.get(1).result().contains("OK")
                 || done.get(1).result().contains("done"), done.get(1).result());
+    }
+
+    @Test
+    void backgroundAcceptedDoesNotBlockMaterializeAndFiresCompletion(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("user");
+        Path dir = user.resolve("bg-bot");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("AGENT.md"), """
+                ---
+                name: bg-bot
+                description: bg
+                ---
+                Finish.
+                """);
+        CustomSubAgentRegistry registry = new CustomSubAgentRegistry(null, user, null);
+        registry.reload();
+        CustomSubAgentRunner runner = new CustomSubAgentRunner(registry);
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<CustomSubAgentCompletionEvent> event = new AtomicReference<>();
+        runner.setCompletionListener(e -> {
+            event.set(e);
+            done.countDown();
+        });
+
+        String accepted = runner.startAsync(
+                "bg-bot", "do it", mockClient(() -> {}), new ToolRegistry(), null, "parent-1", true, "call_x");
+        assertTrue(accepted.startsWith(CustomSubAgentRunner.BG_ACCEPTED_PREFIX), accepted);
+        assertNotNull(CustomSubAgentRunner.parseBgAcceptedSessionId(accepted));
+        assertNull(CustomSubAgentRunner.parsePendingSessionId(accepted));
+
+        var toolResult = new ToolRegistry.ToolExecutionResult(
+                "1", "run_subagent", "{}", accepted, 0, false, List.of());
+        var materialized = runner.materializeAsyncResults(List.of(toolResult));
+        assertEquals(1, materialized.size());
+        assertTrue(materialized.get(0).result().startsWith(CustomSubAgentRunner.BG_ACCEPTED_PREFIX));
+
+        assertTrue(done.await(5, TimeUnit.SECONDS), "completion listener not fired");
+        assertNotNull(event.get());
+        assertEquals("bg-bot", event.get().agentName());
+        assertEquals("parent-1", event.get().parentConversationId());
+        assertTrue(event.get().success());
     }
 
     @Test

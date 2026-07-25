@@ -66,6 +66,15 @@ public class WechatAgentSession implements AutoCloseable {
                 ? "anon" : account.accountId().trim();
         this.conversationId = "wechat-" + accountPart;
         this.agent.setFallbackConversationId(conversationId);
+        // 微信：默认后台委托 + 完成后推送 bg-react 汇总
+        this.agent.setSubagentBackgroundDefault(true);
+        this.agent.setBgReactReplyConsumer(text -> {
+            try {
+                sender.send(text);
+            } catch (Exception e) {
+                // WechatMessageSender is typically IOException-capable; swallow to keep listener fail-open
+            }
+        });
     }
 
     public String conversationId() {

@@ -123,7 +123,8 @@ public class ToolRegistry {
     // 模式工具化：create_plan / run_team / run_subagent 回调（由 Agent 注入；未注入时返回提示）
     private java.util.function.Function<String, String> createPlanHandler;
     private java.util.function.Function<String, String> runTeamHandler;
-    private java.util.function.BiFunction<String, String, String> runSubagentHandler;
+    /** name, task, mode(nullable) → result */
+    private RunSubagentHandler runSubagentHandler;
     // ask_user 复用 HITL 交互底层；由 HitlToolRegistry / Main 注入。未注入时走非交互降级文案。
     private com.bettercli.hitl.HitlHandler hitlHandler;
     // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
@@ -375,8 +376,14 @@ public class ToolRegistry {
     /**
      * 注入 Custom SubAgent 委托回调（run_subagent）。与 Multi-Agent {@code run_team} 独立。
      */
-    public void setRunSubagentHandler(java.util.function.BiFunction<String, String, String> runSubagentHandler) {
+    public void setRunSubagentHandler(RunSubagentHandler runSubagentHandler) {
         this.runSubagentHandler = runSubagentHandler;
+    }
+
+    /** {@code mode} 可为 null / foreground / background。 */
+    @FunctionalInterface
+    public interface RunSubagentHandler {
+        String apply(String name, String task, String mode);
     }
 
     public void setCustomSubAgentContext(com.bettercli.subagent.CustomSubAgentRuntimeContext context) {
@@ -1498,13 +1505,16 @@ public class ToolRegistry {
         tools.put("run_subagent", new Tool(
                 "run_subagent",
                 "委托已注册的 Custom SubAgent 在独立上下文中执行子任务。"
-                        + "调用后立即得到异步占位，同轮其它工具可并行；本批次结束后系统回填真实结果供你汇总。"
+                        + "默认前台：立即得到异步占位，同轮其它工具可并行，本批次结束后回填结果供你汇总。"
+                        + "mode=background 时立即 accepted，主会话可先回复用户，子任务完成后写入完成通知并触发 bg-react。"
                         + "当用户任务匹配某个子 Agent 的 description，或用户自然语言点名某个子 Agent 时调用；"
                         + "与 run_team（固定三角色团队）无关。可同一轮并行调用多个。"
                         + "子 Agent 内不可再调用本工具。",
                 createParameters(
                         new Param("name", "string", "Custom SubAgent 名称（与 AGENT.md frontmatter name 一致）", true),
-                        new Param("task", "string", "交给该子 Agent 的自包含任务描述", true)
+                        new Param("task", "string", "交给该子 Agent 的自包含任务描述", true),
+                        new Param("mode", "string",
+                                "可选：foreground（默认，本批次等待回填）或 background（先回复、完成后 bg-react）", false)
                 ),
                 args -> invokeRunSubagent(args)
         ));
@@ -1543,6 +1553,7 @@ public class ToolRegistry {
     private String invokeRunSubagent(Map<String, String> args) {
         String name = args.get("name");
         String task = args.get("task");
+        String mode = args.get("mode");
         if (name == null || name.isBlank()) {
             return "run_subagent 失败: name 不能为空";
         }
@@ -1553,7 +1564,7 @@ public class ToolRegistry {
             return "run_subagent 失败: Custom SubAgent 能力未注入（请在 ReAct Agent 内使用）";
         }
         try {
-            return runSubagentHandler.apply(name.trim(), task.trim());
+            return runSubagentHandler.apply(name.trim(), task.trim(), mode);
         } catch (Exception e) {
             return "run_subagent 失败: " + e.getMessage();
         }

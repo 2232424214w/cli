@@ -36,16 +36,18 @@ import java.util.concurrent.TimeoutException;
 /**
  * 按 Custom SubAgent 定义在隔离上下文中跑一轮 ReAct。
  *
- * <p>主 Agent 委托：{@link #startAsync} 立即返回占位，后台线程池执行，
- * {@link #materializeAsyncResults} 在工具批次结束后回填真实结果（可同轮并行多个）。
+ * <p>主 Agent 委托：{@link #startAsync} 立即返回占位。
+ * <ul>
+ *   <li>前台（默认）：{@link #materializeAsyncResults} 在工具批次结束后等待并回填</li>
+ *   <li>后台：占位立即 accepted，完成后通过 {@link #setCompletionListener} 通知并触发 bg-react</li>
+ * </ul>
  * 路由直达：{@link #runDirect} 同步执行并返回最终答复。
- *
- * <p>禁止嵌套（ThreadLocal）；支持超时与 {@link CancellationContext}；执行期 ThreadLocal 注入
- * skills 白名单与 MEMORY 写回路径。
  */
 public final class CustomSubAgentRunner {
 
     public static final String PENDING_PREFIX = "CUSTOM_SUBAGENT_PENDING:";
+    /** 后台模式已接受；materialize 不等待，完成后走 completion listener。 */
+    public static final String BG_ACCEPTED_PREFIX = "CUSTOM_SUBAGENT_BG_ACCEPTED:";
 
     private static final Logger log = LoggerFactory.getLogger(CustomSubAgentRunner.class);
     private static final ThreadLocal<Boolean> IN_CUSTOM = ThreadLocal.withInitial(() -> false);
@@ -53,7 +55,10 @@ public final class CustomSubAgentRunner {
     private final CustomSubAgentRegistry registry;
     private final Map<String, CustomSubAgentRunStatus> activeRuns = new ConcurrentHashMap<>();
     private final Map<String, PendingRun> pendingBySession = new ConcurrentHashMap<>();
+    private final Map<String, PendingRun> backgroundBySession = new ConcurrentHashMap<>();
+    private final Set<String> completionFiredSessions = ConcurrentHashMap.newKeySet();
     private final CustomSubAgentSessionStore sessionStore;
+    private volatile java.util.function.Consumer<CustomSubAgentCompletionEvent> completionListener = e -> {};
     private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "custom-subagent");
         t.setDaemon(true);
@@ -73,6 +78,10 @@ public final class CustomSubAgentRunner {
         return sessionStore;
     }
 
+    public void setCompletionListener(java.util.function.Consumer<CustomSubAgentCompletionEvent> listener) {
+        this.completionListener = listener == null ? e -> {} : listener;
+    }
+
     public CustomSubAgentRegistry registry() {
         return registry;
     }
@@ -88,10 +97,16 @@ public final class CustomSubAgentRunner {
 
     /**
      * 主 Agent 委托入口：立即返回占位，后台执行；调用方须在工具批次后
-     * {@link #materializeAsyncResults}。
+     * {@link #materializeAsyncResults}（仅前台占位会等待）。
      */
     public String startAsync(String name, String task, LlmClient parentClient, ToolRegistry toolRegistry,
                              PrintStream progressOut, String parentConversationId) {
+        return startAsync(name, task, parentClient, toolRegistry, progressOut, parentConversationId, false, null);
+    }
+
+    public String startAsync(String name, String task, LlmClient parentClient, ToolRegistry toolRegistry,
+                             PrintStream progressOut, String parentConversationId,
+                             boolean background, String toolCallId) {
         if (isInCustomSubAgent()) {
             return "run_subagent 失败: 不可嵌套调用（Custom SubAgent 执行中）";
         }
@@ -102,12 +117,20 @@ public final class CustomSubAgentRunner {
         if (def == null) {
             return "run_subagent 失败: 未找到子 Agent \"" + name + "\"\n" + availableList();
         }
-        return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId);
+        return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId,
+                background, toolCallId);
     }
 
     public String startAsync(CustomSubAgentDefinition def, String task,
                              LlmClient parentClient, ToolRegistry toolRegistry,
                              PrintStream progressOut, String parentConversationId) {
+        return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId, false, null);
+    }
+
+    public String startAsync(CustomSubAgentDefinition def, String task,
+                             LlmClient parentClient, ToolRegistry toolRegistry,
+                             PrintStream progressOut, String parentConversationId,
+                             boolean background, String toolCallId) {
         if (isInCustomSubAgent()) {
             return "run_subagent 失败: 不可嵌套调用（Custom SubAgent 执行中）";
         }
@@ -120,21 +143,54 @@ public final class CustomSubAgentRunner {
         String parentId = normalizeParentId(parentConversationId);
         String taskPreview = preview(task.trim(), 80);
         int timeoutSec = def.resolveTimeoutSeconds();
+        String taskText = task.trim();
 
         activeRuns.put(childSessionId, new CustomSubAgentRunStatus(
                 def.name(), childSessionId, parentId, Instant.now(), taskPreview));
-        CustomSubAgentAudit.record("SUBAGENT_STARTED", def.name(), childSessionId, parentId, taskPreview);
+        CustomSubAgentAudit.record(background ? "SUBAGENT_BG_STARTED" : "SUBAGENT_STARTED",
+                def.name(), childSessionId, parentId, taskPreview);
 
-        Future<String> future = submitCancellable(() -> executeIsolated(
-                def, task.trim(), parentClient, toolRegistry, progressOut,
-                childSessionId, parentId, null, null, false));
+        Future<String> future = submitCancellable(() -> {
+            String outcome = "";
+            boolean cancelled = false;
+            boolean success = false;
+            try {
+                outcome = executeIsolated(
+                        def, taskText, parentClient, toolRegistry, progressOut,
+                        childSessionId, parentId, null, null, false);
+                cancelled = CancellationContext.isCancelled()
+                        || (outcome != null && outcome.contains("用户取消"));
+                success = !cancelled && outcome != null
+                        && !outcome.startsWith("run_subagent 失败")
+                        && !outcome.startsWith("❌");
+                return outcome;
+            } catch (Exception e) {
+                outcome = "run_subagent 失败: " + e.getMessage() + " (session=" + childSessionId + ")";
+                return outcome;
+            } finally {
+                backgroundBySession.remove(childSessionId);
+                pendingBySession.remove(childSessionId);
+                if (background) {
+                    fireCompletionOnce(new CustomSubAgentCompletionEvent(
+                            parentId, childSessionId, def.name(), toolCallId, taskText,
+                            success, cancelled || CancellationContext.isCancelled(),
+                            outcome == null ? "" : outcome));
+                }
+            }
+        });
 
-        pendingBySession.put(childSessionId, new PendingRun(future, timeoutSec, def.name()));
+        PendingRun pending = new PendingRun(future, timeoutSec, def.name(), background, taskText, toolCallId, parentId);
+        if (background) {
+            backgroundBySession.put(childSessionId, pending);
+            return bgAcceptedPlaceholder(childSessionId, def.name(), parentId, timeoutSec);
+        }
+        pendingBySession.put(childSessionId, pending);
         return placeholder(childSessionId, def.name(), parentId, timeoutSec);
     }
 
     /**
-     * 将工具结果中的异步占位替换为真实子 Agent 输出（按 session 等待，保持结果顺序）。
+     * 将工具结果中的前台异步占位替换为真实子 Agent 输出。
+     * 后台 {@link #BG_ACCEPTED_PREFIX} 占位保持不变（不等待）。
      */
     public List<ToolExecutionResult> materializeAsyncResults(List<ToolExecutionResult> results) {
         if (results == null || results.isEmpty()) {
@@ -147,6 +203,10 @@ public final class CustomSubAgentRunner {
         List<ToolExecutionResult> out = new ArrayList<>(results.size());
         for (ToolExecutionResult r : results) {
             String text = r.result();
+            if (parseBgAcceptedSessionId(text) != null) {
+                out.add(r);
+                continue;
+            }
             String sessionId = parsePendingSessionId(text);
             if (sessionId == null) {
                 out.add(r);
@@ -170,9 +230,16 @@ public final class CustomSubAgentRunner {
         return out;
     }
 
-    /** 取消所有尚未 materialize 的异步委托（与 /cancel、ESC 联动）。 */
+    /** 取消所有尚未完成的前台 / 后台委托。 */
     public void cancelAllPending() {
-        for (Map.Entry<String, PendingRun> e : new ArrayList<>(pendingBySession.entrySet())) {
+        cancelMap(pendingBySession);
+        cancelMap(backgroundBySession);
+        pendingBySession.clear();
+        backgroundBySession.clear();
+    }
+
+    private void cancelMap(Map<String, PendingRun> map) {
+        for (Map.Entry<String, PendingRun> e : new ArrayList<>(map.entrySet())) {
             PendingRun p = e.getValue();
             if (p != null && p.future() != null) {
                 p.future().cancel(true);
@@ -181,8 +248,30 @@ public final class CustomSubAgentRunner {
             sessionStore.finish(e.getKey(), CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
             CustomSubAgentAudit.record("SUBAGENT_CANCELLED",
                     p == null ? null : p.name(), e.getKey(), null, null);
+            if (p != null && p.background()) {
+                fireCompletionOnce(new CustomSubAgentCompletionEvent(
+                        p.parentId(), e.getKey(), p.name(), p.toolCallId(), p.task(),
+                        false, true, "用户取消"));
+            }
         }
-        pendingBySession.clear();
+    }
+
+    private void fireCompletionOnce(CustomSubAgentCompletionEvent event) {
+        if (event == null || event.childSessionId() == null) {
+            return;
+        }
+        if (!completionFiredSessions.add(event.childSessionId())) {
+            return;
+        }
+        fireCompletion(event);
+    }
+
+    private void fireCompletion(CustomSubAgentCompletionEvent event) {
+        try {
+            completionListener.accept(event);
+        } catch (Exception ex) {
+            log.warn("completion listener failed: {}", ex.getMessage());
+        }
     }
 
     /**
@@ -237,7 +326,7 @@ public final class CustomSubAgentRunner {
         Future<String> future = submitCancellable(() -> executeIsolated(
                 def, userMessage.trim(), parentClient, toolRegistry, progressOut,
                 childSessionId, parentId, parentHistory, parentTranscript, true));
-        PendingRun pending = new PendingRun(future, timeoutSec, def.name());
+        PendingRun pending = new PendingRun(future, timeoutSec, def.name(), false, userMessage.trim(), null, parentId);
         pendingBySession.put(childSessionId, pending);
         try {
             PendingRun toAwait = pendingBySession.remove(childSessionId);
@@ -609,7 +698,7 @@ public final class CustomSubAgentRunner {
                 IN_CUSTOM.remove();
             }
         });
-        pendingBySession.put(childSessionId, new PendingRun(future, timeoutSec, def.name()));
+        pendingBySession.put(childSessionId, new PendingRun(future, timeoutSec, def.name(), false, continueTask, null, parentId));
         try {
             PendingRun pending = pendingBySession.remove(childSessionId);
             if (pending == null) {
@@ -653,11 +742,23 @@ public final class CustomSubAgentRunner {
 
     static String placeholder(String sessionId, String name, String parentId, int timeoutSec) {
         return PENDING_PREFIX + sessionId + "\n"
-                + "⏳ Custom SubAgent [" + name + "] 已启动（异步），后台执行中…\n"
+                + "⏳ Custom SubAgent [" + name + "] 已启动（前台异步），后台执行中…\n"
+                + "mode: foreground\n"
                 + "session: " + sessionId + "\n"
                 + "parent_conversation_id: " + parentId + "\n"
                 + "timeout: " + timeoutSec + "s\n"
                 + "主 Agent 本轮其它工具可并行；本批次结束后将自动回填结果。";
+    }
+
+    static String bgAcceptedPlaceholder(String sessionId, String name, String parentId, int timeoutSec) {
+        return BG_ACCEPTED_PREFIX + sessionId + "\n"
+                + "✅ Custom SubAgent [" + name + "] 已接受（后台模式），主 Agent 可先回复用户。\n"
+                + "mode: background\n"
+                + "status: accepted\n"
+                + "session: " + sessionId + "\n"
+                + "parent_conversation_id: " + parentId + "\n"
+                + "timeout: " + timeoutSec + "s\n"
+                + "完成后将写入完成通知并触发 bg-react 汇总。";
     }
 
     public static String parsePendingSessionId(String text) {
@@ -665,6 +766,16 @@ public final class CustomSubAgentRunner {
             return null;
         }
         String rest = text.substring(PENDING_PREFIX.length());
+        int nl = rest.indexOf('\n');
+        String id = nl < 0 ? rest.trim() : rest.substring(0, nl).trim();
+        return id.isEmpty() ? null : id;
+    }
+
+    public static String parseBgAcceptedSessionId(String text) {
+        if (text == null || !text.startsWith(BG_ACCEPTED_PREFIX)) {
+            return null;
+        }
+        String rest = text.substring(BG_ACCEPTED_PREFIX.length());
         int nl = rest.indexOf('\n');
         String id = nl < 0 ? rest.trim() : rest.substring(0, nl).trim();
         return id.isEmpty() ? null : id;
@@ -687,6 +798,14 @@ public final class CustomSubAgentRunner {
         return text.length() > max ? text.substring(0, max) + "..." : text;
     }
 
-    private record PendingRun(Future<String> future, int timeoutSec, String name) {
+    private record PendingRun(
+            Future<String> future,
+            int timeoutSec,
+            String name,
+            boolean background,
+            String task,
+            String toolCallId,
+            String parentId
+    ) {
     }
 }

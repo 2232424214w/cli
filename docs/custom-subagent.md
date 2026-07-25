@@ -33,16 +33,18 @@
 
 ## 配置
 
-见 `.env.example`：`BETTERCLI_SUBAGENT_ROUTER_*`、`WEBHOOK_URL`、`SESSIONS_DIR`、`WECHAT_SUBAGENT_ROUTER`、`WECHAT_QUEUE_TIMEOUT_SECONDS`。
+见 `.env.example`：`BETTERCLI_SUBAGENT_ROUTER_*`、`WEBHOOK_URL`、`SESSIONS_DIR`、`WECHAT_SUBAGENT_ROUTER`、`WECHAT_QUEUE_TIMEOUT_SECONDS`、`SUBAGENT_DEFAULT_MODE`。
 
 ## 长任务后台（1024 后续）
 
 | 期 | 内容 | 状态 |
 |----|------|------|
 | A | 微信按 conversationId FIFO 串行 + 排队回执 + 超时踢出 | ✅ |
-| B | 真正后台模式 + 完成通知 + bg-react | 待做 |
+| B | 真正后台模式 + 完成通知 + bg-react | ✅ |
 | C | running_agents_list / terminate_agent / steer_agent | 待做 |
 | D | 文档矩阵 + 测试收口 | 待做 |
+
+后台模式：`run_subagent(..., mode=background)` 或 `BETTERCLI_SUBAGENT_DEFAULT_MODE=background`；微信通道默认 background。完成后写入完成通知并触发 bg-react（写入时间去重）。
 
 ## 实现
 
