@@ -1096,6 +1096,8 @@ public class Main {
                             return answer;
                         };
                     } else {
+                        // 未命中：清空 sticky，避免后续无关消息被旧子 Agent 提示带偏
+                        lastRoutedSubAgent = null;
                         snapshotMode = "react";
                         final String mainTask = effectiveTask;
                         runTask = () -> reactAgent.run(mainTask);
@@ -1105,7 +1107,8 @@ public class Main {
                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
                 String response = runWithCancelSupport(terminal,
                         ui,
-                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
+                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call),
+                        customSubAgentRunner::cancelAllPending);
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                 }
@@ -1417,6 +1420,11 @@ public class Main {
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
+        return runWithCancelSupport(terminal, out, task, null);
+    }
+
+    private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task,
+                                               Runnable onCancel) {
         CancellationToken token = CancellationContext.startRun();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "bettercli-agent-runner");
@@ -1437,6 +1445,12 @@ public class Main {
             while (!future.isDone()) {
                 if (original != null && readEscCancel(terminal)) {
                     token.cancel();
+                    if (onCancel != null) {
+                        try {
+                            onCancel.run();
+                        } catch (Exception ignored) {
+                        }
+                    }
                     future.cancel(true);
                     executor.shutdownNow();
                     return "⏹️ 已请求取消当前任务。";
@@ -1449,10 +1463,22 @@ public class Main {
             }
             return future.get();
         } catch (CancellationException e) {
+            if (onCancel != null) {
+                try {
+                    onCancel.run();
+                } catch (Exception ignored) {
+                }
+            }
             return "⏹️ 已取消当前任务。";
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             token.cancel();
+            if (onCancel != null) {
+                try {
+                    onCancel.run();
+                } catch (Exception ignored) {
+                }
+            }
             future.cancel(true);
             return "⏹️ 已取消当前任务。";
         } catch (ExecutionException e) {

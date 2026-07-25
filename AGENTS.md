@@ -250,7 +250,7 @@ src/main/java/com/bettercli/
 - `run_subagent` 异步占位 + 批次回填；RuntimeContext ThreadLocal 支持同轮并行
 - 路由默认开启（`bettercli.subagent.router.enabled`）；置信度门控（`min.confidence` 默认 0.70）；`@main`/`/main` 强制主 Agent
 - 路由模式 `seedParentHistory` 继承主会话；委托等待时状态栏 `sa:name`/`sa×N`
-- `skills` 白名单、`timeoutSeconds`、`/cancel`、`write_subagent_memory`、审计 JSONL 已交付
+- `skills` 白名单、`timeoutSeconds`、`/cancel`（含 `cancelAllPending` 取消后台 Future）、独立 `SkillContextBuffer`、`write_subagent_memory` 路径围栏、路由 sticky 未命中清空、审计 JSONL 已交付
 - 平台专属（RoleHub / Webhook / HA）不做，见 `docs/custom-subagent.md`
 
 ## 修改时的硬规则

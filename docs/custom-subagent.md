@@ -27,10 +27,13 @@
 
 ## 执行约束（已实现）
 
-- 禁止递归；ThreadLocal 并行安全
+- 禁止递归；ThreadLocal 并行安全；进出时还原 `currentModel`
 - 异步占位 `CUSTOM_SUBAGENT_PENDING:` + `materializeAsyncResults`；等待时提示与状态栏 phase
-- 路由模式：`SubAgent.seedParentHistory` 真正继承主会话近期 user/assistant
-- `/cancel`、超时、MEMORY 写回、Tee 进度、审计 JSONL
+- 路由模式：`SubAgent.seedParentHistory` 继承主会话近期 user/assistant；未命中清空 sticky
+- ESC/`/cancel`：`CancellationContext` + `cancelAllPending()` 中断后台 Future
+- 独立 `SkillContextBuffer`（不与主会话共享）
+- `write_subagent_memory`：仅允许 agents/agents-cache 下的 `MEMORY.md`，拒绝 symlink
+- Tee 进度、审计 JSONL
 
 ## CLI 相对 1024 的裁剪
 

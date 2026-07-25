@@ -205,6 +205,15 @@ public class ToolRegistry {
         this.currentModel = model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
     }
 
+    public String getCurrentProvider() {
+        return currentProvider;
+    }
+
+    /** 当前模型名（小写）；与 {@link #setCurrentModel} 配对，供 Custom SubAgent 进出时还原。 */
+    public String getCurrentModelName() {
+        return currentModel;
+    }
+
     public void setBrowserGuard(BrowserGuard browserGuard) {
         this.browserGuard = browserGuard;
     }
@@ -1042,21 +1051,71 @@ public class ToolRegistry {
             return "write_subagent_memory 失败: 疑似包含密钥/凭证，已拒绝写入";
         }
         try {
-            Path parent = memoryPath.getParent();
+            Path safeTarget = resolveSafeMemoryPath(memoryPath);
+            if (safeTarget == null) {
+                return "write_subagent_memory 失败: MEMORY.md 路径非法或为指向围栏外的符号链接";
+            }
+            Path parent = safeTarget.getParent();
             if (parent != null) {
                 Files.createDirectories(parent);
             }
             String stamp = java.time.LocalDate.now().toString();
-            String block = (Files.exists(memoryPath) && Files.size(memoryPath) > 0 ? "\n" : "")
+            String block = (Files.exists(safeTarget) && Files.size(safeTarget) > 0 ? "\n" : "")
                     + "- [" + stamp + "] " + trimmed + "\n";
-            Files.writeString(memoryPath, block,
+            Files.writeString(safeTarget, block,
                     java.nio.charset.StandardCharsets.UTF_8,
                     java.nio.file.StandardOpenOption.CREATE,
                     java.nio.file.StandardOpenOption.APPEND);
-            return "已追加到 " + memoryPath + "（Custom SubAgent: " + ctx.agentName() + "）";
+            return "已追加到 " + safeTarget + "（Custom SubAgent: " + ctx.agentName() + "）";
         } catch (Exception e) {
             return "write_subagent_memory 失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * MEMORY.md 可在用户/项目 agents 目录下，不走项目 PathGuard；
+     * 但拒绝符号链接逃逸与非 MEMORY.md 文件名。
+     */
+    private Path resolveSafeMemoryPath(Path memoryPath) throws IOException {
+        if (memoryPath == null) {
+            return null;
+        }
+        Path abs = memoryPath.toAbsolutePath().normalize();
+        if (abs.getFileName() == null || !"MEMORY.md".equalsIgnoreCase(abs.getFileName().toString())) {
+            return null;
+        }
+        if (Files.exists(abs) && Files.isSymbolicLink(abs)) {
+            return null;
+        }
+        Path parent = abs.getParent();
+        if (parent == null) {
+            return null;
+        }
+        Path realParent = Files.exists(parent) ? parent.toRealPath() : parent.normalize();
+        if (!isUnderAllowedAgentRoot(realParent)) {
+            return null;
+        }
+        return realParent.resolve("MEMORY.md");
+    }
+
+    private boolean isUnderAllowedAgentRoot(Path realParent) {
+        try {
+            Path home = Path.of(System.getProperty("user.home")).toAbsolutePath().normalize();
+            List<Path> roots = List.of(
+                    home.resolve(".bettercli").resolve("agents"),
+                    home.resolve(".bettercli").resolve("agents-cache"),
+                    Path.of(projectPath).toAbsolutePath().normalize().resolve(".bettercli").resolve("agents")
+            );
+            for (Path root : roots) {
+                Path realRoot = Files.exists(root) ? root.toRealPath() : root.normalize();
+                if (realParent.startsWith(realRoot)) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            return false;
+        }
+        return false;
     }
 
     private static boolean looksSensitive(String text) {

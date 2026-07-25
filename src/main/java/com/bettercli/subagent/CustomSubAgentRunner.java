@@ -129,6 +129,9 @@ public final class CustomSubAgentRunner {
         if (results == null || results.isEmpty()) {
             return results;
         }
+        if (CancellationContext.isCancelled()) {
+            cancelAllPending();
+        }
         List<ToolExecutionResult> out = new ArrayList<>(results.size());
         for (ToolExecutionResult r : results) {
             String text = r.result();
@@ -151,6 +154,20 @@ public final class CustomSubAgentRunner {
                     materialized, r.elapsedMillis(), false, r.imageParts()));
         }
         return out;
+    }
+
+    /** 取消所有尚未 materialize 的异步委托（与 /cancel、ESC 联动）。 */
+    public void cancelAllPending() {
+        for (Map.Entry<String, PendingRun> e : new ArrayList<>(pendingBySession.entrySet())) {
+            PendingRun p = e.getValue();
+            if (p != null && p.future() != null) {
+                p.future().cancel(true);
+            }
+            activeRuns.remove(e.getKey());
+            CustomSubAgentAudit.record("SUBAGENT_CANCELLED",
+                    p == null ? null : p.name(), e.getKey(), null, null);
+        }
+        pendingBySession.clear();
     }
 
     /**
@@ -205,20 +222,9 @@ public final class CustomSubAgentRunner {
         Future<String> future = pool.submit(() -> executeIsolated(
                 def, userMessage.trim(), parentClient, toolRegistry, progressOut,
                 childSessionId, parentId, parentHistory, parentTranscript, true));
+        PendingRun pending = new PendingRun(future, timeoutSec, def.name());
         try {
-            return future.get(timeoutSec, TimeUnit.SECONDS);
-        } catch (TimeoutException te) {
-            future.cancel(true);
-            CustomSubAgentAudit.record("SUBAGENT_TIMEOUT", def.name(), childSessionId, parentId, null);
-            return "❌ Custom SubAgent [" + def.name() + "] 超时（" + timeoutSec + "s） session=" + childSessionId;
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause() == null ? ee : ee.getCause();
-            CustomSubAgentAudit.record("SUBAGENT_ERROR", def.name(), childSessionId, parentId, cause.getMessage());
-            return "❌ Custom SubAgent 失败: " + cause.getMessage();
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            future.cancel(true);
-            return "⏹️ 已取消";
+            return awaitPending(pending, childSessionId);
         } finally {
             activeRuns.remove(childSessionId);
         }
@@ -280,6 +286,8 @@ public final class CustomSubAgentRunner {
                                    boolean directResponder) {
         IN_CUSTOM.set(true);
         CustomSubAgentRuntimeContext prevCtx = toolRegistry.getCustomSubAgentContext();
+        String prevProvider = toolRegistry.getCurrentProvider();
+        String prevModel = toolRegistry.getCurrentModelName();
         try {
             CustomSubAgentRuntimeContext ctx = new CustomSubAgentRuntimeContext(
                     def.name(), def.memoryFilePath(), def.skills());
@@ -301,10 +309,8 @@ public final class CustomSubAgentRunner {
             if (skills != null) {
                 sub.setSkillRegistry(skills);
             }
-            SkillContextBuffer buffer = toolRegistry.getSkillContextBuffer();
-            if (buffer != null) {
-                sub.setSkillContextBuffer(buffer);
-            }
+            // 独立 buffer：禁止与主 Agent 共享，避免并行 drain / 回灌主会话
+            sub.setSkillContextBuffer(new SkillContextBuffer());
 
             // 路由直达：真正 seed 主会话 history（优先于 transcript 文本塞进 task）
             if (directResponder && parentHistory != null && !parentHistory.isEmpty()) {
@@ -379,6 +385,7 @@ public final class CustomSubAgentRunner {
                     : "run_subagent 失败: " + e.getMessage() + " (session=" + childSessionId + ")";
         } finally {
             toolRegistry.setCustomSubAgentContext(prevCtx);
+            toolRegistry.setCurrentModel(prevProvider, prevModel);
             activeRuns.remove(childSessionId);
             IN_CUSTOM.set(false);
             IN_CUSTOM.remove();
@@ -402,21 +409,35 @@ public final class CustomSubAgentRunner {
     }
 
     private String awaitPending(PendingRun pending, String sessionId) {
-        try {
-            return pending.future().get(pending.timeoutSec(), TimeUnit.SECONDS);
-        } catch (TimeoutException te) {
-            pending.future().cancel(true);
-            activeRuns.remove(sessionId);
-            CustomSubAgentAudit.record("SUBAGENT_TIMEOUT", pending.name(), sessionId, null, null);
-            return "run_subagent 失败: 超时（" + pending.timeoutSec() + "s），已中断子 Agent ["
-                    + pending.name() + "] session=" + sessionId;
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause() == null ? ee : ee.getCause();
-            return "run_subagent 失败: " + cause.getMessage() + " (session=" + sessionId + ")";
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            pending.future().cancel(true);
-            return "run_subagent 失败: 用户取消 (session=" + sessionId + ")";
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(pending.timeoutSec());
+        while (true) {
+            if (CancellationContext.isCancelled()) {
+                pending.future().cancel(true);
+                activeRuns.remove(sessionId);
+                CustomSubAgentAudit.record("SUBAGENT_CANCELLED", pending.name(), sessionId, null, null);
+                return "run_subagent 失败: 用户取消 (session=" + sessionId + ")";
+            }
+            long remainMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+            if (remainMs <= 0) {
+                pending.future().cancel(true);
+                activeRuns.remove(sessionId);
+                CustomSubAgentAudit.record("SUBAGENT_TIMEOUT", pending.name(), sessionId, null, null);
+                return "run_subagent 失败: 超时（" + pending.timeoutSec() + "s），已中断子 Agent ["
+                        + pending.name() + "] session=" + sessionId;
+            }
+            try {
+                return pending.future().get(Math.min(500L, remainMs), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException te) {
+                // keep polling
+            } catch (ExecutionException ee) {
+                Throwable cause = ee.getCause() == null ? ee : ee.getCause();
+                return "run_subagent 失败: " + cause.getMessage() + " (session=" + sessionId + ")";
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                pending.future().cancel(true);
+                activeRuns.remove(sessionId);
+                return "run_subagent 失败: 用户取消 (session=" + sessionId + ")";
+            }
         }
     }
 

@@ -188,18 +188,10 @@ public final class CustomSubAgentRouter {
             return resolved == null ? null : new RouteDecision(resolved, confidence);
         }
 
-        // 兼容旧格式：仅 name
+        // 兼容旧格式：整行仅为精确 name（避免说明性句子 contains 误路由）
         String resolved = resolveName(line, agents);
         if (resolved != null) {
             return new RouteDecision(resolved, 0.85);
-        }
-        for (CustomSubAgentDefinition a : agents) {
-            if (line.toLowerCase(Locale.ROOT).contains(a.name().toLowerCase(Locale.ROOT))) {
-                if (line.equalsIgnoreCase(a.name())
-                        || line.matches("(?i).*\\b" + Pattern.quote(a.name()) + "\\b.*")) {
-                    return new RouteDecision(a.name(), 0.75);
-                }
-            }
         }
         return null;
     }
