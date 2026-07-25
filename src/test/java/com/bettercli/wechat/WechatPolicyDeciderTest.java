@@ -40,6 +40,14 @@ class WechatPolicyDeciderTest {
     }
 
     @Test
+    void allowsCustomSubagentTools() {
+        WechatPolicyDecider decider = new WechatPolicyDecider(WechatPolicyConfig.forWorkspace(tempDir));
+        assertTrue(decider.decide("run_subagent", "{\"name\":\"code-reviewer\",\"task\":\"review\"}").allowed());
+        assertTrue(decider.decide("load_skill", "{\"name\":\"x\"}").allowed());
+        assertTrue(decider.decide("write_subagent_memory", "{\"content\":\"note\"}").allowed());
+    }
+
+    @Test
     void deniesToolsNotExplicitlyClassified() {
         WechatPolicyDecider decider = new WechatPolicyDecider(WechatPolicyConfig.forWorkspace(tempDir));
         assertFalse(decider.decide("save_memory", "{\"fact\":\"secret\"}").allowed());

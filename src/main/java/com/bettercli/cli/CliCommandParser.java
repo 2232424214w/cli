@@ -54,6 +54,7 @@ final class CliCommandParser {
         SUBAGENT_STATUS,
         SUBAGENT_CREATE,
         SUBAGENT_TEMPLATES,
+        SUBAGENT_AUDIT,
         CONFIG,
         LANG,
         EXPORT
@@ -324,9 +325,14 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.SKILL_OFF, trimmed.substring(11).trim());
         }
 
-        // Custom Subagent：仅管理（list/reload/status/create/templates），禁止 /subagent <name> <task> 执行
+        // Custom Subagent：仅管理（list/reload/status/create/templates/audit），禁止 /subagent <name> <task> 空格硬指定
+        // /subagent:name … /sa:name … 是消息前缀（方式三），放行给入站路由，不当未知命令
+        if (com.bettercli.subagent.CustomSubAgentRouter.isDirectDesignatePrefix(trimmed)) {
+            return ParsedCommand.none();
+        }
         if (trimmed.equalsIgnoreCase("/subagent") || trimmed.equalsIgnoreCase("/subagent list")
-                || trimmed.equalsIgnoreCase("/sa") || trimmed.equalsIgnoreCase("/sa list")) {
+                || trimmed.equalsIgnoreCase("/sa") || trimmed.equalsIgnoreCase("/sa list")
+                || trimmed.equalsIgnoreCase("/sa-l")) {
             return new ParsedCommand(CommandType.SUBAGENT_LIST, null);
         }
         if (trimmed.equalsIgnoreCase("/subagent reload") || trimmed.equalsIgnoreCase("/sa reload")) {
@@ -338,6 +344,15 @@ final class CliCommandParser {
         }
         if (trimmed.equalsIgnoreCase("/subagent templates") || trimmed.equalsIgnoreCase("/sa templates")) {
             return new ParsedCommand(CommandType.SUBAGENT_TEMPLATES, null);
+        }
+        if (trimmed.equalsIgnoreCase("/subagent audit") || trimmed.equalsIgnoreCase("/sa audit")) {
+            return new ParsedCommand(CommandType.SUBAGENT_AUDIT, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/subagent audit ", 0, 16)) {
+            return new ParsedCommand(CommandType.SUBAGENT_AUDIT, trimmed.substring(16).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/sa audit ", 0, 10)) {
+            return new ParsedCommand(CommandType.SUBAGENT_AUDIT, trimmed.substring(10).trim());
         }
         if (trimmed.regionMatches(true, 0, "/subagent create", 0, 16)) {
             String rest = trimmed.length() > 16 ? trimmed.substring(16).trim() : "";

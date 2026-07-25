@@ -70,6 +70,34 @@ class CustomSubAgentRouterTest {
     }
 
     @Test
+    void detectDirectDesignate() {
+        var d = CustomSubAgentRouter.detectDirectDesignate("/subagent:sql-analyzer 帮我看慢 SQL");
+        assertTrue(d.isPresent());
+        assertEquals("sql-analyzer", d.get().agentName());
+        assertEquals("帮我看慢 SQL", d.get().message());
+
+        var d2 = CustomSubAgentRouter.detectDirectDesignate("/sa:code-reviewer");
+        assertTrue(d2.isPresent());
+        assertEquals("code-reviewer", d2.get().agentName());
+        assertTrue(d2.get().message().isBlank());
+
+        assertTrue(CustomSubAgentRouter.detectDirectDesignate("普通消息").isEmpty());
+        assertTrue(CustomSubAgentRouter.detectDirectDesignate("/subagent list").isEmpty());
+    }
+
+    @Test
+    void resolveIngressPrefersDirectOverRouter() {
+        var ingress = CustomSubAgentRouter.resolveIngress(
+                "/subagent:sql-analyzer 分析",
+                null,
+                List.of(def("sql-analyzer", "slow sql"), def("other", "x")),
+                null);
+        assertEquals(CustomSubAgentRouter.IngressDecision.Kind.DIRECT, ingress.kind());
+        assertEquals("sql-analyzer", ingress.agentName());
+        assertEquals("分析", ingress.effectiveMessage());
+    }
+
+    @Test
     void minConfidenceDefault() {
         // 不依赖外部环境，至少能读到合法区间
         double min = CustomSubAgentRouter.minConfidence();

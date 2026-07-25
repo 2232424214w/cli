@@ -950,6 +950,18 @@ public class Main {
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
+                    case SUBAGENT_AUDIT -> {
+                        int limit = 20;
+                        if (command.payload() != null && !command.payload().isBlank()) {
+                            try {
+                                limit = Integer.parseInt(command.payload().trim());
+                            } catch (NumberFormatException ignored) {
+                                limit = 20;
+                            }
+                        }
+                        ui.println(SubagentCommandHandler.audit(limit));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -1062,25 +1074,28 @@ public class Main {
                         return orchestrator.run(taskInput);
                     };
                 } else {
-                    // 轻量路由：旁路前缀 / 置信度门控 / sticky；命中则跳过主 Agent
-                    com.bettercli.subagent.CustomSubAgentRouter.BypassResult bypass =
-                            com.bettercli.subagent.CustomSubAgentRouter.detectBypass(taskInput);
-                    final String effectiveTask = (bypass.message() == null || bypass.message().isBlank())
-                            ? taskInput : bypass.message();
-                    if (bypass.bypassRouter()) {
+                    // 入站优先级：硬指定 /subagent:name → 路由 LLM → 主 Agent（§4.1）
+                    LlmClient routerClient = com.bettercli.subagent.CustomSubAgentRouter.resolveClient(
+                            llmClient, config);
+                    com.bettercli.subagent.CustomSubAgentRouter.IngressDecision ingress =
+                            com.bettercli.subagent.CustomSubAgentRouter.resolveIngress(
+                                    taskInput, routerClient, customSubAgentRegistry.all(), lastRoutedSubAgent);
+                    if (ingress.clearSticky()) {
                         lastRoutedSubAgent = null;
                     }
-                    java.util.Optional<com.bettercli.subagent.CustomSubAgentRouter.RouteDecision> routed =
-                            java.util.Optional.empty();
-                    if (!bypass.bypassRouter() && !customSubAgentRegistry.all().isEmpty()) {
-                        LlmClient routerClient = com.bettercli.subagent.CustomSubAgentRouter.resolveClient(
-                                llmClient, config);
-                        routed = com.bettercli.subagent.CustomSubAgentRouter.route(
-                                effectiveTask, routerClient, customSubAgentRegistry.all(), lastRoutedSubAgent);
-                    }
-                    if (routed.isPresent()) {
-                        final String routedName = routed.get().agentName();
-                        final double routedConfidence = routed.get().confidence();
+                    final String effectiveTask = ingress.effectiveMessage();
+                    if (ingress.kind() == com.bettercli.subagent.CustomSubAgentRouter.IngressDecision.Kind.DIRECT
+                            || ingress.kind() == com.bettercli.subagent.CustomSubAgentRouter.IngressDecision.Kind.ROUTED) {
+                        final String routedName = ingress.agentName();
+                        final double routedConfidence = ingress.confidence();
+                        final boolean direct = ingress.kind()
+                                == com.bettercli.subagent.CustomSubAgentRouter.IngressDecision.Kind.DIRECT;
+                        if (customSubAgentRegistry.find(routedName) == null) {
+                            lastRoutedSubAgent = null;
+                            ui.println("❌ 未找到子 Agent \"" + routedName + "\"\n"
+                                    + SubagentCommandHandler.list(customSubAgentRegistry));
+                            continue;
+                        }
                         final LlmClient activeClient = llmClient;
                         final com.bettercli.memory.SessionMessageIndexer indexer = sessionMessageIndexer;
                         lastRoutedSubAgent = routedName;
@@ -1093,10 +1108,14 @@ public class Main {
                                 // plain / test path
                             }
                             if (progress != null) {
-                                progress.println(String.format(
-                                        java.util.Locale.ROOT,
-                                        "🧭 路由 → %s (confidence=%.2f)",
-                                        routedName, routedConfidence));
+                                if (direct) {
+                                    progress.println("📌 硬指定 → " + routedName);
+                                } else {
+                                    progress.println(String.format(
+                                            java.util.Locale.ROOT,
+                                            "🧭 路由 → %s (confidence=%.2f)",
+                                            routedName, routedConfidence));
+                                }
                             }
                             String parentId = indexer == null ? null : indexer.getConversationId();
                             List<com.bettercli.llm.LlmClient.Message> history =
@@ -1109,8 +1128,6 @@ public class Main {
                             return answer;
                         };
                     } else {
-                        // 未命中：清空 sticky，避免后续无关消息被旧子 Agent 提示带偏
-                        lastRoutedSubAgent = null;
                         snapshotMode = "react";
                         final String mainTask = effectiveTask;
                         runTask = () -> reactAgent.run(mainTask);
@@ -1949,10 +1966,15 @@ public class Main {
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
-                new SlashCommandHint("/subagent", "/subagent", "查看 Custom SubAgent 列表（仅管理）"),
+                new SlashCommandHint("/subagent", "/subagent", "查看 Custom SubAgent 列表"),
                 new SlashCommandHint("/subagent list", "/subagent list", "查看 Custom SubAgent 列表"),
+                new SlashCommandHint("/sa-l", "/sa-l", "同 /subagent list"),
+                new SlashCommandHint("/subagent create", "/subagent create", "生成 AGENT.md 脚手架"),
+                new SlashCommandHint("/subagent templates", "/subagent templates", "列出脚手架模板"),
                 new SlashCommandHint("/subagent reload", "/subagent reload", "重新扫描 Custom SubAgent 目录"),
                 new SlashCommandHint("/subagent status", "/subagent status", "查看运行中的 Custom SubAgent 委托"),
+                new SlashCommandHint("/sa-st", "/sa-st", "同 /subagent status"),
+                new SlashCommandHint("/subagent audit", "/subagent audit", "查看 Custom SubAgent 审计日志"),
                 new SlashCommandHint("/sa-st", "/sa-st", "查看运行中的 Custom SubAgent 委托"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
                 new SlashCommandHint("/exit", "/exit", "退出 BetterCLI"),

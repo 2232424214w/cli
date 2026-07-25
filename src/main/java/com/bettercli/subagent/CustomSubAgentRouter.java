@@ -32,6 +32,10 @@ public final class CustomSubAgentRouter {
     private static final Pattern BYPASS_PREFIX = Pattern.compile(
             "(?i)^(?:@main\\b|/main\\b|主\\s*agent\\s*[:：]|不路由\\s*[:：]|force[-_]?main\\b)\\s*(.*)$",
             Pattern.DOTALL);
+    /** 文档方式三：消息前缀硬指定（非 /subagent 管理命令）。 */
+    private static final Pattern DIRECT_PREFIX = Pattern.compile(
+            "(?i)^(?:/subagent:|/sa:)([A-Za-z][A-Za-z0-9_-]*)\\s*(.*)$",
+            Pattern.DOTALL);
 
     private CustomSubAgentRouter() {
     }
@@ -47,6 +51,65 @@ public final class CustomSubAgentRouter {
 
     /** 强制主 Agent：剥掉前缀后的用户消息；未旁路时 message 为原文。 */
     public record BypassResult(boolean bypassRouter, String message) {
+    }
+
+    /** 用户指令直接指定（文档方式三）：`/subagent:name` 或 `/sa:name`。 */
+    public record DirectDesignate(String agentName, String message) {
+        public DirectDesignate {
+            if (agentName == null || agentName.isBlank()) {
+                throw new IllegalArgumentException("agentName 不能为空");
+            }
+            if (message == null) {
+                message = "";
+            }
+        }
+    }
+
+    /**
+     * 入站优先级决策（对齐 1024 §4.1）：
+     * 1. 硬指定前缀 → DIRECT
+     * 2. @main 旁路 → MAIN（清空 sticky）
+     * 3. 路由 LLM 命中 → ROUTED
+     * 4. 否则 → MAIN
+     */
+    public record IngressDecision(
+            Kind kind,
+            String agentName,
+            double confidence,
+            String effectiveMessage,
+            boolean clearSticky
+    ) {
+        public enum Kind { DIRECT, ROUTED, MAIN }
+
+        public static IngressDecision main(String message, boolean clearSticky) {
+            return new IngressDecision(Kind.MAIN, null, 0, message == null ? "" : message, clearSticky);
+        }
+
+        public static IngressDecision direct(String agentName, String message) {
+            return new IngressDecision(Kind.DIRECT, agentName, 1.0, message == null ? "" : message, false);
+        }
+
+        public static IngressDecision routed(String agentName, double confidence, String message) {
+            return new IngressDecision(Kind.ROUTED, agentName, confidence, message == null ? "" : message, false);
+        }
+    }
+
+    /** 是否为方式三硬指定前缀（供 CliCommandParser 放行，避免当成未知斜杠命令）。 */
+    public static boolean isDirectDesignatePrefix(String userMessage) {
+        return detectDirectDesignate(userMessage).isPresent();
+    }
+
+    public static Optional<DirectDesignate> detectDirectDesignate(String userMessage) {
+        if (userMessage == null) {
+            return Optional.empty();
+        }
+        Matcher m = DIRECT_PREFIX.matcher(userMessage.trim());
+        if (!m.matches()) {
+            return Optional.empty();
+        }
+        String name = m.group(1).trim();
+        String rest = m.group(2) == null ? "" : m.group(2).trim();
+        return Optional.of(new DirectDesignate(name, rest));
     }
 
     public static boolean isEnabled() {
@@ -159,6 +222,33 @@ public final class CustomSubAgentRouter {
             log.warn("Custom SubAgent router failed, fall through to main Agent: {}", e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * 统一入站决策（CLI / 微信共用）。硬指定时不校验 registry——调用方负责查无并提示列表。
+     */
+    public static IngressDecision resolveIngress(String userMessage, LlmClient client,
+                                                 List<CustomSubAgentDefinition> agents,
+                                                 String stickyHint) {
+        Optional<DirectDesignate> direct = detectDirectDesignate(userMessage);
+        if (direct.isPresent()) {
+            DirectDesignate d = direct.get();
+            String msg = d.message().isBlank() ? "（请根据上下文继续）" : d.message();
+            CustomSubAgentAudit.record("SUBAGENT_DIRECT", d.agentName(), null, null, preview(msg, 100));
+            return IngressDecision.direct(d.agentName(), msg);
+        }
+        BypassResult bypass = detectBypass(userMessage);
+        final String effective = (bypass.message() == null || bypass.message().isBlank())
+                ? (userMessage == null ? "" : userMessage) : bypass.message();
+        if (bypass.bypassRouter()) {
+            return IngressDecision.main(effective, true);
+        }
+        Optional<RouteDecision> routed = route(effective, client, agents, stickyHint);
+        if (routed.isPresent()) {
+            return IngressDecision.routed(routed.get().agentName(), routed.get().confidence(), effective);
+        }
+        // 未命中：清空 sticky，避免后续无关消息被旧子 Agent 提示带偏
+        return IngressDecision.main(effective, true);
     }
 
     /** 兼容旧调用：无 sticky。 */

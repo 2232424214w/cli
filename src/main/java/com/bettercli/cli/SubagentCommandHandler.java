@@ -25,8 +25,8 @@ final class SubagentCommandHandler {
                     + "   /subagent create <name> [--template blank|code-reviewer|researcher] 生成脚手架\n"
                     + "   或手动放置 AGENT.md 到 ~/.bettercli/agents/<name>/ 或 .bettercli/agents/<name>/\n"
                     + "   可选同目录 SOUL.md / IDENTITY.md / MEMORY.md\n"
-                    + "   /subagent templates 查看模板；/subagent reload 重新扫描；/subagent status 查看运行中委托\n"
-                    + "   任务执行只能由主 Agent 语义识别后调用 run_subagent，不能用斜杠指定";
+                    + "   任务触发：run_subagent / 路由 / `/subagent:name …`；管理：list|reload|status|create|templates|audit\n"
+                    + "   禁止空格形式 `/subagent <name> <task>`";
         }
         StringBuilder sb = new StringBuilder();
         sb.append("🧩 Custom Subagents (").append(registry.all().size()).append("):\n");
@@ -50,13 +50,20 @@ final class SubagentCommandHandler {
         }
         sb.append("\n触发方式：① 主 Agent 语义匹配后调用 run_subagent；")
                 .append("② 入站路由 LLM 命中则跳过主 Agent 直达（置信度门控）；")
-                .append("③ 自然语言点名也可。禁止 /subagent <name> <task> 硬指定执行。\n")
+                .append("③ 消息前缀硬指定 `/subagent:name …` 或 `/sa:name …`（不存在则列出可用）。\n")
+                .append("禁止空格形式 `/subagent <name> <task>`（与管理命令冲突，视为未知命令）。\n")
                 .append("强制走主 Agent：消息前加 @main 或 /main\n")
                 .append("  /subagent create <name> [--template ...] [--user|--project] 生成定义\n")
                 .append("  /subagent templates 查看模板\n")
                 .append("  /subagent reload 重新扫描\n")
-                .append("  /subagent status（/sa-st）查看运行中委托");
+                .append("  /subagent status（/sa-st）查看运行中委托\n")
+                .append("  /subagent audit [n] 查看最近审计\n")
+                .append("  /sa-l 同 list");
         return sb.toString();
+    }
+
+    static String audit(int limit) {
+        return com.bettercli.subagent.CustomSubAgentAudit.formatTail(limit);
     }
 
     static String status(CustomSubAgentRunner runner) {

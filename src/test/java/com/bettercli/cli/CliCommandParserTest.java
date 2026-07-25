@@ -528,11 +528,15 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent list").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/sa").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/sa-l").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/subagent reload").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/sa reload").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/subagent status").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/sa-st").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_TEMPLATES, CliCommandParser.parse("/subagent templates").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_AUDIT, CliCommandParser.parse("/subagent audit").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_AUDIT, CliCommandParser.parse("/subagent audit 50").type());
+        assertEquals("50", CliCommandParser.parse("/subagent audit 50").payload());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE, CliCommandParser.parse("/subagent create").type());
         assertEquals("", CliCommandParser.parse("/subagent create").payload());
         CliCommandParser.ParsedCommand create = CliCommandParser.parse(
@@ -544,8 +548,17 @@ class CliCommandParserTest {
     }
 
     @Test
+    void subagentColonPrefixIsNotUnknownCommand() {
+        // 方式三：/subagent:name 放行给入站路由，不当未知斜杠命令
+        assertEquals(CliCommandParser.CommandType.NONE,
+                CliCommandParser.parse("/subagent:code-reviewer 审查这段").type());
+        assertEquals(CliCommandParser.CommandType.NONE,
+                CliCommandParser.parse("/sa:sql-analyzer 看慢查询").type());
+    }
+
+    @Test
     void subagentNameTaskIsNotAnExecutionCommand() {
-        // 禁止斜杠硬指定执行：/subagent foo bar 视为未知命令，走主 Agent 语义路径
+        // 禁止空格硬指定：/subagent foo bar 视为未知命令
         CliCommandParser.ParsedCommand cmd = CliCommandParser.parse("/subagent code-reviewer 审查这段代码");
         assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, cmd.type());
     }
