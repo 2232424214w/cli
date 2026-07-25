@@ -958,6 +958,31 @@ public class Main {
                         ui.println(SubagentCommandHandler.show(customSubAgentRegistry, command.payload()));
                         continue;
                     }
+                    case SUBAGENT_SESSIONS -> {
+                        ui.println(SubagentCommandHandler.sessions(customSubAgentRunner, command.payload()));
+                        continue;
+                    }
+                    case SUBAGENT_RESUME -> {
+                        renderer.beginTurn();
+                        PrintStream progress = null;
+                        try {
+                            progress = renderer.stream();
+                        } catch (Exception ignored) {
+                        }
+                        String parentId = sessionMessageIndexer == null
+                                ? null : sessionMessageIndexer.getConversationId();
+                        String answer = customSubAgentRunner.resume(
+                                command.payload(), llmClient, reactAgent.getToolRegistry(),
+                                progress, parentId);
+                        reactAgent.recordExternalTurn(
+                                "续跑 Custom SubAgent " + (command.payload() == null ? "" : command.payload()),
+                                answer,
+                                null);
+                        ui.println(answer);
+                        ui.println();
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -1972,6 +1997,8 @@ public class Main {
                 new SlashCommandHint("/sa-st", "/sa-st", "同 /subagent status"),
                 new SlashCommandHint("/subagent audit", "/subagent audit", "查看 Custom SubAgent 审计日志"),
                 new SlashCommandHint("/subagent show", "/subagent show", "查看某个 Custom SubAgent 定义"),
+                new SlashCommandHint("/subagent sessions", "/subagent sessions", "列出落盘会话"),
+                new SlashCommandHint("/subagent resume", "/subagent resume", "从落盘会话续跑"),
                 new SlashCommandHint("/sa-st", "/sa-st", "查看运行中的 Custom SubAgent 委托"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
                 new SlashCommandHint("/exit", "/exit", "退出 BetterCLI"),

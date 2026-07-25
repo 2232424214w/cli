@@ -52,6 +52,7 @@ public final class CustomSubAgentRunner {
     private final CustomSubAgentRegistry registry;
     private final Map<String, CustomSubAgentRunStatus> activeRuns = new ConcurrentHashMap<>();
     private final Map<String, PendingRun> pendingBySession = new ConcurrentHashMap<>();
+    private final CustomSubAgentSessionStore sessionStore;
     private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "custom-subagent");
         t.setDaemon(true);
@@ -59,7 +60,16 @@ public final class CustomSubAgentRunner {
     });
 
     public CustomSubAgentRunner(CustomSubAgentRegistry registry) {
+        this(registry, CustomSubAgentSessionStore.defaultStore());
+    }
+
+    public CustomSubAgentRunner(CustomSubAgentRegistry registry, CustomSubAgentSessionStore sessionStore) {
         this.registry = registry;
+        this.sessionStore = sessionStore == null ? CustomSubAgentSessionStore.defaultStore() : sessionStore;
+    }
+
+    public CustomSubAgentSessionStore sessionStore() {
+        return sessionStore;
     }
 
     public CustomSubAgentRegistry registry() {
@@ -312,6 +322,10 @@ public final class CustomSubAgentRunner {
             // 独立 buffer：禁止与主 Agent 共享，避免并行 drain / 回灌主会话
             sub.setSkillContextBuffer(new SkillContextBuffer());
 
+            String mode = directResponder ? "routed" : "delegate";
+            sessionStore.start(childSessionId, def.name(), parentId, task, mode);
+            sub.setTurnCheckpointListener(() -> sessionStore.checkpoint(childSessionId, sub.snapshotHistory()));
+
             // 路由直达：真正 seed 主会话 history（优先于 transcript 文本塞进 task）
             if (directResponder && parentHistory != null && !parentHistory.isEmpty()) {
                 sub.seedParentHistory(parentHistory, 12);
@@ -335,6 +349,8 @@ public final class CustomSubAgentRunner {
 
             AgentMessage result = sub.execute(AgentMessage.task("orchestrator", taskPayload), out);
             if (CancellationContext.isCancelled()) {
+                sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.CANCELLED,
+                        null, sub.snapshotHistory());
                 CustomSubAgentAudit.record("SUBAGENT_CANCELLED", def.name(), childSessionId, parentId, null);
                 return directResponder
                         ? "⏹️ 已取消"
@@ -344,9 +360,13 @@ public final class CustomSubAgentRunner {
             String content = result.content() == null ? "" : result.content().trim();
             if (directResponder) {
                 if (result.type() == AgentMessage.Type.ERROR) {
+                    sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.ERROR,
+                            content, sub.snapshotHistory());
                     CustomSubAgentAudit.record("SUBAGENT_ERROR", def.name(), childSessionId, parentId, content);
                     return "❌ [" + def.name() + "] " + content;
                 }
+                sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.DONE,
+                        content, sub.snapshotHistory());
                 CustomSubAgentAudit.record("SUBAGENT_DONE", def.name(), childSessionId, parentId, "OK");
                 log.info("Custom SubAgent done name={} childSessionId={} status=OK direct=true",
                         def.name(), childSessionId);
@@ -361,6 +381,8 @@ public final class CustomSubAgentRunner {
             if (result.type() == AgentMessage.Type.ERROR) {
                 sb.append("状态: ERROR\n");
                 sb.append(content);
+                sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.ERROR,
+                        content, sub.snapshotHistory());
                 CustomSubAgentAudit.record("SUBAGENT_ERROR", def.name(), childSessionId, parentId, content);
             } else {
                 sb.append("状态: OK\n");
@@ -368,6 +390,8 @@ public final class CustomSubAgentRunner {
                     sb.append(envelope.oneLineSummary()).append('\n');
                 }
                 sb.append(content);
+                sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.DONE,
+                        content, sub.snapshotHistory());
                 CustomSubAgentAudit.record("SUBAGENT_DONE", def.name(), childSessionId, parentId, "OK");
             }
             String logs = buf.toString(StandardCharsets.UTF_8);
@@ -379,6 +403,8 @@ public final class CustomSubAgentRunner {
             return sb.toString();
         } catch (Exception e) {
             log.error("Custom SubAgent [{}] failed session={}", def.name(), childSessionId, e);
+            sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.ERROR,
+                    e.getMessage(), List.of());
             CustomSubAgentAudit.record("SUBAGENT_ERROR", def.name(), childSessionId, parentId, e.getMessage());
             return directResponder
                     ? "❌ Custom SubAgent 失败: " + e.getMessage()
@@ -414,6 +440,7 @@ public final class CustomSubAgentRunner {
             if (CancellationContext.isCancelled()) {
                 pending.future().cancel(true);
                 activeRuns.remove(sessionId);
+                sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
                 CustomSubAgentAudit.record("SUBAGENT_CANCELLED", pending.name(), sessionId, null, null);
                 return "run_subagent 失败: 用户取消 (session=" + sessionId + ")";
             }
@@ -421,6 +448,7 @@ public final class CustomSubAgentRunner {
             if (remainMs <= 0) {
                 pending.future().cancel(true);
                 activeRuns.remove(sessionId);
+                sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.TIMEOUT, null, List.of());
                 CustomSubAgentAudit.record("SUBAGENT_TIMEOUT", pending.name(), sessionId, null, null);
                 return "run_subagent 失败: 超时（" + pending.timeoutSec() + "s），已中断子 Agent ["
                         + pending.name() + "] session=" + sessionId;
@@ -463,7 +491,22 @@ public final class CustomSubAgentRunner {
             return parentClient;
         }
         try {
-            LlmClient created = LlmClientFactory.create(def.model().trim(), BetterCliConfig.load());
+            String raw = def.model().trim();
+            String provider = raw;
+            String modelOverride = null;
+            int slash = raw.indexOf('/');
+            if (slash > 0 && slash < raw.length() - 1) {
+                provider = raw.substring(0, slash).trim();
+                modelOverride = raw.substring(slash + 1).trim();
+            } else {
+                int colon = raw.indexOf(':');
+                // provider:model（避免误伤 windows 盘符）
+                if (colon > 1 && colon < raw.length() - 1 && !raw.substring(0, colon).contains("\\")) {
+                    provider = raw.substring(0, colon).trim();
+                    modelOverride = raw.substring(colon + 1).trim();
+                }
+            }
+            LlmClient created = LlmClientFactory.create(provider, BetterCliConfig.load(), modelOverride);
             if (created != null) {
                 return created;
             }
@@ -472,6 +515,93 @@ public final class CustomSubAgentRunner {
             log.warn("Custom SubAgent [{}] model resolve failed: {}", def.name(), e.getMessage());
         }
         return parentClient;
+    }
+
+    /**
+     * 从落盘会话续跑（CLI 轻量 HA）。恢复历史后追加一条继续指令。
+     */
+    public String resume(String sessionIdOrBlank, LlmClient parentClient, ToolRegistry toolRegistry,
+                         PrintStream progressOut, String parentConversationId) {
+        CustomSubAgentSessionStore.SessionRecord record = (sessionIdOrBlank == null || sessionIdOrBlank.isBlank())
+                ? sessionStore.latestResumable()
+                : sessionStore.load(sessionIdOrBlank.trim());
+        if (record == null) {
+            return "❌ 没有可续跑的 Custom SubAgent 会话。用 /subagent sessions 查看。";
+        }
+        if (registry == null) {
+            return "❌ Custom SubAgent 注册表未初始化";
+        }
+        CustomSubAgentDefinition def = registry.find(record.agentName());
+        if (def == null) {
+            return "❌ 会话 agent=\"" + record.agentName() + "\" 定义已不存在\n" + availableList();
+        }
+        String continueTask = "【续跑】上一会话 " + record.sessionId()
+                + " 状态=" + record.status()
+                + "。请基于已有对话历史继续完成原任务，不要重复已完成步骤。\n"
+                + "原任务：" + (record.task() == null ? "" : record.task());
+
+        String childSessionId = newSessionId(def.name());
+        String parentId = normalizeParentId(parentConversationId);
+        int timeoutSec = def.resolveTimeoutSeconds();
+        activeRuns.put(childSessionId, new CustomSubAgentRunStatus(
+                def.name(), childSessionId, parentId, Instant.now(), preview(continueTask, 80)));
+        CustomSubAgentAudit.record("SUBAGENT_RESUME", def.name(), childSessionId, parentId,
+                "from=" + record.sessionId());
+
+        Future<String> future = pool.submit(() -> {
+            IN_CUSTOM.set(true);
+            CustomSubAgentRuntimeContext prevCtx = toolRegistry.getCustomSubAgentContext();
+            String prevProvider = toolRegistry.getCurrentProvider();
+            String prevModel = toolRegistry.getCurrentModelName();
+            try {
+                toolRegistry.setCustomSubAgentContext(new CustomSubAgentRuntimeContext(
+                        def.name(), def.memoryFilePath(), def.skills()));
+                LlmClient client = resolveClient(def, parentClient);
+                Set<String> tools = def.resolveEffectiveTools(toolRegistry.registeredToolNames());
+                Set<String> skillWl = def.skills().isEmpty() ? null : new HashSet<>(def.skills());
+                SubAgent sub = SubAgent.forCustom(
+                        def.name(), client, toolRegistry,
+                        def.composeSystemPromptCore(), def.memoryMd(),
+                        tools, def.maxTurns(), skillWl);
+                SkillRegistry skills = toolRegistry.getSkillRegistry();
+                if (skills != null) {
+                    sub.setSkillRegistry(skills);
+                }
+                sub.setSkillContextBuffer(new SkillContextBuffer());
+                sub.restoreHistory(record.messages());
+                sessionStore.start(childSessionId, def.name(), parentId, continueTask, "resume");
+                sub.setTurnCheckpointListener(() ->
+                        sessionStore.checkpoint(childSessionId, sub.snapshotHistory()));
+                if (progressOut != null) {
+                    progressOut.println("♻️ 续跑 Custom SubAgent [" + def.name() + "] from="
+                            + record.sessionId() + " → " + childSessionId);
+                }
+                AgentMessage result = sub.execute(AgentMessage.task("orchestrator", continueTask), progressOut);
+                String content = result.content() == null ? "" : result.content().trim();
+                if (result.type() == AgentMessage.Type.ERROR) {
+                    sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.ERROR,
+                            content, sub.snapshotHistory());
+                    return "❌ 续跑失败: " + content;
+                }
+                sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.DONE,
+                        content, sub.snapshotHistory());
+                // 标记旧会话已由续跑接管
+                sessionStore.finish(record.sessionId(), CustomSubAgentSessionStore.Status.DONE,
+                        "resumed-by " + childSessionId, record.messages());
+                return content;
+            } finally {
+                toolRegistry.setCustomSubAgentContext(prevCtx);
+                toolRegistry.setCurrentModel(prevProvider, prevModel);
+                activeRuns.remove(childSessionId);
+                IN_CUSTOM.set(false);
+                IN_CUSTOM.remove();
+            }
+        });
+        try {
+            return awaitPending(new PendingRun(future, timeoutSec, def.name()), childSessionId);
+        } finally {
+            activeRuns.remove(childSessionId);
+        }
     }
 
     private String availableList() {

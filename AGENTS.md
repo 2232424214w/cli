@@ -245,9 +245,11 @@ src/main/java/com/bettercli/
 ### Custom Subagent
 
 - 与 `/team` Multi-Agent 并存、不融合；任务由主模型语义调用 `run_subagent`、轻量路由 LLM、或消息前缀 `/subagent:name` 触发
-- `/subagent list|reload|status|create|templates|audit|show` 与 `/sa-l` `/sa-st` 仅管理；禁止空格 `/subagent name task`
-- `/subagent create` 生成脚手架；`from`/`extends` 本地继承基座（对标 platform 复用）；内置 code-reviewer / researcher
-- 路由/硬指定回复写入主会话时标注 `[via:name]`；可选 Webhook；微信硬指定可用
+- `/subagent list|reload|status|create|templates|audit|show|sessions|resume` 与 `/sa-l` `/sa-st` 仅管理；禁止空格 `/subagent name task`
+- `/subagent create` 脚手架；`from`/`extends` 本地继承；内置 code-reviewer / researcher
+- 轻量 HA：会话落盘 `~/.bettercli/subagent-sessions/`，`/subagent sessions` / `resume`
+- 路由/硬指定回复标注 `[via:name]`；可选 Webhook；微信硬指定可用（路由默认关）
+- 对齐矩阵见 `docs/custom-subagent.md`；RoleHub / belongPaas 不做
 
 ## 修改时的硬规则
 
@@ -295,7 +297,7 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
-| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CliCommandParserTest` |
+| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CliCommandParserTest` |
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent reviewer fail-safe | `mvn test -Dtest=ReviewerFailSafeIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |

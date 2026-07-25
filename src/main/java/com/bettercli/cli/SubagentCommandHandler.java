@@ -113,6 +113,20 @@ final class SubagentCommandHandler {
         return sb.toString();
     }
 
+    static String sessions(CustomSubAgentRunner runner, String payload) {
+        int limit = 20;
+        if (payload != null && !payload.isBlank()) {
+            try {
+                limit = Integer.parseInt(payload.trim());
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (runner == null) {
+            return "🧩 Custom SubAgent 运行态: 未初始化";
+        }
+        return runner.sessionStore().formatList(limit);
+    }
+
     static String audit(int limit) {
         return com.bettercli.subagent.CustomSubAgentAudit.formatTail(limit);
     }

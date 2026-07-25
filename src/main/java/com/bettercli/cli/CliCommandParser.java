@@ -56,6 +56,8 @@ final class CliCommandParser {
         SUBAGENT_TEMPLATES,
         SUBAGENT_AUDIT,
         SUBAGENT_SHOW,
+        SUBAGENT_SESSIONS,
+        SUBAGENT_RESUME,
         CONFIG,
         LANG,
         EXPORT
@@ -363,6 +365,21 @@ final class CliCommandParser {
         }
         if (trimmed.equalsIgnoreCase("/subagent show") || trimmed.equalsIgnoreCase("/sa show")) {
             return new ParsedCommand(CommandType.SUBAGENT_SHOW, "");
+        }
+        if (trimmed.equalsIgnoreCase("/subagent sessions") || trimmed.equalsIgnoreCase("/sa sessions")) {
+            return new ParsedCommand(CommandType.SUBAGENT_SESSIONS, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/subagent sessions ", 0, 18)) {
+            return new ParsedCommand(CommandType.SUBAGENT_SESSIONS, trimmed.substring(18).trim());
+        }
+        if (trimmed.equalsIgnoreCase("/subagent resume") || trimmed.equalsIgnoreCase("/sa resume")) {
+            return new ParsedCommand(CommandType.SUBAGENT_RESUME, "");
+        }
+        if (trimmed.regionMatches(true, 0, "/subagent resume ", 0, 17)) {
+            return new ParsedCommand(CommandType.SUBAGENT_RESUME, trimmed.substring(17).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/sa resume ", 0, 11)) {
+            return new ParsedCommand(CommandType.SUBAGENT_RESUME, trimmed.substring(11).trim());
         }
         if (trimmed.regionMatches(true, 0, "/subagent create", 0, 16)) {
             String rest = trimmed.length() > 16 ? trimmed.substring(16).trim() : "";

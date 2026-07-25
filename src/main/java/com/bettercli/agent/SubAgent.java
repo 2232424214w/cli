@@ -68,6 +68,7 @@ public class SubAgent implements Worker {
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private SubAgentResult lastResult;
+    private volatile Runnable turnCheckpointListener;
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this(name, role, llmClient, toolRegistry, null);
@@ -376,6 +377,7 @@ public class SubAgent implements Worker {
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);
+                    fireTurnCheckpoint();
                     continue;
                 }
 
@@ -385,6 +387,7 @@ public class SubAgent implements Worker {
                 streamRenderer.finish();
 
                 storeLastResult(response.content(), false, null, budget, false);
+                fireTurnCheckpoint();
                 return AgentMessage.result(name, role, response.content());
 
             } catch (IOException e) {
@@ -528,6 +531,47 @@ public class SubAgent implements Worker {
         LlmClient.Message systemMsg = conversationHistory.get(0);
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
+    }
+
+    /** 当前对话快照（含 system），供 Custom SubAgent 会话落盘 / 续跑。 */
+    public List<LlmClient.Message> snapshotHistory() {
+        return List.copyOf(conversationHistory);
+    }
+
+    /**
+     * 用已保存的历史覆盖当前对话（保留/刷新本 Agent 的 system prompt 为第 0 条）。
+     * 跳过快照里的旧 system，避免串 prompt。
+     */
+    public void restoreHistory(List<LlmClient.Message> saved) {
+        LlmClient.Message systemMsg = LlmClient.Message.system(getSystemPrompt());
+        conversationHistory.clear();
+        conversationHistory.add(systemMsg);
+        if (saved == null || saved.isEmpty()) {
+            return;
+        }
+        for (LlmClient.Message m : saved) {
+            if (m == null || "system".equalsIgnoreCase(m.role())) {
+                continue;
+            }
+            conversationHistory.add(m);
+        }
+    }
+
+    /** 每轮工具批次回填后或即将结束时回调（Custom HA 落盘用）；失败忽略。 */
+    public void setTurnCheckpointListener(Runnable listener) {
+        this.turnCheckpointListener = listener;
+    }
+
+    private void fireTurnCheckpoint() {
+        Runnable listener = turnCheckpointListener;
+        if (listener == null) {
+            return;
+        }
+        try {
+            listener.run();
+        } catch (Exception e) {
+            log.debug("[{}] turn checkpoint failed: {}", name, e.getMessage());
+        }
     }
 
     /**

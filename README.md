@@ -783,6 +783,8 @@ I
 - `/subagent status` / `/sa-st` - 查看运行中的 Custom SubAgent 委托
 - `/subagent audit [n]` - 查看最近审计 JSONL
 - `/subagent show <name>` - 查看某个 SubAgent 定义详情
+- `/subagent sessions [n]` - 列出落盘会话（轻量 HA）
+- `/subagent resume [sessionId]` - 从落盘会话续跑
 - 任务硬指定（消息前缀，非管理命令）：`/subagent:name …` 或 `/sa:name …`
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）

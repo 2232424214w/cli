@@ -22,7 +22,8 @@
 | Webhook `SUBAGENT_*` | ✅ 轻量 | `BETTERCLI_SUBAGENT_WEBHOOK_URL`，5s fail-open |
 | 脚手架 + 内置样例 | ✅ | create/templates；builtin `code-reviewer` / `researcher` |
 | 微信通道 | ✅ | 硬指定始终可用；路由默认关 |
-| RoleHub / belongPaas / 云端 HA | ❌ | 平台专属；CLI 不做崩溃续跑 |
+| 轻量 HA 续跑 | ✅ | 会话落盘 `~/.bettercli/subagent-sessions/`；`/subagent sessions` / `resume` |
+| RoleHub / belongPaas | ❌ | 平台专属 |
 
 ## 触发原则（入站优先级 = 文档 §4.1）
 
@@ -30,7 +31,18 @@
 2. 路由 LLM → 命中则直达  
 3. 主 Agent（可再 `run_subagent`）
 
-管理命令：`list` / `reload` / `status` / `create` / `templates` / `audit` / `show`；别名 `/sa-l` `/sa-st`。
+管理命令：`list` / `reload` / `status` / `create` / `templates` / `audit` / `show` / `sessions` / `resume`；别名 `/sa-l` `/sa-st`。
+
+`model` 支持 `provider`、`provider/model` 或 `provider:model`（如 `glm/glm-4-flash`）。
+
+## 轻量 HA
+
+每轮工具后把对话 checkpoint 到 `~/.bettercli/subagent-sessions/<sessionId>.json`。
+
+```text
+/subagent sessions [n]
+/subagent resume [sessionId]   # 省略则取最近可恢复会话
+```
 
 ## 定义与继承
 
