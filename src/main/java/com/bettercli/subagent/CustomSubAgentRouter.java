@@ -1,6 +1,8 @@
 package com.bettercli.subagent;
 
+import com.bettercli.config.BetterCliConfig;
 import com.bettercli.llm.LlmClient;
+import com.bettercli.llm.LlmClientFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,6 +20,7 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>开关 {@code bettercli.subagent.router.enabled} / {@code BETTERCLI_SUBAGENT_ROUTER_ENABLED}</li>
  *   <li>最低置信度 {@code bettercli.subagent.router.min.confidence}（默认 0.70）</li>
+ *   <li>可选专用模型 {@code bettercli.subagent.router.provider} / {@code .model}（未配或建失败回退主模型）</li>
  *   <li>用户前缀强制主 Agent：{@code @main} / {@code /main} / {@code 主agent:} 等</li>
  * </ul>
  */
@@ -52,6 +55,31 @@ public final class CustomSubAgentRouter {
             return true;
         }
         return !"false".equalsIgnoreCase(raw.trim()) && !"0".equals(raw.trim());
+    }
+
+    /**
+     * 解析路由用 LLM：可配专用 provider/model 省成本；未配或创建失败则回退 {@code fallback}。
+     */
+    public static LlmClient resolveClient(LlmClient fallback, BetterCliConfig config) {
+        if (config == null) {
+            return fallback;
+        }
+        String provider = firstConfig("bettercli.subagent.router.provider",
+                "BETTERCLI_SUBAGENT_ROUTER_PROVIDER");
+        if (provider == null || provider.isBlank()) {
+            return fallback;
+        }
+        String model = firstConfig("bettercli.subagent.router.model",
+                "BETTERCLI_SUBAGENT_ROUTER_MODEL");
+        LlmClient client = LlmClientFactory.create(provider.trim(), config,
+                model == null || model.isBlank() ? null : model.trim());
+        if (client == null) {
+            log.warn("Custom SubAgent router provider={} 不可用，回退主模型", provider.trim());
+            return fallback;
+        }
+        log.debug("Custom SubAgent router using provider={} model={}",
+                client.getProviderName(), client.getModelName());
+        return client;
     }
 
     /** 默认 0.70；非法配置回退默认。 */

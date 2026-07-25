@@ -1,5 +1,6 @@
 package com.bettercli.subagent;
 
+import com.bettercli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -73,6 +74,34 @@ class CustomSubAgentRouterTest {
         // 不依赖外部环境，至少能读到合法区间
         double min = CustomSubAgentRouter.minConfidence();
         assertTrue(min >= 0 && min <= 1);
+    }
+
+    @Test
+    void resolveClientFallsBackWhenProviderUnset() {
+        LlmClient fallback = new LlmClient() {
+            @Override
+            public ChatResponse chat(java.util.List<Message> messages, java.util.List<Tool> tools) {
+                return null;
+            }
+
+            @Override
+            public ChatResponse chat(java.util.List<Message> messages, java.util.List<Tool> tools,
+                                     StreamListener listener) {
+                return null;
+            }
+
+            @Override
+            public String getModelName() {
+                return "fallback-model";
+            }
+
+            @Override
+            public String getProviderName() {
+                return "fallback";
+            }
+        };
+        assertSame(fallback, CustomSubAgentRouter.resolveClient(fallback, new com.bettercli.config.BetterCliConfig()));
+        assertSame(fallback, CustomSubAgentRouter.resolveClient(fallback, null));
     }
 
     private static CustomSubAgentDefinition def(String name, String desc) {

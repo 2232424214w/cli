@@ -159,7 +159,7 @@ mvn test -DskipTests=false
 
 ### Custom Subagent（与 Multi-Agent 独立）
 
-用户/项目用 `AGENT.md` 定义专属子 Agent（独立 prompt、工具白名单、可选模型与 maxTurns）。主 ReAct 将索引注入 system prompt，经**语义识别**后调用 `run_subagent`（异步占位、可并行）；另有默认开启的**路由 LLM**，命中则跳过主 Agent。自然语言点名亦可。禁止 `/subagent <name> <task>` 硬指定执行。管理：`/subagent list` / `/subagent reload` / `/subagent status`。目录：`~/.bettercli/agents/`、`.bettercli/agents/`。详见 `docs/custom-subagent.md`。
+用户/项目用 `AGENT.md` 定义专属子 Agent（独立 prompt、工具白名单、可选模型与 maxTurns）。主 ReAct 将索引注入 system prompt，经**语义识别**后调用 `run_subagent`（异步占位、可并行）；另有默认开启的**路由 LLM**（可配专用小模型），命中则跳过主 Agent。自然语言点名亦可。禁止 `/subagent <name> <task>` 硬指定执行。管理：`/subagent list` / `reload` / `status` / `create` / `templates`。目录：`~/.bettercli/agents/`、`.bettercli/agents/`。详见 `docs/custom-subagent.md`。
 
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
@@ -777,6 +777,8 @@ I
 - `/init` - 生成精简项目级记忆 `BETTER.md`；已存在时不覆盖，`/init --force` 可重写
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.bettercli/exports/session-*.md`
 - `/subagent` / `/subagent list` - 查看已加载 Custom SubAgent（仅管理；任务须由主 Agent 语义调用 `run_subagent`）
+- `/subagent create <name> [--project|--user] [--template blank|code-reviewer|researcher] [--force]` - 生成 AGENT.md 脚手架
+- `/subagent templates` - 列出脚手架模板
 - `/subagent reload` - 重新扫描 Custom SubAgent 目录
 - `/subagent status` / `/sa-st` - 查看运行中的 Custom SubAgent 委托
 - `/index [路径]` - 索引代码库（默认当前目录）

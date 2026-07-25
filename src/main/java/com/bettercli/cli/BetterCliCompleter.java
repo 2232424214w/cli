@@ -209,8 +209,28 @@ final class BetterCliCompleter implements Completer {
             addMatching(candidates, "Custom SubAgent", payload,
                     option("list", "查看 Custom SubAgent 列表"),
                     option("reload", "重新扫描 Custom SubAgent 目录"),
-                    option("status", "查看运行中委托"));
+                    option("status", "查看运行中委托"),
+                    option("create", "生成 AGENT.md 脚手架"),
+                    option("templates", "列出脚手架模板"));
             return true;
+        }
+        if (parts.length >= 1 && "create".equalsIgnoreCase(parts[0])) {
+            if (parts.length == 1 && payload.endsWith(" ")) {
+                addMatching(candidates, "create 选项", "",
+                        option("--project", "写入项目 .bettercli/agents（默认）"),
+                        option("--user", "写入 ~/.bettercli/agents"),
+                        option("--template", "指定模板"),
+                        option("--force", "覆盖已有 AGENT.md"));
+                return true;
+            }
+            if (parts.length >= 2 && ("--template".equalsIgnoreCase(parts[parts.length - 1])
+                    || "-t".equalsIgnoreCase(parts[parts.length - 1])) && payload.endsWith(" ")) {
+                addMatching(candidates, "模板", "",
+                        option("blank", "空白模板"),
+                        option("code-reviewer", "只读审查"),
+                        option("researcher", "调研（只读+联网）"));
+                return true;
+            }
         }
         return true;
     }

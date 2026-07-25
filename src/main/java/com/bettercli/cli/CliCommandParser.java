@@ -52,6 +52,8 @@ final class CliCommandParser {
         SUBAGENT_LIST,
         SUBAGENT_RELOAD,
         SUBAGENT_STATUS,
+        SUBAGENT_CREATE,
+        SUBAGENT_TEMPLATES,
         CONFIG,
         LANG,
         EXPORT
@@ -322,7 +324,7 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.SKILL_OFF, trimmed.substring(11).trim());
         }
 
-        // Custom Subagent：仅管理（list/reload），禁止 /subagent <name> <task> 执行
+        // Custom Subagent：仅管理（list/reload/status/create/templates），禁止 /subagent <name> <task> 执行
         if (trimmed.equalsIgnoreCase("/subagent") || trimmed.equalsIgnoreCase("/subagent list")
                 || trimmed.equalsIgnoreCase("/sa") || trimmed.equalsIgnoreCase("/sa list")) {
             return new ParsedCommand(CommandType.SUBAGENT_LIST, null);
@@ -333,6 +335,17 @@ final class CliCommandParser {
         if (trimmed.equalsIgnoreCase("/subagent status") || trimmed.equalsIgnoreCase("/sa status")
                 || trimmed.equalsIgnoreCase("/sa-st")) {
             return new ParsedCommand(CommandType.SUBAGENT_STATUS, null);
+        }
+        if (trimmed.equalsIgnoreCase("/subagent templates") || trimmed.equalsIgnoreCase("/sa templates")) {
+            return new ParsedCommand(CommandType.SUBAGENT_TEMPLATES, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/subagent create", 0, 16)) {
+            String rest = trimmed.length() > 16 ? trimmed.substring(16).trim() : "";
+            return new ParsedCommand(CommandType.SUBAGENT_CREATE, rest);
+        }
+        if (trimmed.regionMatches(true, 0, "/sa create", 0, 10)) {
+            String rest = trimmed.length() > 10 ? trimmed.substring(10).trim() : "";
+            return new ParsedCommand(CommandType.SUBAGENT_CREATE, rest);
         }
 
         if (trimmed.equalsIgnoreCase("/export")) {

@@ -939,6 +939,17 @@ public class Main {
                         ui.println(SubagentCommandHandler.status(customSubAgentRunner));
                         continue;
                     }
+                    case SUBAGENT_TEMPLATES -> {
+                        ui.println(SubagentCommandHandler.templates());
+                        continue;
+                    }
+                    case SUBAGENT_CREATE -> {
+                        ui.println(SubagentCommandHandler.create(
+                                command.payload(), userAgentsDir, projectAgentsDir, customSubAgentRegistry));
+                        reactAgent.setCustomSubAgentRunner(customSubAgentRunner);
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -1062,8 +1073,10 @@ public class Main {
                     java.util.Optional<com.bettercli.subagent.CustomSubAgentRouter.RouteDecision> routed =
                             java.util.Optional.empty();
                     if (!bypass.bypassRouter() && !customSubAgentRegistry.all().isEmpty()) {
+                        LlmClient routerClient = com.bettercli.subagent.CustomSubAgentRouter.resolveClient(
+                                llmClient, config);
                         routed = com.bettercli.subagent.CustomSubAgentRouter.route(
-                                effectiveTask, llmClient, customSubAgentRegistry.all(), lastRoutedSubAgent);
+                                effectiveTask, routerClient, customSubAgentRegistry.all(), lastRoutedSubAgent);
                     }
                     if (routed.isPresent()) {
                         final String routedName = routed.get().agentName();

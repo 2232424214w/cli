@@ -532,6 +532,15 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/sa reload").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/subagent status").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/sa-st").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_TEMPLATES, CliCommandParser.parse("/subagent templates").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE, CliCommandParser.parse("/subagent create").type());
+        assertEquals("", CliCommandParser.parse("/subagent create").payload());
+        CliCommandParser.ParsedCommand create = CliCommandParser.parse(
+                "/subagent create my-bot --template researcher --user");
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE, create.type());
+        assertEquals("my-bot --template researcher --user", create.payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE,
+                CliCommandParser.parse("/sa create x -t blank").type());
     }
 
     @Test

@@ -10,12 +10,14 @@
 | 轻量路由 LLM | 是 | 命中则跳过主 Agent；**置信度门控**（默认 ≥0.70）；sticky 短跟进；失败 fail-open |
 | `@main` / `/main` 强制主 Agent | 是 | 剥前缀后走主 ReAct，并清空 sticky |
 | `/subagent <name> <task>` 硬指定执行 | **否** | 故意不做 |
-| `/subagent` / `list` / `reload` / `status`（`/sa-st`） | 仅管理 | — |
+| `/subagent` 管理命令 | 是 | list / reload / status / **create** / **templates** |
 
 配置：
 
 - `bettercli.subagent.router.enabled` / `BETTERCLI_SUBAGENT_ROUTER_ENABLED`（默认 true）
 - `bettercli.subagent.router.min.confidence` / `BETTERCLI_SUBAGENT_ROUTER_MIN_CONFIDENCE`（默认 0.70）
+- `bettercli.subagent.router.provider` / `BETTERCLI_SUBAGENT_ROUTER_PROVIDER`（可选，专用路由模型；未配或失败回退主模型）
+- `bettercli.subagent.router.model` / `BETTERCLI_SUBAGENT_ROUTER_MODEL`（可选，覆盖该 provider 默认 model）
 
 路由 LLM 回复格式：`name|0.85` 或 `NONE`。
 
@@ -24,6 +26,17 @@
 后者覆盖同名：builtin cache → `~/.bettercli/agents/` → `.bettercli/agents/`。
 
 同目录可选 `SOUL.md` / `IDENTITY.md` / `MEMORY.md`。
+
+### 脚手架
+
+```text
+/subagent create <name> [--project|--user] [--template blank|code-reviewer|researcher] [--force]
+/subagent templates
+```
+
+- 默认写入项目 `.bettercli/agents/<name>/`（`--user` → `~/.bettercli/agents/`）
+- 生成 `AGENT.md` + 空的 `MEMORY.md` / `SOUL.md` / `IDENTITY.md`（已存在 sidecar 不覆盖）
+- 已有 `AGENT.md` 需 `--force` 才覆盖；创建后自动 reload
 
 ## 执行约束（已实现）
 
@@ -41,4 +54,4 @@
 
 ## 实现入口
 
-`com.bettercli.subagent.*` · `Agent` · `Main` 入站路由 · `SubAgent.seedParentHistory`
+`com.bettercli.subagent.*` · `CustomSubAgentScaffold` · `Agent` · `Main` 入站路由 · `SubAgent.seedParentHistory`
