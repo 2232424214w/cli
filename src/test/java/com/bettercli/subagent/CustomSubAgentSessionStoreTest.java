@@ -34,4 +34,18 @@ class CustomSubAgentSessionStoreTest {
         assertNotNull(store.latestResumable());
         assertTrue(store.formatList(5).contains("sub_demo_1"));
     }
+
+    @Test
+    void finishWithEmptyMessagesKeepsCheckpointHistory() {
+        CustomSubAgentSessionStore store = new CustomSubAgentSessionStore(temp);
+        store.start("sub_keep_1", "code-reviewer", "parent", "review", "delegate");
+        store.checkpoint("sub_keep_1", List.of(
+                LlmClient.Message.user("review"),
+                LlmClient.Message.assistant("half done")));
+        store.finish("sub_keep_1", CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
+        CustomSubAgentSessionStore.SessionRecord rec = store.load("sub_keep_1");
+        assertEquals(CustomSubAgentSessionStore.Status.CANCELLED, rec.status());
+        assertEquals(2, rec.messages().size());
+        assertEquals("half done", rec.messages().get(1).content());
+    }
 }

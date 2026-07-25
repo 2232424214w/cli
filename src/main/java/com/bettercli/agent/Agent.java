@@ -61,6 +61,8 @@ public class Agent {
     private boolean returnFinalResponseWhenStreamed;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private SessionMessageIndexer sessionMessageIndexer;
+    /** 无 SessionMessageIndexer 时的父会话 id（如微信通道）。 */
+    private volatile String fallbackConversationId;
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。会话级内存态，不持久化；
     // 每次 Agent 实例独立持有，通过 toolRegistry 注入给 update_plan 工具读写。
     private final PlanStore planStore = new PlanStore();
@@ -192,7 +194,7 @@ public class Agent {
             log.debug("Custom SubAgent progress stream unavailable: {}", e.getMessage());
         }
         String parentConversationId = sessionMessageIndexer == null
-                ? null : sessionMessageIndexer.getConversationId();
+                ? fallbackConversationId : sessionMessageIndexer.getConversationId();
         // 立即返回占位，后台执行；executeToolCalls 结束后 materialize 回填
         return customSubAgentRunner.startAsync(name, task, llmClient, toolRegistry, progress, parentConversationId);
     }
@@ -240,6 +242,12 @@ public class Agent {
      */
     public void setSessionMessageIndexer(SessionMessageIndexer indexer) {
         this.sessionMessageIndexer = indexer;
+    }
+
+    /** 无会话索引时仍可把 parentConversationId 写入 Custom SubAgent 审计/落盘。 */
+    public void setFallbackConversationId(String conversationId) {
+        this.fallbackConversationId = conversationId == null || conversationId.isBlank()
+                ? null : conversationId.trim();
     }
 
     /**

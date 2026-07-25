@@ -95,11 +95,15 @@ public final class CustomSubAgentSessionStore {
         }
         String preview = resultPreview == null ? null
                 : (resultPreview.length() > 300 ? resultPreview.substring(0, 300) + "..." : resultPreview);
+        // cancel/timeout 常传空列表：保留已 checkpoint 的历史，否则 HA resume 会丢上下文
+        List<LlmClient.Message> kept = (messages == null || messages.isEmpty())
+                ? existing.messages()
+                : truncateMessages(messages);
         save(new SessionRecord(
                 existing.sessionId(), existing.agentName(), existing.parentConversationId(),
                 existing.task(), existing.mode(), status == null ? Status.DONE : status,
                 existing.startedAt(), Instant.now().toString(),
-                preview, truncateMessages(messages)));
+                preview, kept));
     }
 
     public SessionRecord load(String sessionId) {

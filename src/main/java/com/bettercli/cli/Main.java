@@ -971,11 +971,17 @@ public class Main {
                         }
                         String parentId = sessionMessageIndexer == null
                                 ? null : sessionMessageIndexer.getConversationId();
-                        String answer = customSubAgentRunner.resume(
-                                command.payload(), llmClient, reactAgent.getToolRegistry(),
-                                progress, parentId);
+                        final PrintStream resumeProgress = progress;
+                        final String resumeParentId = parentId;
+                        final String resumePayload = command.payload();
+                        final LlmClient resumeClient = llmClient;
+                        final ToolRegistry resumeTools = reactAgent.getToolRegistry();
+                        String answer = runWithCancelSupport(terminal, ui, () -> customSubAgentRunner.resume(
+                                resumePayload, resumeClient, resumeTools,
+                                resumeProgress, resumeParentId),
+                                customSubAgentRunner::cancelAllPending);
                         reactAgent.recordExternalTurn(
-                                "续跑 Custom SubAgent " + (command.payload() == null ? "" : command.payload()),
+                                "续跑 Custom SubAgent " + (resumePayload == null ? "" : resumePayload),
                                 answer,
                                 null);
                         ui.println(answer);

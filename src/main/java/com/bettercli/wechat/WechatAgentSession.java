@@ -33,6 +33,7 @@ public class WechatAgentSession implements AutoCloseable {
     private final LlmClient llmClient;
     private final CustomSubAgentRunner customSubAgentRunner;
     private final CustomSubAgentBootstrap.Bundle subagentBundle;
+    private final String conversationId;
     private String lastRoutedSubAgent;
     private Future<String> running;
     private CancellationToken runningToken;
@@ -61,6 +62,10 @@ public class WechatAgentSession implements AutoCloseable {
         this.subagentBundle = CustomSubAgentBootstrap.create(workspace);
         this.customSubAgentRunner = subagentBundle.runner();
         this.agent.setCustomSubAgentRunner(customSubAgentRunner);
+        String accountPart = account.accountId() == null || account.accountId().isBlank()
+                ? "anon" : account.accountId().trim();
+        this.conversationId = "wechat-" + accountPart;
+        this.agent.setFallbackConversationId(conversationId);
     }
 
     public synchronized boolean isRunning() {
@@ -119,7 +124,7 @@ public class WechatAgentSession implements AutoCloseable {
             List<LlmClient.Message> history = agent.recentDialogueMessages(12);
             String answer = customSubAgentRunner.runDirect(
                     name, ingress.effectiveMessage(), llmClient,
-                    agent.getToolRegistry(), null, null, history, null);
+                    agent.getToolRegistry(), null, conversationId, history, null);
             agent.recordExternalTurn(ingress.effectiveMessage(), answer, name);
             return answer;
         }

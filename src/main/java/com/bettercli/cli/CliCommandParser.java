@@ -374,6 +374,9 @@ final class CliCommandParser {
         if (trimmed.regionMatches(true, 0, "/subagent sessions ", 0, 18)) {
             return new ParsedCommand(CommandType.SUBAGENT_SESSIONS, trimmed.substring(18).trim());
         }
+        if (trimmed.regionMatches(true, 0, "/sa sessions ", 0, 13)) {
+            return new ParsedCommand(CommandType.SUBAGENT_SESSIONS, trimmed.substring(13).trim());
+        }
         if (trimmed.equalsIgnoreCase("/subagent resume") || trimmed.equalsIgnoreCase("/sa resume")) {
             return new ParsedCommand(CommandType.SUBAGENT_RESUME, "");
         }

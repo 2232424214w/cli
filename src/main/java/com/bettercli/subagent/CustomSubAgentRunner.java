@@ -7,6 +7,7 @@ import com.bettercli.config.BetterCliConfig;
 import com.bettercli.llm.LlmClient;
 import com.bettercli.llm.LlmClientFactory;
 import com.bettercli.runtime.CancellationContext;
+import com.bettercli.runtime.CancellationToken;
 import com.bettercli.skill.SkillContextBuffer;
 import com.bettercli.skill.SkillRegistry;
 import com.bettercli.tool.ToolRegistry;
@@ -124,7 +125,7 @@ public final class CustomSubAgentRunner {
                 def.name(), childSessionId, parentId, Instant.now(), taskPreview));
         CustomSubAgentAudit.record("SUBAGENT_STARTED", def.name(), childSessionId, parentId, taskPreview);
 
-        Future<String> future = pool.submit(() -> executeIsolated(
+        Future<String> future = submitCancellable(() -> executeIsolated(
                 def, task.trim(), parentClient, toolRegistry, progressOut,
                 childSessionId, parentId, null, null, false));
 
@@ -139,7 +140,8 @@ public final class CustomSubAgentRunner {
         if (results == null || results.isEmpty()) {
             return results;
         }
-        if (CancellationContext.isCancelled()) {
+        boolean wasCancelled = CancellationContext.isCancelled();
+        if (wasCancelled) {
             cancelAllPending();
         }
         List<ToolExecutionResult> out = new ArrayList<>(results.size());
@@ -152,10 +154,12 @@ public final class CustomSubAgentRunner {
             }
             PendingRun pending = pendingBySession.remove(sessionId);
             if (pending == null) {
+                String msg = wasCancelled
+                        ? "run_subagent 失败: 用户取消 (session=" + sessionId + ")"
+                        : "run_subagent 失败: 找不到异步任务 session=" + sessionId;
                 out.add(new ToolExecutionResult(
                         r.id(), r.name(), r.argumentsJson(),
-                        "run_subagent 失败: 找不到异步任务 session=" + sessionId,
-                        r.elapsedMillis(), false, r.imageParts()));
+                        msg, r.elapsedMillis(), false, r.imageParts()));
                 continue;
             }
             String materialized = awaitPending(pending, sessionId);
@@ -230,12 +234,18 @@ public final class CustomSubAgentRunner {
             progressOut.println("🧭 路由命中 Custom SubAgent [" + def.name() + "]，跳过主 Agent");
         }
 
-        Future<String> future = pool.submit(() -> executeIsolated(
+        Future<String> future = submitCancellable(() -> executeIsolated(
                 def, userMessage.trim(), parentClient, toolRegistry, progressOut,
                 childSessionId, parentId, parentHistory, parentTranscript, true));
         PendingRun pending = new PendingRun(future, timeoutSec, def.name());
+        pendingBySession.put(childSessionId, pending);
         try {
-            return awaitPending(pending, childSessionId);
+            PendingRun toAwait = pendingBySession.remove(childSessionId);
+            if (toAwait == null) {
+                // 已被 cancelAllPending 清掉
+                return "run_subagent 失败: 用户取消 (session=" + childSessionId + ")";
+            }
+            return awaitPending(toAwait, childSessionId);
         } finally {
             activeRuns.remove(childSessionId);
         }
@@ -297,8 +307,6 @@ public final class CustomSubAgentRunner {
                                    boolean directResponder) {
         IN_CUSTOM.set(true);
         CustomSubAgentRuntimeContext prevCtx = toolRegistry.getCustomSubAgentContext();
-        String prevProvider = toolRegistry.getCurrentProvider();
-        String prevModel = toolRegistry.getCurrentModelName();
         try {
             CustomSubAgentRuntimeContext ctx = new CustomSubAgentRuntimeContext(
                     def.name(), def.memoryFilePath(), def.skills());
@@ -412,7 +420,6 @@ public final class CustomSubAgentRunner {
                     : "run_subagent 失败: " + e.getMessage() + " (session=" + childSessionId + ")";
         } finally {
             toolRegistry.setCustomSubAgentContext(prevCtx);
-            toolRegistry.setCurrentModel(prevProvider, prevModel);
             activeRuns.remove(childSessionId);
             IN_CUSTOM.set(false);
             IN_CUSTOM.remove();
@@ -465,6 +472,8 @@ public final class CustomSubAgentRunner {
                 Thread.currentThread().interrupt();
                 pending.future().cancel(true);
                 activeRuns.remove(sessionId);
+                sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
+                CustomSubAgentAudit.record("SUBAGENT_CANCELLED", pending.name(), sessionId, null, null);
                 return "run_subagent 失败: 用户取消 (session=" + sessionId + ")";
             }
         }
@@ -549,11 +558,9 @@ public final class CustomSubAgentRunner {
         CustomSubAgentAudit.record("SUBAGENT_RESUME", def.name(), childSessionId, parentId,
                 "from=" + record.sessionId());
 
-        Future<String> future = pool.submit(() -> {
+        Future<String> future = submitCancellable(() -> {
             IN_CUSTOM.set(true);
             CustomSubAgentRuntimeContext prevCtx = toolRegistry.getCustomSubAgentContext();
-            String prevProvider = toolRegistry.getCurrentProvider();
-            String prevModel = toolRegistry.getCurrentModelName();
             try {
                 toolRegistry.setCustomSubAgentContext(new CustomSubAgentRuntimeContext(
                         def.name(), def.memoryFilePath(), def.skills()));
@@ -579,6 +586,11 @@ public final class CustomSubAgentRunner {
                 }
                 AgentMessage result = sub.execute(AgentMessage.task("orchestrator", continueTask), progressOut);
                 String content = result.content() == null ? "" : result.content().trim();
+                if (CancellationContext.isCancelled()) {
+                    sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.CANCELLED,
+                            null, sub.snapshotHistory());
+                    return "run_subagent 失败: 用户取消 (session=" + childSessionId + ")";
+                }
                 if (result.type() == AgentMessage.Type.ERROR) {
                     sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.ERROR,
                             content, sub.snapshotHistory());
@@ -592,17 +604,36 @@ public final class CustomSubAgentRunner {
                 return content;
             } finally {
                 toolRegistry.setCustomSubAgentContext(prevCtx);
-                toolRegistry.setCurrentModel(prevProvider, prevModel);
                 activeRuns.remove(childSessionId);
                 IN_CUSTOM.set(false);
                 IN_CUSTOM.remove();
             }
         });
+        pendingBySession.put(childSessionId, new PendingRun(future, timeoutSec, def.name()));
         try {
-            return awaitPending(new PendingRun(future, timeoutSec, def.name()), childSessionId);
+            PendingRun pending = pendingBySession.remove(childSessionId);
+            if (pending == null) {
+                return "run_subagent 失败: 用户取消 (session=" + childSessionId + ")";
+            }
+            return awaitPending(pending, childSessionId);
         } finally {
             activeRuns.remove(childSessionId);
         }
+    }
+
+    /**
+     * 向缓存线程池提交任务，并在 worker 上绑定调用方当前的取消令牌，避免 InheritableThreadLocal 粘住旧 token。
+     */
+    private <T> Future<T> submitCancellable(java.util.concurrent.Callable<T> task) {
+        CancellationToken cancelToken = CancellationContext.capture();
+        return pool.submit(() -> {
+            CancellationContext.bind(cancelToken);
+            try {
+                return task.call();
+            } finally {
+                CancellationContext.unbind();
+            }
+        });
     }
 
     private String availableList() {

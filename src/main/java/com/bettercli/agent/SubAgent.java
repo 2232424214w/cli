@@ -134,7 +134,7 @@ public class SubAgent implements Worker {
         this.toolOverride = toolOverride;
         this.maxTurnsOverride = maxTurnsOverride;
         this.skillWhitelist = skillWhitelist;
-        this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        // 模型标记改在 execute() 用线程级覆盖，避免并行 SubAgent / Custom SubAgent 竞态改写全局 volatile
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
@@ -299,6 +299,15 @@ public class SubAgent implements Worker {
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
+        toolRegistry.setThreadCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
+        try {
+            return executeWithModelBound(task, out);
+        } finally {
+            toolRegistry.clearThreadCurrentModel();
+        }
+    }
+
+    private AgentMessage executeWithModelBound(AgentMessage task, PrintStream out) {
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
         String taskContent = prependSkillBodies(task.content());

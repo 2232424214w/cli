@@ -17,6 +17,8 @@
 | 微信硬指定（路由可开） | ✅ |
 | RoleHub / belongPaas | ❌ 平台专属 |
 
+可靠性要点：线程池任务显式 `CancellationContext.bind`（防旧 token 粘连）；`finish` 空消息保留 checkpoint；`ToolRegistry` 线程级 model 覆盖支持并行委托；`/subagent resume` 走 ESC 取消。
+
 ## 管理命令
 
 `list` `reload` `status` `create` `templates` `show` `audit` `stats` `sessions` `resume` `delete`  

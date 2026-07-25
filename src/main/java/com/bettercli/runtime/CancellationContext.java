@@ -26,6 +26,27 @@ public final class CancellationContext {
         return token != null && token.isCancelled();
     }
 
+    /**
+     * 在线程池 worker 上绑定调用方当前的取消令牌（避免 InheritableThreadLocal 粘住旧 token）。
+     * 任务结束务必 {@link #unbind()}。
+     */
+    public static void bind(CancellationToken token) {
+        if (token == null) {
+            LOCAL.remove();
+        } else {
+            LOCAL.set(token);
+        }
+    }
+
+    /** 捕获当前线程所见的取消令牌，供提交到线程池后 {@link #bind}。 */
+    public static CancellationToken capture() {
+        return current();
+    }
+
+    public static void unbind() {
+        LOCAL.remove();
+    }
+
     public static void clear(CancellationToken token) {
         if (LOCAL.get() == token) {
             LOCAL.remove();

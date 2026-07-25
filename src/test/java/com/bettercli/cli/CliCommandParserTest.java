@@ -542,6 +542,8 @@ class CliCommandParserTest {
         assertEquals("code-reviewer", CliCommandParser.parse("/subagent show code-reviewer").payload());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_SESSIONS,
                 CliCommandParser.parse("/subagent sessions").type());
+        assertEquals("10", CliCommandParser.parse("/subagent sessions 10").payload());
+        assertEquals("10", CliCommandParser.parse("/sa sessions 10").payload());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_RESUME,
                 CliCommandParser.parse("/subagent resume").type());
         assertEquals("sub_x", CliCommandParser.parse("/subagent resume sub_x").payload());

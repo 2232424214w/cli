@@ -132,6 +132,9 @@ public class ToolRegistry {
     private volatile String currentWorkerName = "";
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
+    /** 并行 SubAgent / Custom SubAgent 用的线程级覆盖，避免竞态改写共享 volatile。 */
+    private final ThreadLocal<String> threadProvider = new ThreadLocal<>();
+    private final ThreadLocal<String> threadModel = new ThreadLocal<>();
     /** Custom SubAgent 执行期上下文（skills 白名单 + MEMORY 写回路径）；主 ReAct 为 null。 */
     /** Custom SubAgent 执行期上下文（ThreadLocal，支持同轮并行多个子 Agent）。 */
     private final ThreadLocal<com.bettercli.subagent.CustomSubAgentRuntimeContext> customSubAgentContext =
@@ -205,13 +208,28 @@ public class ToolRegistry {
         this.currentModel = model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
     }
 
-    public String getCurrentProvider() {
-        return currentProvider;
+    /**
+     * 线程级模型覆盖（并行子 Agent 安全）。{@link #clearThreadCurrentModel()} 成对清理。
+     */
+    public void setThreadCurrentModel(String provider, String model) {
+        threadProvider.set(provider == null ? "" : provider.trim().toLowerCase(Locale.ROOT));
+        threadModel.set(model == null ? "" : model.trim().toLowerCase(Locale.ROOT));
     }
 
-    /** 当前模型名（小写）；与 {@link #setCurrentModel} 配对，供 Custom SubAgent 进出时还原。 */
+    public void clearThreadCurrentModel() {
+        threadProvider.remove();
+        threadModel.remove();
+    }
+
+    public String getCurrentProvider() {
+        String override = threadProvider.get();
+        return override != null ? override : currentProvider;
+    }
+
+    /** 当前模型名（小写）；线程覆盖优先于全局。 */
     public String getCurrentModelName() {
-        return currentModel;
+        String override = threadModel.get();
+        return override != null ? override : currentModel;
     }
 
     public void setBrowserGuard(BrowserGuard browserGuard) {
@@ -2122,7 +2140,9 @@ public class ToolRegistry {
     }
 
     private boolean shouldPreferStepSearch() {
-        return "step".equals(currentProvider) && currentModel.startsWith("step-3.7-flash");
+        String provider = getCurrentProvider();
+        String model = getCurrentModelName();
+        return "step".equals(provider) && model != null && model.startsWith("step-3.7-flash");
     }
 
     private void putIfStepToolAccepts(String toolName, ObjectNode args, int value, String... names) {
