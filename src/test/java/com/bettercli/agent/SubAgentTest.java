@@ -26,14 +26,16 @@ class SubAgentTest {
         assertTrue(plannerTools.contains("read_file"));
         assertTrue(plannerTools.contains("grep_code"));
         assertTrue(plannerTools.contains("web_search"));
+        assertTrue(plannerTools.contains("load_skill"));
         assertFalse(plannerTools.contains("write_file"));
         assertFalse(plannerTools.contains("execute_command"));
         assertFalse(plannerTools.contains("save_memory"));
 
-        // REVIEWER：纯只读，不能联网/写/执行
+        // REVIEWER：纯只读 + load_skill，不能联网/写/执行
         var reviewerTools = AgentRole.REVIEWER.allowedTools();
         assertTrue(reviewerTools.contains("read_file"));
         assertTrue(reviewerTools.contains("glob_files"));
+        assertTrue(reviewerTools.contains("load_skill"));
         assertFalse(reviewerTools.contains("web_search"));
         assertFalse(reviewerTools.contains("write_file"));
         assertFalse(reviewerTools.contains("execute_command"));

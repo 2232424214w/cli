@@ -243,29 +243,38 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 把 Skill 系统下发给所有 SubAgent。Multi-Agent 三个角色共享同一 SkillRegistry（索引一致），
-     * 但共享同一 SkillContextBuffer——简化实现，避免角色级 buffer 隔离的工程开销。
-     * 任务书 §3.6 描述的"角色独立 buffer"作为可观察的优化项暂未启用。
+     * 把 Skill 系统下发给所有 SubAgent。索引共享同一 {@link SkillRegistry}；
+     * 每个角色使用<strong>独立</strong> {@link SkillContextBuffer}，避免 Planner/Worker/Reviewer 互相污染。
+     *
+     * @param sharedBufferForReact 保留参数兼容 Main 调用；Team 路径忽略该实例并自建 buffer
      */
     public void setSkillSystem(com.bettercli.skill.SkillRegistry skillRegistry,
-                               com.bettercli.skill.SkillContextBuffer skillContextBuffer) {
+                               com.bettercli.skill.SkillContextBuffer sharedBufferForReact) {
         this.skillRegistry = skillRegistry;
-        this.skillContextBuffer = skillContextBuffer;
+        this.skillContextBuffer = sharedBufferForReact;
         applySkillSystem();
     }
 
     private void applySkillSystem() {
-        if (skillRegistry == null && skillContextBuffer == null) {
+        if (skillRegistry == null) {
             return;
         }
         planner.setSkillRegistry(skillRegistry);
-        planner.setSkillContextBuffer(skillContextBuffer);
+        planner.setSkillContextBuffer(new com.bettercli.skill.SkillContextBuffer());
         for (SubAgent worker : workers) {
             worker.setSkillRegistry(skillRegistry);
-            worker.setSkillContextBuffer(skillContextBuffer);
+            worker.setSkillContextBuffer(new com.bettercli.skill.SkillContextBuffer());
         }
         reviewer.setSkillRegistry(skillRegistry);
-        reviewer.setSkillContextBuffer(skillContextBuffer);
+        reviewer.setSkillContextBuffer(new com.bettercli.skill.SkillContextBuffer());
+    }
+
+    private void wireSkillSystem(SubAgent agent) {
+        if (agent == null || skillRegistry == null) {
+            return;
+        }
+        agent.setSkillRegistry(skillRegistry);
+        agent.setSkillContextBuffer(new com.bettercli.skill.SkillContextBuffer());
     }
 
     /**
@@ -652,6 +661,19 @@ public class AgentOrchestrator {
         return toolRegistry;
     }
 
+    /** package-private：测试断言各角色独立 SkillContextBuffer。 */
+    SubAgent plannerAgent() {
+        return planner;
+    }
+
+    List<SubAgent> workerAgents() {
+        return workers;
+    }
+
+    SubAgent reviewerAgent() {
+        return reviewer;
+    }
+
     /**
      * 获取当前 run 的共享黑板（Blackboard）。run() 之前或之后返回的实例可能为 null 或已结束态；
      * 主要供测试断言 routing 决策与 artifacts，以及后续 p2p/workflow 阶段复用。
@@ -701,6 +723,7 @@ public class AgentOrchestrator {
                 SubAgent localReviewer = new SubAgent(
                         "reviewer-" + step.id(), AgentRole.REVIEWER,
                         roleClientResolver.apply(AgentRole.REVIEWER), toolRegistry);
+                wireSkillSystem(localReviewer);
                 try {
                     worker = takeWorker(workerPool, step.assignee());
                     if (step.assignee() != null && worker != null && worker.getName().equals(step.assignee())) {

@@ -24,10 +24,34 @@ class LoadSkillToolTest {
         String result = tools.executeTool("load_skill", "{\"name\":\"web-access\"}");
 
         assertTrue(result.contains("已加载 skill 'web-access'"), result);
+        assertTrue(result.contains("下一次模型调用前"), result);
         assertFalse(buffer.isEmpty());
         String drained = buffer.drain();
         assertTrue(drained.contains("when to fetch"));
         assertTrue(drained.contains("已加载 Skill：web-access"));
+    }
+
+    @Test
+    void loadSkillAckMentionsReferencesIndex(@TempDir Path tempDir) throws IOException {
+        Path skillMd = writeUserSkill(tempDir, "kb-skill", "knowledge", "# body\n");
+        Path refs = skillMd.getParent().resolve("references");
+        Files.createDirectories(refs);
+        Files.writeString(refs.resolve("INDEX.md"), "| f | s |\n");
+
+        SkillRegistry registry = new SkillRegistry(null,
+                skillMd.getParent().getParent(), null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        ToolRegistry tools = new ToolRegistry();
+        tools.setSkillRegistry(registry);
+        tools.setSkillContextBuffer(buffer);
+
+        String result = tools.executeTool("load_skill", "{\"name\":\"kb-skill\"}");
+        assertTrue(result.contains("references 目录"), result);
+        assertTrue(result.contains("INDEX.md"), result);
+        assertTrue(result.contains("read_file"), result);
+        assertTrue(result.contains("INDEX.md 摘要") || result.contains("|"), result);
     }
 
     @Test
@@ -90,6 +114,20 @@ class LoadSkillToolTest {
 
         String result = tools.executeTool("load_skill", "{}");
         assertTrue(result.contains("name 不能为空"), result);
+    }
+
+    @Test
+    void loadSkillWritesAuditEntry(@TempDir Path tempDir) throws IOException {
+        SkillRegistry registry = registryWith(tempDir, "web-access", "desc", "body");
+        ToolRegistry tools = new ToolRegistry();
+        tools.setSkillRegistry(registry);
+        tools.setSkillContextBuffer(new SkillContextBuffer());
+
+        tools.executeTool("load_skill", "{\"name\":\"web-access\"}");
+
+        assertTrue(tools.getAuditLog().readRecent(10).stream()
+                        .anyMatch(e -> "load_skill".equals(e.tool())),
+                "load_skill 应写入审计日志");
     }
 
     private static SkillRegistry registryWith(Path tempDir, String name, String desc, String body) throws IOException {

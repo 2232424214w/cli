@@ -49,6 +49,11 @@ final class CliCommandParser {
         SKILL_ON,
         SKILL_OFF,
         SKILL_RELOAD,
+        SKILL_CHECK,
+        SKILL_NEW,
+        SKILL_EXPORT,
+        SKILL_IMPORT,
+        SKILL_DRAFT,
         CONFIG,
         LANG,
         EXPORT
@@ -305,6 +310,28 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/skill reload")) {
             return new ParsedCommand(CommandType.SKILL_RELOAD, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/skill check") || trimmed.regionMatches(true, 0, "/skill check ", 0, 13)) {
+            String payload = trimmed.length() <= 12 ? "" : trimmed.substring(13).trim();
+            return new ParsedCommand(CommandType.SKILL_CHECK, payload.isEmpty() ? null : payload);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/skill new ", 0, 11)) {
+            return new ParsedCommand(CommandType.SKILL_NEW, trimmed.substring(11).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/skill export ", 0, 14)) {
+            return new ParsedCommand(CommandType.SKILL_EXPORT, trimmed.substring(14).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/skill import ", 0, 14)) {
+            return new ParsedCommand(CommandType.SKILL_IMPORT, trimmed.substring(14).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/skill draft") || trimmed.regionMatches(true, 0, "/skill draft ", 0, 13)) {
+            String payload = trimmed.length() <= 12 ? "" : trimmed.substring(13).trim();
+            return new ParsedCommand(CommandType.SKILL_DRAFT, payload.isEmpty() ? null : payload);
         }
 
         if (trimmed.regionMatches(true, 0, "/skill show ", 0, 12)) {

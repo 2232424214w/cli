@@ -1,5 +1,6 @@
 package com.bettercli.cli;
 
+import com.bettercli.llm.LlmClient;
 import com.bettercli.skill.SkillRegistry;
 import com.bettercli.skill.SkillStateStore;
 import org.junit.jupiter.api.Test;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -88,6 +90,15 @@ class SkillCommandHandlerTest {
     }
 
     @Test
+    void reloadSurfacesQualityWarnings(@TempDir Path tempDir) throws IOException {
+        SkillRegistry registry = registryWith(tempDir,
+                new SkillSpec("Bad_Name", "短", "1.0.0"));
+        String out = SkillCommandHandler.reload(registry);
+        assertTrue(out.contains("重新扫描"), out);
+        assertTrue(out.contains("质量") || out.contains("kebab-case") || out.contains("description"), out);
+    }
+
+    @Test
     void rejectsEmptyOrUnknownNames(@TempDir Path tempDir) throws IOException {
         SkillRegistry registry = registryWith(tempDir);
         SkillStateStore state = new SkillStateStore(tempDir.resolve("skills.json"));
@@ -96,6 +107,26 @@ class SkillCommandHandlerTest {
         assertTrue(SkillCommandHandler.enable(registry, state, "").contains("请提供 skill 名称"));
         assertTrue(SkillCommandHandler.disable(registry, state, "").contains("请提供 skill 名称"));
         assertTrue(SkillCommandHandler.enable(registry, state, "ghost").contains("Skill 未找到"));
+    }
+
+    @Test
+    void checkAndNewAndDraft(@TempDir Path tempDir) throws IOException {
+        SkillRegistry registry = registryWith(tempDir,
+                new SkillSpec("web-access", "当用户需要联网时使用。", "1.0.0"));
+
+        String check = SkillCommandHandler.check(registry, "web-access");
+        assertTrue(check.contains("Skill 检查") || check.contains("web-access"), check);
+
+        String created = SkillCommandHandler.createNew(registry, "fresh-skill");
+        assertTrue(created.contains("已创建"), created);
+        assertNotNull(registry.findAnySkill("fresh-skill"));
+
+        String draft = SkillCommandHandler.draft(
+                registry,
+                List.of(LlmClient.Message.user("整理一份发布检查流程")),
+                null,
+                "release-flow");
+        assertTrue(draft.contains("草稿") || draft.contains("已生成"), draft);
     }
 
     private record SkillSpec(String name, String desc, String version) {

@@ -171,7 +171,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 三层加载：jar 内置 < 用户级 ~/.bettercli/skills/ < 项目级 .bettercli/skills/
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
-- load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer
+- load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer；同轮工具批结束后 flush 为独立 user 消息；确认文案嵌入 INDEX.md 摘要或 references 清单
+- `skill-dependencies` / `requires`：拓扑装载依赖后再装主 skill；PLANNER/REVIEWER 白名单含 `load_skill`；Team 各角色独立 buffer（`bindSkillContextBuffer`）；`load_skill` 写审计
+- `SkillQuality`：name/description/body 软护栏；`/skill show`/`reload` 展示提示（含 dependencies）
+- CLI：`/skill check` / `new` / `import|export` / `draft`（本地产品化，无 marketplace）
+- 内置 skill：`web-access`、`progressive-knowledge`（渐进知识库范例）
 - buffer 一次性消费，最多 3 个 skill body
 
 ### TUI (v16.1 Renderer Architecture)

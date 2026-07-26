@@ -104,6 +104,11 @@ public class SubAgent implements Worker {
         this.skillContextBuffer = skillContextBuffer;
     }
 
+    /** 供 Orchestrator / 测试断言各角色 buffer 隔离。 */
+    public SkillContextBuffer getSkillContextBuffer() {
+        return skillContextBuffer;
+    }
+
     /**
      * 根据角色获取系统提示词
      */
@@ -194,6 +199,18 @@ public class SubAgent implements Worker {
         return drained + "\n" + content;
     }
 
+    private void flushPendingSkillBodies() {
+        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
+            return;
+        }
+        String drained = skillContextBuffer.drain();
+        if (drained == null || drained.isBlank()) {
+            return;
+        }
+        conversationHistory.add(LlmClient.Message.user(drained.trim()));
+        log.info("[{}] Flushed pending skill body injection into conversationHistory", name);
+    }
+
     private void refreshSystemPrompt() {
         if (!conversationHistory.isEmpty()) {
             conversationHistory.set(0, LlmClient.Message.system(getSystemPrompt()));
@@ -267,6 +284,7 @@ public class SubAgent implements Worker {
             budget.beginIteration();
 
             injectPendingLspDiagnostics(out);
+            flushPendingSkillBodies();
             if (!preTurnDone) {
                 maybeCompactHistory(out, CompactTrigger.PRE_TURN);
                 preTurnDone = true;
@@ -307,6 +325,7 @@ public class SubAgent implements Worker {
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);
+                    flushPendingSkillBodies();
                     maybeCompactHistory(out, CompactTrigger.MID_TURN);
                     continue;
                 }
@@ -524,7 +543,13 @@ public class SubAgent implements Worker {
         if (invocations.size() > 1) {
             log.info("[{}] executing {} tool calls in parallel", name, invocations.size());
         }
-        return toolRegistry.executeTools(invocations, role.allowedTools());
+        // 共享 ToolRegistry：把本角色 buffer 绑到当前线程，load_skill 才写入正确实例
+        toolRegistry.bindSkillContextBuffer(skillContextBuffer);
+        try {
+            return toolRegistry.executeTools(invocations, role.allowedTools());
+        } finally {
+            toolRegistry.bindSkillContextBuffer(null);
+        }
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {

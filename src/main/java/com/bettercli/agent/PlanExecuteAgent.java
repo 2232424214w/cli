@@ -266,6 +266,18 @@ public class PlanExecuteAgent {
         return drained + "\n" + content;
     }
 
+    private void flushPendingSkillBodies(List<LlmClient.Message> messages) {
+        if (skillContextBuffer == null || skillContextBuffer.isEmpty() || messages == null) {
+            return;
+        }
+        String drained = skillContextBuffer.drain();
+        if (drained == null || drained.isBlank()) {
+            return;
+        }
+        messages.add(LlmClient.Message.user(drained.trim()));
+        log.info("Flushed pending skill body injection into plan task messages");
+    }
+
     /**
      * 运行任务（自动判断是否需要规划）
      */
@@ -542,6 +554,7 @@ public class PlanExecuteAgent {
             iteration++;
 
             injectPendingLspDiagnostics(messages, out);
+            flushPendingSkillBodies(messages);
             if (!preTurnDone) {
                 maybeCompactHistory(messages, out, CompactTrigger.PRE_TURN, currentUserIndex, lastKnownInputTokens);
                 preTurnDone = true;
@@ -627,6 +640,7 @@ public class PlanExecuteAgent {
                 messages.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
             }
             appendImageToolMessages(messages, toolResults);
+            flushPendingSkillBodies(messages);
             maybeCompactHistory(messages, out, CompactTrigger.MID_TURN, -1, lastKnownInputTokens);
         }
 
@@ -694,7 +708,13 @@ public class PlanExecuteAgent {
         if (invocations.size() > 1) {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
-        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        toolRegistry.bindSkillContextBuffer(skillContextBuffer);
+        List<ToolExecutionResult> results;
+        try {
+            results = toolRegistry.executeTools(invocations);
+        } finally {
+            toolRegistry.bindSkillContextBuffer(null);
+        }
         for (ToolExecutionResult result : results) {
             log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
         }

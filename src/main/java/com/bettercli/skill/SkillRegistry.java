@@ -82,6 +82,18 @@ public final class SkillRegistry {
         return stateStore;
     }
 
+    public Path userSkillsDir() {
+        return userSkillsDir;
+    }
+
+    public Path projectSkillsDir() {
+        return projectSkillsDir;
+    }
+
+    public Path builtinCacheRoot() {
+        return builtinCacheRoot;
+    }
+
     private void loadDirectory(Path dir, Skill.Source source) {
         if (dir == null || !Files.isDirectory(dir)) {
             return;
@@ -133,13 +145,18 @@ public final class SkillRegistry {
         String version = stringField(fm, "version");
         String author = stringField(fm, "author");
         List<String> tags = listField(fm, "tags");
+        List<String> dependencies = listField(fm, "skill-dependencies");
+        if (dependencies.isEmpty()) {
+            // 兼容早期草案字段名
+            dependencies = listField(fm, "requires");
+        }
 
         Path referencesDir = skillDir.resolve("references");
         if (!Files.isDirectory(referencesDir)) {
             referencesDir = null;
         }
 
-        return new Skill(
+        Skill skill = new Skill(
                 name,
                 description,
                 version,
@@ -148,8 +165,14 @@ public final class SkillRegistry {
                 source,
                 parsed.body(),
                 skillMd,
-                referencesDir
+                referencesDir,
+                dependencies
         );
+        for (String qualityWarning : SkillQuality.validate(skill)) {
+            warnings.add(skill.name() + ": " + qualityWarning);
+            System.err.println("⚠️ Skill " + skill.name() + ": " + qualityWarning);
+        }
+        return skill;
     }
 
     private static String stringField(Map<String, Object> fm, String key) {

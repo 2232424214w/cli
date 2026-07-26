@@ -35,6 +35,8 @@ import com.bettercli.snapshot.RestoreResult;
 import com.bettercli.snapshot.SnapshotService;
 import com.bettercli.skill.Skill;
 import com.bettercli.skill.SkillContextBuffer;
+import com.bettercli.skill.SkillDependencyLoader;
+import com.bettercli.skill.SkillQuality;
 import com.bettercli.skill.SkillRegistry;
 import com.bettercli.web.FetchResult;
 import com.bettercli.web.HtmlExtractor;
@@ -108,6 +110,8 @@ public class ToolRegistry {
     private BiConsumer<String, String> memorySaver;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
+    /** Multi-Agent 并行时按线程覆盖，避免共享 ToolRegistry 把 load_skill 写进错误角色的 buffer。 */
+    private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -231,8 +235,21 @@ public class ToolRegistry {
         this.skillContextBuffer = skillContextBuffer;
     }
 
+    /**
+     * 当前线程临时绑定 SkillContextBuffer（Multi-Agent 并行时各角色互不污染）。
+     * {@code null} 表示解除绑定，回退到 {@link #setSkillContextBuffer} 设置的共享实例。
+     */
+    public void bindSkillContextBuffer(SkillContextBuffer buffer) {
+        if (buffer == null) {
+            skillContextBufferOverride.remove();
+        } else {
+            skillContextBufferOverride.set(buffer);
+        }
+    }
+
     public SkillContextBuffer getSkillContextBuffer() {
-        return skillContextBuffer;
+        SkillContextBuffer override = skillContextBufferOverride.get();
+        return override != null ? override : skillContextBuffer;
     }
 
     /**
@@ -941,7 +958,10 @@ public class ToolRegistry {
     private void registerSkillTools() {
         tools.put("load_skill", new Tool(
                 "load_skill",
-                "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" section in this system prompt). Call this when a skill's description matches the current task. Pass the exact kebab-case skill name. The full body will appear at the start of your next user message under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session.",
+                "Load full SKILL.md instructions for a skill indexed in the \"可用 Skills\" system section. "
+                        + "Call when a skill description matches the task. Pass the exact kebab-case name. "
+                        + "The body is injected into the conversation before the next model call "
+                        + "(same user turn, after this tool returns). Do not reload the same skill twice.",
                 createParameters(new Param("name", "string", "the exact kebab-case skill name (e.g. web-access)", true)),
                 args -> {
                     String name = args.get("name");
@@ -959,21 +979,54 @@ public class ToolRegistry {
                         }
                         return "Skill '" + name + "' 已被禁用，可用 /skill on " + name + " 启用";
                     }
-                    String body = skill.body();
-                    int originalLen = body == null ? 0 : body.length();
-                    int max = 5 * 1024;
-                    String injected = body == null ? "" : body;
-                    if (injected.length() > max) {
-                        injected = injected.substring(0, max)
-                                + "\n\n...(skill body truncated, full content via /skill show " + name + ")";
+                    SkillDependencyLoader.Resolution resolution =
+                            SkillDependencyLoader.resolve(skill, skillRegistry);
+                    SkillContextBuffer buffer = getSkillContextBuffer();
+                    if (buffer != null) {
+                        for (Skill toLoad : resolution.loadOrder()) {
+                            buffer.push(toLoad.name(), truncateSkillBody(toLoad));
+                        }
                     }
-                    if (skillContextBuffer != null) {
-                        skillContextBuffer.push(name, injected);
-                    }
-                    return "已加载 skill '" + name + "' 的完整指引（" + originalLen
-                            + " bytes），将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
+                    return buildLoadSkillAck(skill, resolution);
                 }
         ));
+    }
+
+    /** load_skill 确认文案：依赖加载顺序 + 同轮注入说明 + body/references 引导。 */
+    static String buildLoadSkillAck(Skill skill, SkillDependencyLoader.Resolution resolution) {
+        int originalLen = skill.body() == null ? 0 : skill.body().length();
+        StringBuilder sb = new StringBuilder();
+        sb.append("已加载 skill '").append(skill.name()).append("' 的完整指引（")
+                .append(originalLen)
+                .append(" bytes）。正文将在下一次模型调用前注入对话（\"")
+                .append(SkillContextBuffer.INJECTION_HEADING_PREFIX)
+                .append(skill.name()).append("\"），同一轮即可继续按指引调用工具。");
+        if (resolution != null && resolution.loadOrder().size() > 1) {
+            sb.append("\n依赖装载顺序: ");
+            sb.append(resolution.loadOrder().stream()
+                    .map(Skill::name)
+                    .reduce((a, b) -> a + " → " + b)
+                    .orElse(skill.name()));
+        }
+        if (resolution != null && !resolution.missing().isEmpty()) {
+            sb.append("\n⚠️ 未找到/已禁用的依赖: ").append(String.join(", ", resolution.missing()));
+        }
+        if (resolution != null && !resolution.cycles().isEmpty()) {
+            sb.append("\n⚠️ 依赖环或超深被跳过: ").append(String.join(", ", resolution.cycles()));
+        }
+        sb.append(SkillQuality.formatBodySizeHint(skill));
+        sb.append(SkillQuality.formatReferencesGuide(skill));
+        return sb.toString();
+    }
+
+    private static String truncateSkillBody(Skill skill) {
+        String body = skill.body() == null ? "" : skill.body();
+        int max = 5 * 1024;
+        if (body.length() <= max) {
+            return body;
+        }
+        return body.substring(0, max)
+                + "\n\n...(skill body truncated, full content via /skill show " + skill.name() + ")";
     }
 
     private void registerMemoryTools() {
@@ -2345,7 +2398,9 @@ public class ToolRegistry {
     }
 
     private static boolean shouldAudit(String name) {
-        return AUDIT_TOOLS.contains(name) || (name != null && name.startsWith("mcp__"));
+        return AUDIT_TOOLS.contains(name)
+                || "load_skill".equals(name)
+                || (name != null && name.startsWith("mcp__"));
     }
 
     private static String mcpDescription(McpToolDescriptor descriptor) {
