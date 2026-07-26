@@ -68,7 +68,7 @@ Multi-Agent Scatter-Gather：`ScatterGather.explore` 为同一目标派 N 路角
 Multi-Agent 增量辩论：审查拒绝后 Worker 收到 `buildIncrementalDebateContext`（只改指出的点，不推倒重来）；issues 实质相同或审查 JSON `converged: true` 时停止辩论并保留当前结果。
 Multi-Agent 设计与 ablation：设计决策见 `docs/multi-agent-design.md`（四阶段迭代 + 权衡）；ablation 方法论见 `docs/multi-agent-ablation.md`，配套 `TeamBenchmark`（`src/test/java/com/bettercli/agent/TeamBenchmark.java`，`@EnabledIfSystemProperty` 默认禁用，`-Dbettercli.benchmark.enabled=true` 启用，跑单 Agent vs Multi baseline vs Multi full 三组对照，用 `CountingLlmClient` 包装器累计 token/调用次数，输出 `docs/multi-agent-ablation-results.md`）。
 
-核心内置工具 25 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team` / `run_subagent`
+核心内置工具 28 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team` / `run_subagent` / `running_agents_list` / `terminate_agent` / `steer_agent`
 
 Custom Subagent（与 Multi-Agent `/team` **独立**）：用户/项目用 `AGENT.md` 定义专属子 Agent（prompt / 工具白名单 / 模型 / maxTurns / timeoutSeconds / skills）；主 ReAct 将 name+description 注入 system prompt 索引，经**大模型语义识别**后调用 `run_subagent(name, task[, mode])` 委托。默认前台：立即异步占位，同轮可并行，批次结束回填；`mode=background`（或 `BETTERCLI_SUBAGENT_DEFAULT_MODE=background`；微信默认 background）时立即 accepted，完成后写入完成通知并 bg-react 汇总。另有**轻量路由 LLM**（默认开启，可关；可配专用 `BETTERCLI_SUBAGENT_ROUTER_PROVIDER`/`_MODEL`）命中则跳过主 Agent 直达响应；支持消息前缀硬指定 `/subagent:name` / `/sa:name`（空格形式 `/subagent name task` 仍禁止）。管理命令：`/subagent` / `list` / `reload` / `status`（`/sa-st`）/ `create` / `templates` / `audit` / `sessions` / `resume` / `delete` / `/sa-l`。目录：`~/.bettercli/agents/`、`.bettercli/agents/`（覆盖内置 `agents-cache`）。子 Agent 强制剥离 `run_subagent`/`run_team`/`create_plan` 防递归；审计写入 `~/.bettercli/audit/subagent-*.jsonl`。详见 `docs/custom-subagent.md`。
 
@@ -249,7 +249,8 @@ src/main/java/com/bettercli/
 - `/subagent create` 脚手架；`from`/`extends` 本地继承；内置 code-reviewer / researcher / sql-analyzer
 - 轻量 HA：`sessions`/`resume`；`stats` 审计聚合；`delete --force` 删 user/project 定义
 - 路由/硬指定标注 `[via:name]`；可选 Webhook；微信硬指定可用（路由默认关）
-- **CLI 对齐已收口**（见 `docs/custom-subagent.md`）；RoleHub / belongPaas 不做
+- 长任务（对齐 1024）：微信 conversationId FIFO；`mode=background` + 完成通知 + bg-react 去重；主 Agent 可用 `running_agents_list` / `terminate_agent` / `steer_agent`（子 Agent 剥离）
+- **CLI 对齐已收口**（定义方案 + 长任务后台，见 `docs/custom-subagent.md`）；RoleHub / belongPaas / Redis 运行表不做
 
 ## 修改时的硬规则
 
@@ -297,7 +298,7 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
-| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CliCommandParserTest` |
+| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CustomSubAgentRuntimeMgmtTest,ConversationMessageQueueTest,WechatPolicyDeciderTest,CliCommandParserTest` |
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent reviewer fail-safe | `mvn test -Dtest=ReviewerFailSafeIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |
@@ -337,7 +338,7 @@ src/main/java/com/bettercli/
 | 会话历史检索 | memory/SessionMessageStore.java + SqliteSessionMessageStore.java + SessionMessageIndexer.java |
 | 可插拔后端 | memory/MemoryStoreFactory.java + PostgresAgentMemoryStore.java + PostgresSessionMessageStore.java + MemoryMigrator.java |
 | Multi-Agent | AgentOrchestrator.java + SubAgent.java |
-| Custom Subagent | subagent/CustomSubAgentRegistry.java + CustomSubAgentRunner.java + CustomSubAgentRouter.java + CustomSubAgentScaffold.java + Agent.java (`run_subagent`) |
+| Custom Subagent | subagent/CustomSubAgentRegistry.java + CustomSubAgentRunner.java + CustomSubAgentRouter.java + BgReactCoordinator.java + AgentSteerService.java + Agent.java (`run_subagent` / 运行管理三工具) |
 | Multi-Agent 动态重规划 | AgentOrchestrator.java（`triggerReplan` / `StepOutcome`） |
 | Multi-Agent Scatter-Gather | agent/ScatterGather.java + WorkflowAdapters.fanInTask |
 | Multi-Agent 共享黑板 | agent/SharedState.java + AgentOrchestrator.java (`buildStepContext` / `pickWorker` / 产物双写) |

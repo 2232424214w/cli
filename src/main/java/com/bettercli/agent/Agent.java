@@ -119,6 +119,10 @@ public class Agent {
     private void wireModeCapabilityTools() {
         toolRegistry.setModeCapabilityHandlers(this::createPlanViaTool, this::runTeamViaTool);
         toolRegistry.setRunSubagentHandler(this::runSubagentViaTool);
+        toolRegistry.setRunningAgentManagementHandlers(
+                this::runningAgentsListViaTool,
+                this::terminateAgentViaTool,
+                this::steerAgentViaTool);
     }
 
     /**
@@ -129,7 +133,34 @@ public class Agent {
         if (customSubAgentRunner != null) {
             customSubAgentRunner.setCompletionListener(this::onSubAgentBackgroundComplete);
         }
+        toolRegistry.setRunningAgentManagementHandlers(
+                this::runningAgentsListViaTool,
+                this::terminateAgentViaTool,
+                this::steerAgentViaTool);
         refreshSystemPromptAfterSubagentChange();
+    }
+
+    private String runningAgentsListViaTool() {
+        if (customSubAgentRunner == null) {
+            return "running_agents_list 失败: Custom SubAgent 未初始化";
+        }
+        String parentId = sessionMessageIndexer == null
+                ? fallbackConversationId : sessionMessageIndexer.getConversationId();
+        return customSubAgentRunner.formatRunningTree(parentId);
+    }
+
+    private String terminateAgentViaTool(String conversationId) {
+        if (customSubAgentRunner == null) {
+            return "terminate_agent 失败: Custom SubAgent 未初始化";
+        }
+        return customSubAgentRunner.terminateAgent(conversationId);
+    }
+
+    private String steerAgentViaTool(String conversationId, String message) {
+        if (customSubAgentRunner == null) {
+            return "steer_agent 失败: Custom SubAgent 未初始化";
+        }
+        return customSubAgentRunner.steerAgent(conversationId, message);
     }
 
     /** 微信等通道可设为 true，使 run_subagent 默认 background。 */

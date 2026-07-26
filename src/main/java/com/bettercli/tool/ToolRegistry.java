@@ -125,6 +125,9 @@ public class ToolRegistry {
     private java.util.function.Function<String, String> runTeamHandler;
     /** name, task, mode(nullable) → result */
     private RunSubagentHandler runSubagentHandler;
+    private java.util.function.Supplier<String> runningAgentsListHandler;
+    private java.util.function.Function<String, String> terminateAgentHandler;
+    private java.util.function.BiFunction<String, String, String> steerAgentHandler;
     // ask_user 复用 HITL 交互底层；由 HitlToolRegistry / Main 注入。未注入时走非交互降级文案。
     private com.bettercli.hitl.HitlHandler hitlHandler;
     // Multi-Agent 共享黑板（阶段C/D）。由 AgentOrchestrator 在派活时注入当前 worker 名；
@@ -378,6 +381,15 @@ public class ToolRegistry {
      */
     public void setRunSubagentHandler(RunSubagentHandler runSubagentHandler) {
         this.runSubagentHandler = runSubagentHandler;
+    }
+
+    public void setRunningAgentManagementHandlers(
+            java.util.function.Supplier<String> runningAgentsListHandler,
+            java.util.function.Function<String, String> terminateAgentHandler,
+            java.util.function.BiFunction<String, String, String> steerAgentHandler) {
+        this.runningAgentsListHandler = runningAgentsListHandler;
+        this.terminateAgentHandler = terminateAgentHandler;
+        this.steerAgentHandler = steerAgentHandler;
     }
 
     /** {@code mode} 可为 null / foreground / background。 */
@@ -1518,6 +1530,34 @@ public class ToolRegistry {
                 ),
                 args -> invokeRunSubagent(args)
         ));
+        tools.put("running_agents_list", new Tool(
+                "running_agents_list",
+                "查看当前链路中运行中的 Custom SubAgent 树（conversationId / task / lastProgress / lastActiveTime）。"
+                        + "长任务后台委托后用于确认进度；只读。",
+                createParameters(),
+                args -> invokeRunningAgentsList()
+        ));
+        tools.put("terminate_agent", new Tool(
+                "terminate_agent",
+                "精准终止指定 Custom SubAgent 及其后代（按 conversationId / sessionId）。"
+                        + "仅在用户明确要求终止时调用；不确定时先询问用户。"
+                        + "与 ESC/全局取消不同：不影响同级其它子 Agent。",
+                createParameters(
+                        new Param("conversation_id", "string",
+                                "要终止的子 Agent session / conversationId（见 running_agents_list）", true)
+                ),
+                args -> invokeTerminateAgent(args)
+        ));
+        tools.put("steer_agent", new Tool(
+                "steer_agent",
+                "向运行中的子 Agent 注入一条纠偏指令，下一轮推理生效，不写入其持久会话。"
+                        + "用于方向偏差、循环、用户追加要求；不会中断正在执行的工具。",
+                createParameters(
+                        new Param("conversation_id", "string", "目标子 Agent sessionId", true),
+                        new Param("message", "string", "注入的指令内容", true)
+                ),
+                args -> invokeSteerAgent(args)
+        ));
     }
 
     private String invokeCreatePlan(Map<String, String> args) {
@@ -1568,6 +1608,63 @@ public class ToolRegistry {
         } catch (Exception e) {
             return "run_subagent 失败: " + e.getMessage();
         }
+    }
+
+    private String invokeRunningAgentsList() {
+        if (runningAgentsListHandler == null) {
+            return "running_agents_list 失败: 运行管理未注入";
+        }
+        try {
+            return runningAgentsListHandler.get();
+        } catch (Exception e) {
+            return "running_agents_list 失败: " + e.getMessage();
+        }
+    }
+
+    private String invokeTerminateAgent(Map<String, String> args) {
+        String id = firstNonBlank(args.get("conversation_id"), args.get("session_id"), args.get("sessionId"));
+        if (id == null || id.isBlank()) {
+            return "terminate_agent 失败: conversation_id 不能为空";
+        }
+        if (terminateAgentHandler == null) {
+            return "terminate_agent 失败: 运行管理未注入";
+        }
+        try {
+            return terminateAgentHandler.apply(id.trim());
+        } catch (Exception e) {
+            return "terminate_agent 失败: " + e.getMessage();
+        }
+    }
+
+    private String invokeSteerAgent(Map<String, String> args) {
+        String id = firstNonBlank(args.get("conversation_id"), args.get("session_id"), args.get("sessionId"));
+        String message = args.get("message");
+        if (id == null || id.isBlank()) {
+            return "steer_agent 失败: conversation_id 不能为空";
+        }
+        if (message == null || message.isBlank()) {
+            return "steer_agent 失败: message 不能为空";
+        }
+        if (steerAgentHandler == null) {
+            return "steer_agent 失败: 运行管理未注入";
+        }
+        try {
+            return steerAgentHandler.apply(id.trim(), message.trim());
+        } catch (Exception e) {
+            return "steer_agent 失败: " + e.getMessage();
+        }
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v;
+            }
+        }
+        return null;
     }
 
     /**

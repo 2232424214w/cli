@@ -190,6 +190,9 @@ final class SubagentCommandHandler {
             if (run.taskPreview() != null && !run.taskPreview().isBlank()) {
                 sb.append("    task: ").append(run.taskPreview()).append('\n');
             }
+            if (run.lastProgress() != null && !run.lastProgress().isBlank()) {
+                sb.append("    progress: ").append(run.lastProgress()).append('\n');
+            }
         }
         return sb.toString().trim();
     }

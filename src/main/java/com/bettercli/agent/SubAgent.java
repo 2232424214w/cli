@@ -69,6 +69,9 @@ public class SubAgent implements Worker {
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private SubAgentResult lastResult;
     private volatile Runnable turnCheckpointListener;
+    private volatile String customSessionId;
+    private volatile com.bettercli.subagent.AgentSteerService steerService;
+    private volatile java.util.function.Consumer<String> progressListener;
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this(name, role, llmClient, toolRegistry, null);
@@ -343,14 +346,30 @@ public class SubAgent implements Worker {
             }
 
             budget.beginIteration();
+            touchProgress("iteration " + budget.iteration());
 
             // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值压缩早期消息为摘要。
             injectPendingLspDiagnostics(out);
             maybeCompactHistory(out);
 
             try {
+                List<LlmClient.Message> requestMessages = conversationHistory;
+                com.bettercli.subagent.AgentSteerService steers = this.steerService;
+                String sessionId = this.customSessionId;
+                if (steers != null && sessionId != null && !sessionId.isBlank()) {
+                    List<String> pendingSteers = steers.drain(sessionId);
+                    if (!pendingSteers.isEmpty()) {
+                        requestMessages = new ArrayList<>(conversationHistory);
+                        for (String steer : pendingSteers) {
+                            requestMessages.add(LlmClient.Message.user(
+                                    "[steer — ephemeral, not persisted]\n" + steer));
+                        }
+                        touchProgress("steer×" + pendingSteers.size());
+                    }
+                }
+
                 LlmClient.ChatResponse response = llmClient.chat(
-                        conversationHistory,
+                        requestMessages,
                         llmClient.supportsTools() ? toolRegistry.getToolDefinitions(effectiveToolWhitelist()) : null,
                         streamRenderer
                 );
@@ -371,6 +390,9 @@ public class SubAgent implements Worker {
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
                     printToolCalls(out, response.toolCalls());
+                    for (LlmClient.ToolCall tc : response.toolCalls()) {
+                        touchProgress(tc.function().name());
+                    }
                     conversationHistory.add(LlmClient.Message.assistant(
                             response.reasoningContent(),
                             response.content(),
@@ -381,7 +403,9 @@ public class SubAgent implements Worker {
                     // 没有换行的 pending 内容会被 HITL 提示"跨过"导致标题错位。
                     streamRenderer.resetBetweenIterations();
 
+                    touchProgress("tools…");
                     List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls());
+                    touchProgress("tools done");
                     for (ToolExecutionResult toolResult : toolResults) {
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
@@ -563,6 +587,29 @@ public class SubAgent implements Worker {
                 continue;
             }
             conversationHistory.add(m);
+        }
+    }
+
+    /** Custom SubAgent 会话 id，供 steer / 进度回调。 */
+    public void setCustomSessionId(String customSessionId) {
+        this.customSessionId = customSessionId;
+    }
+
+    public void setSteerService(com.bettercli.subagent.AgentSteerService steerService) {
+        this.steerService = steerService;
+    }
+
+    public void setProgressListener(java.util.function.Consumer<String> progressListener) {
+        this.progressListener = progressListener;
+    }
+
+    private void touchProgress(String detail) {
+        java.util.function.Consumer<String> listener = progressListener;
+        if (listener != null) {
+            try {
+                listener.accept(detail);
+            } catch (Exception ignored) {
+            }
         }
     }
 

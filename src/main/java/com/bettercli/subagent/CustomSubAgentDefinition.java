@@ -35,7 +35,10 @@ public record CustomSubAgentDefinition(
     public static final Set<String> RECURSIVE_TOOLS = Set.of(
             "run_subagent",
             "run_team",
-            "create_plan"
+            "create_plan",
+            "running_agents_list",
+            "terminate_agent",
+            "steer_agent"
     );
 
     /** Custom 模式默认附带（除非黑名单）：Skill 加载与 MEMORY 写回。 */

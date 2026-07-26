@@ -53,10 +53,11 @@ public final class CustomSubAgentRunner {
     private static final ThreadLocal<Boolean> IN_CUSTOM = ThreadLocal.withInitial(() -> false);
 
     private final CustomSubAgentRegistry registry;
-    private final Map<String, CustomSubAgentRunStatus> activeRuns = new ConcurrentHashMap<>();
+    private final Map<String, LiveSubAgentRun> activeRuns = new ConcurrentHashMap<>();
     private final Map<String, PendingRun> pendingBySession = new ConcurrentHashMap<>();
     private final Map<String, PendingRun> backgroundBySession = new ConcurrentHashMap<>();
     private final Set<String> completionFiredSessions = ConcurrentHashMap.newKeySet();
+    private final AgentSteerService steerService = new AgentSteerService();
     private final CustomSubAgentSessionStore sessionStore;
     private volatile java.util.function.Consumer<CustomSubAgentCompletionEvent> completionListener = e -> {};
     private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
@@ -87,7 +88,156 @@ public final class CustomSubAgentRunner {
     }
 
     public List<CustomSubAgentRunStatus> activeRuns() {
-        return new ArrayList<>(activeRuns.values());
+        List<CustomSubAgentRunStatus> out = new ArrayList<>();
+        for (LiveSubAgentRun run : activeRuns.values()) {
+            out.add(run.toStatus());
+        }
+        return out;
+    }
+
+    public AgentSteerService steerService() {
+        return steerService;
+    }
+
+    /** 更新运行进度（工具调用前后由 SubAgent 回调）。 */
+    public void touchProgress(String sessionId, String progress) {
+        LiveSubAgentRun run = activeRuns.get(sessionId);
+        if (run != null) {
+            run.touch(progress);
+        }
+    }
+
+    /**
+     * 精准终止指定子 Agent 及其后代（不影响同级）。
+     *
+     * @return 人类可读结果
+     */
+    public String terminateAgent(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return "terminate_agent 失败: conversationId / sessionId 不能为空";
+        }
+        String id = sessionId.trim();
+        LiveSubAgentRun root = activeRuns.get(id);
+        if (root == null) {
+            return "terminate_agent 失败: 未找到运行中的 session=" + id
+                    + "\n可用：\n" + formatRunningTree("(none)");
+        }
+        List<String> toKill = new ArrayList<>();
+        collectDescendants(id, toKill);
+        toKill.add(0, id);
+        int killed = 0;
+        for (String sid : toKill) {
+            if (terminateOne(sid)) {
+                killed++;
+            }
+        }
+        return "已终止 " + killed + " 个 Agent（含后代）: " + String.join(", ", toKill);
+    }
+
+    public String steerAgent(String sessionId, String message) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return "steer_agent 失败: conversationId 不能为空";
+        }
+        if (message == null || message.isBlank()) {
+            return "steer_agent 失败: message 不能为空";
+        }
+        String id = sessionId.trim();
+        if (!activeRuns.containsKey(id)) {
+            return "steer_agent 失败: session 未在运行: " + id;
+        }
+        steerService.enqueue(id, message.trim());
+        touchProgress(id, "steer queued");
+        return "已向 " + id + " 注入 steer 指令（下一轮推理生效，不落盘）";
+    }
+
+    /** 树形运行态（running_agents_list）。 */
+    public String formatRunningTree(String rootConversationId) {
+        String rootId = normalizeParentId(rootConversationId);
+        List<LiveSubAgentRun> all = new ArrayList<>(activeRuns.values());
+        if (all.isEmpty()) {
+            return "当前没有运行中的 Custom SubAgent。\nroot=" + rootId;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("running agents (root=").append(rootId).append("):\n");
+        sb.append("[0] main  conversationId=").append(rootId).append('\n');
+        Set<String> activeIds = new HashSet<>();
+        for (LiveSubAgentRun r : all) {
+            activeIds.add(r.childSessionId());
+        }
+        List<LiveSubAgentRun> tops = new ArrayList<>();
+        for (LiveSubAgentRun r : all) {
+            if (!activeIds.contains(r.parentSessionId())
+                    || rootId.equals(r.parentSessionId())
+                    || "(none)".equals(r.parentSessionId())) {
+                tops.add(r);
+            }
+        }
+        tops.sort((a, b) -> a.startedAt().compareTo(b.startedAt()));
+        for (LiveSubAgentRun top : tops) {
+            appendRunTree(sb, top, 1, activeIds);
+        }
+        return sb.toString().trim();
+    }
+
+    private void appendRunTree(StringBuilder sb, LiveSubAgentRun run, int depth, Set<String> activeIds) {
+        sb.append("  ".repeat(Math.max(0, depth)));
+        sb.append('[').append(depth).append("] ").append(run.agentName())
+                .append("  conversationId=").append(run.childSessionId())
+                .append("  task=").append(run.taskPreview());
+        if (run.lastProgress() != null && !run.lastProgress().isBlank()) {
+            sb.append("  lastProgress=").append(run.lastProgress());
+        }
+        sb.append("  lastActiveMs=").append(run.lastActiveTimeMs()).append('\n');
+        List<LiveSubAgentRun> kids = new ArrayList<>();
+        for (LiveSubAgentRun r : activeRuns.values()) {
+            if (run.childSessionId().equals(r.parentSessionId())) {
+                kids.add(r);
+            }
+        }
+        kids.sort((a, b) -> a.startedAt().compareTo(b.startedAt()));
+        for (LiveSubAgentRun kid : kids) {
+            appendRunTree(sb, kid, depth + 1, activeIds);
+        }
+    }
+
+    private void collectDescendants(String parentId, List<String> out) {
+        for (LiveSubAgentRun r : activeRuns.values()) {
+            if (parentId.equals(r.parentSessionId())) {
+                out.add(r.childSessionId());
+                collectDescendants(r.childSessionId(), out);
+            }
+        }
+    }
+
+    private boolean terminateOne(String sessionId) {
+        LiveSubAgentRun live = activeRuns.remove(sessionId);
+        PendingRun pending = pendingBySession.remove(sessionId);
+        if (pending == null) {
+            pending = backgroundBySession.remove(sessionId);
+        }
+        if (live != null) {
+            live.cancelToken().cancel();
+            if (live.future() != null) {
+                live.future().cancel(true);
+            }
+        }
+        if (pending != null && pending.future() != null) {
+            pending.future().cancel(true);
+            if (pending.cancelToken() != null) {
+                pending.cancelToken().cancel();
+            }
+        }
+        steerService.clear(sessionId);
+        sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.CANCELLED, "terminated", List.of());
+        CustomSubAgentAudit.record("SUBAGENT_TERMINATED",
+                live == null ? (pending == null ? null : pending.name()) : live.agentName(),
+                sessionId, null, null);
+        if (pending != null && pending.background()) {
+            fireCompletionOnce(new CustomSubAgentCompletionEvent(
+                    pending.parentId(), sessionId, pending.name(), pending.toolCallId(), pending.task(),
+                    false, true, "terminated"));
+        }
+        return live != null || pending != null;
     }
 
     /** 当前是否在 Custom SubAgent 执行线程内（防递归）。 */
@@ -145,12 +295,14 @@ public final class CustomSubAgentRunner {
         int timeoutSec = def.resolveTimeoutSeconds();
         String taskText = task.trim();
 
-        activeRuns.put(childSessionId, new CustomSubAgentRunStatus(
-                def.name(), childSessionId, parentId, Instant.now(), taskPreview));
+        CancellationToken runToken = new CancellationToken();
+        LiveSubAgentRun live = new LiveSubAgentRun(
+                def.name(), childSessionId, parentId, Instant.now(), taskPreview, runToken);
+        activeRuns.put(childSessionId, live);
         CustomSubAgentAudit.record(background ? "SUBAGENT_BG_STARTED" : "SUBAGENT_STARTED",
                 def.name(), childSessionId, parentId, taskPreview);
 
-        Future<String> future = submitCancellable(() -> {
+        Future<String> future = submitCancellable(runToken, () -> {
             String outcome = "";
             boolean cancelled = false;
             boolean success = false;
@@ -158,7 +310,7 @@ public final class CustomSubAgentRunner {
                 outcome = executeIsolated(
                         def, taskText, parentClient, toolRegistry, progressOut,
                         childSessionId, parentId, null, null, false);
-                cancelled = CancellationContext.isCancelled()
+                cancelled = runToken.isCancelled() || CancellationContext.isCancelled()
                         || (outcome != null && outcome.contains("用户取消"));
                 success = !cancelled && outcome != null
                         && !outcome.startsWith("run_subagent 失败")
@@ -170,16 +322,20 @@ public final class CustomSubAgentRunner {
             } finally {
                 backgroundBySession.remove(childSessionId);
                 pendingBySession.remove(childSessionId);
+                activeRuns.remove(childSessionId);
+                steerService.clear(childSessionId);
                 if (background) {
                     fireCompletionOnce(new CustomSubAgentCompletionEvent(
                             parentId, childSessionId, def.name(), toolCallId, taskText,
-                            success, cancelled || CancellationContext.isCancelled(),
+                            success, cancelled || runToken.isCancelled() || CancellationContext.isCancelled(),
                             outcome == null ? "" : outcome));
                 }
             }
         });
+        live.setFuture(future);
 
-        PendingRun pending = new PendingRun(future, timeoutSec, def.name(), background, taskText, toolCallId, parentId);
+        PendingRun pending = new PendingRun(
+                future, timeoutSec, def.name(), background, taskText, toolCallId, parentId, runToken);
         if (background) {
             backgroundBySession.put(childSessionId, pending);
             return bgAcceptedPlaceholder(childSessionId, def.name(), parentId, timeoutSec);
@@ -241,13 +397,20 @@ public final class CustomSubAgentRunner {
     private void cancelMap(Map<String, PendingRun> map) {
         for (Map.Entry<String, PendingRun> e : new ArrayList<>(map.entrySet())) {
             PendingRun p = e.getValue();
+            if (p != null && p.cancelToken() != null) {
+                p.cancelToken().cancel();
+            }
             if (p != null && p.future() != null) {
                 p.future().cancel(true);
             }
-            activeRuns.remove(e.getKey());
+            LiveSubAgentRun live = activeRuns.remove(e.getKey());
+            if (live != null) {
+                live.cancelToken().cancel();
+            }
             sessionStore.finish(e.getKey(), CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
             CustomSubAgentAudit.record("SUBAGENT_CANCELLED",
                     p == null ? null : p.name(), e.getKey(), null, null);
+            steerService.clear(e.getKey());
             if (p != null && p.background()) {
                 fireCompletionOnce(new CustomSubAgentCompletionEvent(
                         p.parentId(), e.getKey(), p.name(), p.toolCallId(), p.task(),
@@ -315,28 +478,32 @@ public final class CustomSubAgentRunner {
         String taskPreview = preview(userMessage.trim(), 80);
         int timeoutSec = def.resolveTimeoutSeconds();
 
-        activeRuns.put(childSessionId, new CustomSubAgentRunStatus(
-                def.name(), childSessionId, parentId, Instant.now(), taskPreview));
+        CancellationToken runToken = new CancellationToken();
+        LiveSubAgentRun live = new LiveSubAgentRun(
+                def.name(), childSessionId, parentId, Instant.now(), taskPreview, runToken);
+        activeRuns.put(childSessionId, live);
         CustomSubAgentAudit.record("SUBAGENT_ROUTED_RUN", def.name(), childSessionId, parentId, taskPreview);
 
         if (progressOut != null) {
             progressOut.println("🧭 路由命中 Custom SubAgent [" + def.name() + "]，跳过主 Agent");
         }
 
-        Future<String> future = submitCancellable(() -> executeIsolated(
+        Future<String> future = submitCancellable(runToken, () -> executeIsolated(
                 def, userMessage.trim(), parentClient, toolRegistry, progressOut,
                 childSessionId, parentId, parentHistory, parentTranscript, true));
-        PendingRun pending = new PendingRun(future, timeoutSec, def.name(), false, userMessage.trim(), null, parentId);
+        live.setFuture(future);
+        PendingRun pending = new PendingRun(
+                future, timeoutSec, def.name(), false, userMessage.trim(), null, parentId, runToken);
         pendingBySession.put(childSessionId, pending);
         try {
             PendingRun toAwait = pendingBySession.remove(childSessionId);
             if (toAwait == null) {
-                // 已被 cancelAllPending 清掉
                 return "run_subagent 失败: 用户取消 (session=" + childSessionId + ")";
             }
             return awaitPending(toAwait, childSessionId);
         } finally {
             activeRuns.remove(childSessionId);
+            steerService.clear(childSessionId);
         }
     }
 
@@ -419,6 +586,10 @@ public final class CustomSubAgentRunner {
             }
             // 独立 buffer：禁止与主 Agent 共享，避免并行 drain / 回灌主会话
             sub.setSkillContextBuffer(new SkillContextBuffer());
+            sub.setCustomSessionId(childSessionId);
+            sub.setSteerService(steerService);
+            sub.setProgressListener(msg -> touchProgress(childSessionId, msg));
+            touchProgress(childSessionId, "executing");
 
             String mode = directResponder ? "routed" : "delegate";
             sessionStore.start(childSessionId, def.name(), parentId, task, mode);
@@ -534,7 +705,11 @@ public final class CustomSubAgentRunner {
     private String awaitPending(PendingRun pending, String sessionId) {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(pending.timeoutSec());
         while (true) {
-            if (CancellationContext.isCancelled()) {
+            if (CancellationContext.isCancelled()
+                    || (pending.cancelToken() != null && pending.cancelToken().isCancelled())) {
+                if (pending.cancelToken() != null) {
+                    pending.cancelToken().cancel();
+                }
                 pending.future().cancel(true);
                 activeRuns.remove(sessionId);
                 sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
@@ -543,6 +718,9 @@ public final class CustomSubAgentRunner {
             }
             long remainMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
             if (remainMs <= 0) {
+                if (pending.cancelToken() != null) {
+                    pending.cancelToken().cancel();
+                }
                 pending.future().cancel(true);
                 activeRuns.remove(sessionId);
                 sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.TIMEOUT, null, List.of());
@@ -642,12 +820,14 @@ public final class CustomSubAgentRunner {
         String childSessionId = newSessionId(def.name());
         String parentId = normalizeParentId(parentConversationId);
         int timeoutSec = def.resolveTimeoutSeconds();
-        activeRuns.put(childSessionId, new CustomSubAgentRunStatus(
-                def.name(), childSessionId, parentId, Instant.now(), preview(continueTask, 80)));
+        CancellationToken runToken = new CancellationToken();
+        LiveSubAgentRun live = new LiveSubAgentRun(
+                def.name(), childSessionId, parentId, Instant.now(), preview(continueTask, 80), runToken);
+        activeRuns.put(childSessionId, live);
         CustomSubAgentAudit.record("SUBAGENT_RESUME", def.name(), childSessionId, parentId,
                 "from=" + record.sessionId());
 
-        Future<String> future = submitCancellable(() -> {
+        Future<String> future = submitCancellable(runToken, () -> {
             IN_CUSTOM.set(true);
             CustomSubAgentRuntimeContext prevCtx = toolRegistry.getCustomSubAgentContext();
             try {
@@ -665,6 +845,9 @@ public final class CustomSubAgentRunner {
                     sub.setSkillRegistry(skills);
                 }
                 sub.setSkillContextBuffer(new SkillContextBuffer());
+                sub.setCustomSessionId(childSessionId);
+                sub.setSteerService(steerService);
+                sub.setProgressListener(msg -> touchProgress(childSessionId, msg));
                 sub.restoreHistory(record.messages());
                 sessionStore.start(childSessionId, def.name(), parentId, continueTask, "resume");
                 sub.setTurnCheckpointListener(() ->
@@ -687,18 +870,20 @@ public final class CustomSubAgentRunner {
                 }
                 sessionStore.finish(childSessionId, CustomSubAgentSessionStore.Status.DONE,
                         content, sub.snapshotHistory());
-                // 标记旧会话已由续跑接管
                 sessionStore.finish(record.sessionId(), CustomSubAgentSessionStore.Status.DONE,
                         "resumed-by " + childSessionId, record.messages());
                 return content;
             } finally {
                 toolRegistry.setCustomSubAgentContext(prevCtx);
                 activeRuns.remove(childSessionId);
+                steerService.clear(childSessionId);
                 IN_CUSTOM.set(false);
                 IN_CUSTOM.remove();
             }
         });
-        pendingBySession.put(childSessionId, new PendingRun(future, timeoutSec, def.name(), false, continueTask, null, parentId));
+        live.setFuture(future);
+        pendingBySession.put(childSessionId, new PendingRun(
+                future, timeoutSec, def.name(), false, continueTask, null, parentId, runToken));
         try {
             PendingRun pending = pendingBySession.remove(childSessionId);
             if (pending == null) {
@@ -711,12 +896,13 @@ public final class CustomSubAgentRunner {
     }
 
     /**
-     * 向缓存线程池提交任务，并在 worker 上绑定调用方当前的取消令牌，避免 InheritableThreadLocal 粘住旧 token。
+     * 向缓存线程池提交任务，并在 worker 上绑定本 run 的取消令牌。
      */
-    private <T> Future<T> submitCancellable(java.util.concurrent.Callable<T> task) {
-        CancellationToken cancelToken = CancellationContext.capture();
+    private <T> Future<T> submitCancellable(CancellationToken runToken,
+                                            java.util.concurrent.Callable<T> task) {
+        CancellationToken token = runToken != null ? runToken : CancellationContext.capture();
         return pool.submit(() -> {
-            CancellationContext.bind(cancelToken);
+            CancellationContext.bind(token);
             try {
                 return task.call();
             } finally {
@@ -805,7 +991,8 @@ public final class CustomSubAgentRunner {
             boolean background,
             String task,
             String toolCallId,
-            String parentId
+            String parentId,
+            CancellationToken cancelToken
     ) {
     }
 }

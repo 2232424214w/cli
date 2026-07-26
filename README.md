@@ -159,7 +159,7 @@ mvn test -DskipTests=false
 
 ### Custom Subagent（与 Multi-Agent 独立）
 
-用户/项目用 `AGENT.md` 定义专属子 Agent（独立 prompt、工具白名单、可选模型与 maxTurns）。三种触发：主 Agent `run_subagent`、入站路由 LLM、消息前缀 `/subagent:name`（空格形式管理命令不执行任务）。管理：`/subagent list|reload|status|create|templates|audit`。详见 `docs/custom-subagent.md`。
+用户/项目用 `AGENT.md` 定义专属子 Agent（独立 prompt、工具白名单、可选模型与 maxTurns）。三种触发：主 Agent `run_subagent`、入站路由 LLM、消息前缀 `/subagent:name`（空格形式管理命令不执行任务）。管理：`/subagent list|reload|status|create|templates|audit`。长任务：`mode=background` + 完成通知/bg-react；运行管理工具 `running_agents_list` / `terminate_agent` / `steer_agent`。详见 `docs/custom-subagent.md`。
 
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
