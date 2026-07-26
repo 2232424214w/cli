@@ -83,14 +83,29 @@ public final class UiText {
         if (!isChinese()) {
             return raw;
         }
-        return switch (raw.toLowerCase()) {
+        String lower = raw.toLowerCase(java.util.Locale.ROOT);
+        return switch (lower) {
             case "idle" -> "空闲";
             case "running" -> "运行中";
             case "thinking" -> "思考中";
             case "tool", "tools" -> "工具中";
             case "planning" -> "规划中";
             case "waiting" -> "等待中";
-            default -> raw;
+            case "compacting" -> "压缩中";
+            default -> {
+                if (lower.startsWith("subagent:")) {
+                    yield "子代理·" + raw.substring("subagent:".length());
+                }
+                if (lower.startsWith("sa:") ) {
+                    yield "子代理·" + raw.substring(3);
+                }
+                // sa×N / saxN
+                if (raw.length() >= 3 && lower.startsWith("sa")
+                        && (raw.charAt(2) == '×' || raw.charAt(2) == 'x' || raw.charAt(2) == 'X')) {
+                    yield "子代理×" + raw.substring(3);
+                }
+                yield raw;
+            }
         };
     }
 

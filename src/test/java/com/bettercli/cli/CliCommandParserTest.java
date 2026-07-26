@@ -522,4 +522,59 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
     }
+
+    @Test
+    void parsesSubagentListAndReloadOnly() {
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent list").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/sa").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/sa-l").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/subagent reload").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_RELOAD, CliCommandParser.parse("/sa reload").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/subagent status").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_STATUS, CliCommandParser.parse("/sa-st").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_TEMPLATES, CliCommandParser.parse("/subagent templates").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_AUDIT, CliCommandParser.parse("/subagent audit").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_AUDIT, CliCommandParser.parse("/subagent audit 50").type());
+        assertEquals("50", CliCommandParser.parse("/subagent audit 50").payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_SHOW,
+                CliCommandParser.parse("/subagent show code-reviewer").type());
+        assertEquals("code-reviewer", CliCommandParser.parse("/subagent show code-reviewer").payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_SESSIONS,
+                CliCommandParser.parse("/subagent sessions").type());
+        assertEquals("10", CliCommandParser.parse("/subagent sessions 10").payload());
+        assertEquals("10", CliCommandParser.parse("/sa sessions 10").payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_RESUME,
+                CliCommandParser.parse("/subagent resume").type());
+        assertEquals("sub_x", CliCommandParser.parse("/subagent resume sub_x").payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_STATS,
+                CliCommandParser.parse("/subagent stats").type());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_DELETE,
+                CliCommandParser.parse("/subagent delete foo --force").type());
+        assertEquals("foo --force", CliCommandParser.parse("/subagent delete foo --force").payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE, CliCommandParser.parse("/subagent create").type());
+        assertEquals("", CliCommandParser.parse("/subagent create").payload());
+        CliCommandParser.ParsedCommand create = CliCommandParser.parse(
+                "/subagent create my-bot --template researcher --user");
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE, create.type());
+        assertEquals("my-bot --template researcher --user", create.payload());
+        assertEquals(CliCommandParser.CommandType.SUBAGENT_CREATE,
+                CliCommandParser.parse("/sa create x -t blank").type());
+    }
+
+    @Test
+    void subagentColonPrefixIsNotUnknownCommand() {
+        // 方式三：/subagent:name 放行给入站路由，不当未知斜杠命令
+        assertEquals(CliCommandParser.CommandType.NONE,
+                CliCommandParser.parse("/subagent:code-reviewer 审查这段").type());
+        assertEquals(CliCommandParser.CommandType.NONE,
+                CliCommandParser.parse("/sa:sql-analyzer 看慢查询").type());
+    }
+
+    @Test
+    void subagentNameTaskIsNotAnExecutionCommand() {
+        // 禁止空格硬指定：/subagent foo bar 视为未知命令
+        CliCommandParser.ParsedCommand cmd = CliCommandParser.parse("/subagent code-reviewer 审查这段代码");
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, cmd.type());
+    }
 }

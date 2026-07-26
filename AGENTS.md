@@ -54,7 +54,7 @@ mvn test -DskipTests=false                  # 全量回归
 
 | 路径 | 入口 | 触发 |
 |------|------|------|
-| ReAct | `Agent.java` | 默认模式；亦可在循环内调用 `create_plan` / `run_team` 工具（模式统一起步） |
+| ReAct | `Agent.java` | 默认模式；亦可在循环内调用 `create_plan` / `run_team` / `run_subagent` 工具（模式统一起步） |
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan`（显式覆盖） |
 | Multi-Agent | `AgentOrchestrator.java` | `/team`（显式覆盖）或 ReAct 内 `run_team` |
 
@@ -68,7 +68,9 @@ Multi-Agent Scatter-Gather：`ScatterGather.explore` 为同一目标派 N 路角
 Multi-Agent 增量辩论：审查拒绝后 Worker 收到 `buildIncrementalDebateContext`（只改指出的点，不推倒重来）；issues 实质相同或审查 JSON `converged: true` 时停止辩论并保留当前结果。
 Multi-Agent 设计与 ablation：设计决策见 `docs/multi-agent-design.md`（四阶段迭代 + 权衡）；ablation 方法论见 `docs/multi-agent-ablation.md`，配套 `TeamBenchmark`（`src/test/java/com/bettercli/agent/TeamBenchmark.java`，`@EnabledIfSystemProperty` 默认禁用，`-Dbettercli.benchmark.enabled=true` 启用，跑单 Agent vs Multi baseline vs Multi full 三组对照，用 `CountingLlmClient` 包装器累计 token/调用次数，输出 `docs/multi-agent-ablation-results.md`）。
 
-核心内置工具 24 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team`
+核心内置工具 28 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn` / `read_better_md` / `suggest_better_md` / `agent_memory_search` / `agent_memory_save` / `agent_memory_update` / `agent_memory_delete` / `session_search` / `update_plan` / `ask_user` / `notebook_write` / `notebook_read` / `create_plan` / `run_team` / `run_subagent` / `running_agents_list` / `terminate_agent` / `steer_agent`
+
+Custom Subagent（与 Multi-Agent `/team` **独立**）：用户/项目用 `AGENT.md` 定义专属子 Agent（prompt / 工具白名单 / 模型 / maxTurns / timeoutSeconds / skills）；主 ReAct 将 name+description 注入 system prompt 索引，经**大模型语义识别**后调用 `run_subagent(name, task[, mode])` 委托。默认前台：立即异步占位，同轮可并行，批次结束回填；`mode=background`（或 `BETTERCLI_SUBAGENT_DEFAULT_MODE=background`；微信默认 background）时立即 accepted，完成后写入完成通知并 bg-react 汇总。另有**轻量路由 LLM**（默认开启，可关；可配专用 `BETTERCLI_SUBAGENT_ROUTER_PROVIDER`/`_MODEL`）命中则跳过主 Agent 直达响应；支持消息前缀硬指定 `/subagent:name` / `/sa:name`（空格形式 `/subagent name task` 仍禁止）。管理命令：`/subagent` / `list` / `reload` / `status`（`/sa-st`）/ `create` / `templates` / `audit` / `sessions` / `resume` / `delete` / `/sa-l`。目录：`~/.bettercli/agents/`、`.bettercli/agents/`（覆盖内置 `agents-cache`）。子 Agent 强制剥离 `run_subagent`/`run_team`/`create_plan` 防递归；审计写入 `~/.bettercli/audit/subagent-*.jsonl`。详见 `docs/custom-subagent.md`。
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。混合检索：语义 + 关键词两路经 `ReciprocalRankFusion` 融合，再经 `LexicalOverlapReranker` 按查询词与 name/content 重叠重排（零外部依赖；后续可换 cross-encoder）。向量检索经内存 `HnswIndex`（≤64 精确余弦，更大规模 NSW 近似），SQLite 仅作持久化，避免每次 search 全表解析 JSON。
 
@@ -108,6 +110,7 @@ src/main/java/com/bettercli/
 ├── web/         SearchProvider, WebFetcher, HtmlExtractor, NetworkPolicy
 ├── policy/      PathGuard, CommandGuard, AuditLog
 ├── skill/       SkillRegistry, SkillContextBuffer, SkillIndexFormatter
+├── subagent/    CustomSubAgentDefinition, CustomSubAgentRegistry, CustomSubAgentRunner, CustomSubAgentRouter
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
@@ -118,7 +121,7 @@ src/main/java/com/bettercli/
 - inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。
 - 默认 CLI 启动路径应先 `Renderer.start()` 并初始化底部 dock；inline 首屏不要在 `readLine` 前裸写 stdout，而是通过 `InlineRenderer.installStartupScreen(...)` 挂到 `LineReader.CALLBACK_INIT`，首次进入输入时用 `printAbove` 一次性显示完整 Banner + tips，避免 logo 被 LineReader 首次重绘滚出可视区域。
 - `BottomStatusBar` 现在是 JLine `Status` 托管的底部 dock：由 JLine 维护滚动区域和状态行位置，不再手写 `\n` / `moveUp` / `CLEAR_TO_EOS` 清屏。输入期会把 LineReader 光标定位到 dock 上方一行，让 `*` 输入行和 Status 同处底部区域；dock 保留两类信息：上层模式 + MCP/Skill 摘要，下层 Auto Model / model / phase / ctx 百分比与 token / cost / elapsed / cwd。关键字段可用克制的 JLine `AttributedString` 彩色样式突出，但纯文本格式和宽度裁剪逻辑要保持稳定。`ctx` 表示当前仍会带入下一轮请求的上下文估算；`in/out/cache` 表示最近任务的 LLM 调用统计，二者不要混用。
-- 普通任务和斜杠命令提交后，`Main` 会把本轮原始输入以暗色整行块写回 transcript：输入态左提示仍是 `* `，提交回显左提示改为 `>`；单行输入只占一行，不额外追加空白行。普通任务随后再展开 MCP resource / 本地 `@path` 并进入 Agent；不要只依赖 JLine 提交行残留，否则 activity 重绘或 dock 刷新可能让用户输入从可见历史里消失。`/clear` 清空 conversationHistory、shortTermMemory、待注入 Skill buffer，并重建不含上一轮检索记忆的 system prompt；长期记忆保留；同时轮换粘性会话检查点（CLI/TUI 共用 `StickySessionRotator`）。`/compact` 会手动强制全量 Context Checkpoint Compaction（MANUAL），不等待阈值触发。
+- 普通任务和斜杠命令提交后，`Main` 会把本轮原始输入以暗色整行块写回 transcript：输入态左提示仍是 `* `，提交回显左提示改为 `>`；单行输入只占一行，不额外追加空白行。普通任务随后再展开 MCP resource / 本地 `@path` 并进入 Agent；不要只依赖 JLine 提交行残留，否则 activity 重绘或 dock 刷新可能让用户输入从可见历史里消失。`/clear` 清空 conversationHistory、shortTermMemory、待注入 Skill buffer，并重建不含上一轮检索记忆的 system prompt；长期记忆保留；同时轮换粘性会话检查点（CLI/TUI 共用 `StickySessionRotator`），并静默取消未完成 Custom SubAgent（不发完成通知）+ 递增 `sessionEpoch` 使已排队 bg-react 失效。`/compact` 会手动强制全量 Context Checkpoint Compaction（MANUAL），不等待阈值触发；完成通知 / `[bg-react]` 不计真实用户轮次。
 - ReAct LLM 调用期间，inline renderer 使用固定高度 live thinking 区动态显示 `Thinking...` 和灰色竖线 reasoning 预览；该区域只能清理自己刚打印的几行，不能用独立 JLine `Display.update()` / `CLEAR_TO_EOS` 向上覆盖 transcript。content 或 tool call 开始前先清掉 live 区，再把完整 reasoning 引用块落到正文区，正文回答用低调标记起始，不再刷强标题。
 - 交互期输出应优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都支持把输出流接到 inline renderer，避免直接争抢 stdout。`CodeIndex` 的索引进度通过 `ProgressListener` 注入，`/index` 应绑定到当前 renderer 输出流。
 - Phase 22 开始，`InlineRenderer` 可绑定当前 `LineReader`；当 `LineReader.isReading()` 为 true 时，`Renderer.stream()` 的完整行输出优先通过 `LineReader#printAbove` 显示在输入行上方，未绑定 / 非读取态 / 测试路径回退到原 `PrintStream`。
@@ -212,7 +215,7 @@ src/main/java/com/bettercli/
 - PathGuard 强制路径限定在项目根内
 - CommandGuard 是辅助黑名单，不是主防线
 - MCP 细粒度权限：`McpToolRiskClassifier` 按工具名末段启发式区分只读/写入；只读 MCP（read/list/search/snapshot 等）免 HITL，写入或未分类仍需审批
-- 微信 iLink 通道没有人工审批面板，必须走非交互式默认拒绝策略：只读工具默认允许，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝，文件写入仍由 PathGuard 限定在绑定 workspace 内。
+- 微信 iLink 通道没有人工审批面板，必须走非交互式默认拒绝策略：只读工具默认允许，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝，文件写入仍由 PathGuard 限定在绑定 workspace 内。普通消息按 `conversationId` FIFO 串行（忙碌/非队首回执「排队中」；`/stop` `/status` 等旁路；`BETTERCLI_WECHAT_QUEUE_TIMEOUT_SECONDS` 超时踢出）。
 
 ### Plan 审阅交互
 
@@ -238,6 +241,18 @@ src/main/java/com/bettercli/
 
 - system prompt 索引段注入三处提示词，上限 20 个 / 4KB
 - `load_skill` → SkillContextBuffer → 下一轮 user message 前置注入
+
+### Custom Subagent
+
+- 与 `/team` Multi-Agent 并存、不融合；任务由主模型语义调用 `run_subagent`、轻量路由 LLM、或消息前缀 `/subagent:name` 触发
+- `/subagent list|reload|status|create|templates|audit|show|sessions|resume|stats|delete` 与 `/sa-l` `/sa-st` 仅管理；禁止空格 `/subagent name task`
+- `/subagent create` 脚手架；`from`/`extends` 本地继承；内置 code-reviewer / researcher / sql-analyzer
+- 轻量 HA：`sessions`/`resume`；`stats` 审计聚合；`delete --force` 删 user/project 定义
+- 路由/硬指定标注 `[via:name]`；可选 Webhook；微信硬指定可用（路由默认关）
+- 长任务（对齐 1024）：微信 conversationId FIFO；`mode=background` + 完成通知 + bg-react 去重；主 Agent 可用 `running_agents_list` / `terminate_agent` / `steer_agent`（子 Agent 剥离）
+- `/clear` 静默取消后台委托 + `sessionEpoch` 作废 bg-react；完成通知携带 `parentSessionEpoch`，不匹配则丢弃；压缩不计完成通知轮次；`/stop` 仍取消后台（单进程有意偏差）
+- 后台并发：`BETTERCLI_SUBAGENT_BG_MAX_CONCURRENT`（默认 3）；bg-react 可选 `BETTERCLI_BG_REACT_PROVIDER`/`_MODEL` 降本
+- **CLI 对齐已收口**（定义方案 + 长任务后台，见 `docs/custom-subagent.md`）；RoleHub / belongPaas / Redis 运行表不做
 
 ## 修改时的硬规则
 
@@ -285,6 +300,7 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
+| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CustomSubAgentRuntimeMgmtTest,SubAgentBgLimitsTest,BgReactClientResolverTest,ConversationMessageQueueTest,WechatPolicyDeciderTest,CliCommandParserTest,ConversationHistoryCompactorTest,AgentClearHistoryTest` |
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent reviewer fail-safe | `mvn test -Dtest=ReviewerFailSafeIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |
@@ -324,6 +340,7 @@ src/main/java/com/bettercli/
 | 会话历史检索 | memory/SessionMessageStore.java + SqliteSessionMessageStore.java + SessionMessageIndexer.java |
 | 可插拔后端 | memory/MemoryStoreFactory.java + PostgresAgentMemoryStore.java + PostgresSessionMessageStore.java + MemoryMigrator.java |
 | Multi-Agent | AgentOrchestrator.java + SubAgent.java |
+| Custom Subagent | subagent/CustomSubAgentRegistry.java + CustomSubAgentRunner.java + CustomSubAgentRouter.java + BgReactCoordinator.java + AgentSteerService.java + Agent.java (`run_subagent` / 运行管理三工具) |
 | Multi-Agent 动态重规划 | AgentOrchestrator.java（`triggerReplan` / `StepOutcome`） |
 | Multi-Agent Scatter-Gather | agent/ScatterGather.java + WorkflowAdapters.fanInTask |
 | Multi-Agent 共享黑板 | agent/SharedState.java + AgentOrchestrator.java (`buildStepContext` / `pickWorker` / 产物双写) |

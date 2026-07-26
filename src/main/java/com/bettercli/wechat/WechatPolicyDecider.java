@@ -21,6 +21,11 @@ public class WechatPolicyDecider {
         if (isReadOnlyBuiltin(name)) {
             return WechatPolicyDecision.allow();
         }
+        if ("run_subagent".equals(name) || "load_skill".equals(name) || "write_subagent_memory".equals(name)
+                || "running_agents_list".equals(name) || "terminate_agent".equals(name)
+                || "steer_agent".equals(name)) {
+            return WechatPolicyDecision.allow();
+        }
         if ("execute_command".equals(name)) {
             return commandAllowed(argumentsJson);
         }

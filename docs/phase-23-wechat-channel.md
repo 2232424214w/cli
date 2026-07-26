@@ -86,7 +86,7 @@ getupdates → [鉴权: boundUserId?] → [分类]
   - `WechatRenderer` 分块发送正文，保留 ClawBot 稳定支持的 Markdown 子集（列表、引用、粗体、行内代码、真实代码块），把标题转成粗体标题、表格转成键值/列表，并清理 ANSI / 终端专用标记、图片 Markdown、H5-H6、中文斜体等兼容性差的标记；reasoning、完整工具参数和 diff 细节默认只写日志。
   - `WechatTextFormatter` 对非代码类 fenced block（流程说明、长中文箭头链）解包并换行，避免微信侧出现横向滚动代码块和“复制”按钮。
   - `WechatTerminalRenderer` 对微信侧分片做 Markdown 结构感知：未闭合代码块、表格中间不提前 flush，避免客户端收到半个块后渲染失败。
-  - turn 取消复用 ReAct `/cancel` 的 cancellation token；普通消息运行中排队。
+  - turn 取消复用 ReAct `/cancel` 的 cancellation token；普通消息按 `conversationId` FIFO 串行（`ConversationMessageQueue`）：非队首或 Agent 忙时推「排队中」；控制命令旁路；排队超时可从任意位置剔除（`BETTERCLI_WECHAT_QUEUE_TIMEOUT_SECONDS`，默认 600）。
 - 媒体规则：
   - 图片下载解密后保存本地，再用现有 `@image:<path>` 链路进入 `ImageReferenceParser`。
   - 非图片文件保存本地，并把文件名和路径注入提示词；是否读取由 Agent 工具决定。

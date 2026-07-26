@@ -36,18 +36,21 @@ class AgentCompactionIntegrationTest {
 
             Agent agent = new Agent(llm);
             SessionCheckpointStore checkpointStore = new SessionCheckpointStore(tempDir.resolve("session.jsonl"));
+            // getConversationHistory() 返回防御性副本，不能原地 add；经 session.jsonl Resume 灌入真历史
+            for (int i = 0; i < 6; i++) {
+                checkpointStore.appendMessage(LlmClient.Message.user("Q" + i + " " + "x".repeat(8_000)));
+                checkpointStore.appendMessage(LlmClient.Message.assistant("A" + i + " " + "y".repeat(8_000)));
+            }
             SessionMessageIndexer indexer = new SessionMessageIndexer(store, "agent-compact", tempDir.toString());
             agent.setSessionMessageIndexer(indexer);
             agent.setSessionCheckpointStore(checkpointStore);
 
-            List<LlmClient.Message> history = agent.getConversationHistory();
-            for (int i = 0; i < 6; i++) {
-                history.add(LlmClient.Message.user("Q" + i + " " + "x".repeat(8_000)));
-                history.add(LlmClient.Message.assistant("A" + i + " " + "y".repeat(8_000)));
-            }
-
             Agent.CompactionResult result = agent.compactHistoryNow();
-            assertTrue(result.compacted(), "MANUAL compact should rewrite history");
+            assertTrue(result.compacted(),
+                    "MANUAL compact should rewrite history; error=" + result.error()
+                            + " before=" + result.beforeTokens()
+                            + " after=" + result.afterTokens()
+                            + " hist=" + agent.getConversationHistory().size());
             assertTrue(result.afterTokens() < result.beforeTokens());
 
             List<LlmClient.Message> after = agent.getConversationHistory();

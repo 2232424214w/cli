@@ -244,21 +244,25 @@ class ConversationHistoryCompactorTest {
 
     @Test
     void sessionPhysicalMergeWhenHeadIsCompactedAndFileStillGrows(@TempDir Path dir) throws Exception {
-        SessionCheckpointStore store = new SessionCheckpointStore(dir.resolve("session.jsonl"), 3);
+        // 构造器会把 keepLines clamp 到 >=50；首行已是 compacted 时需 size > keep*2 才物理合并
+        int keep = 50;
+        SessionCheckpointStore store = new SessionCheckpointStore(dir.resolve("session.jsonl"), keep);
         store.appendCompacted(new ConversationHistoryCompactor.CompactCheckpoint(
                 CompactTrigger.MID_TURN,
                 ConversationHistoryCompactor.SUMMARY_PREFIX + "seed",
                 List.of(LlmClient.Message.user(ConversationHistoryCompactor.SUMMARY_PREFIX + "seed"))
         ));
-        for (int i = 0; i < 10; i++) {
+        int appendCount = keep * 2 + 1;
+        for (int i = 0; i < appendCount; i++) {
             store.appendMessage(LlmClient.Message.user("keep-" + i));
         }
         List<LlmClient.Message> loaded = store.loadHistory();
         assertTrue(loaded.stream().anyMatch(m -> m.content() != null && m.content().contains("seed")));
         assertTrue(loaded.stream().anyMatch(m -> "keep-0".equals(m.content())));
-        assertTrue(loaded.stream().anyMatch(m -> "keep-9".equals(m.content())));
+        assertTrue(loaded.stream().anyMatch(m -> ("keep-" + (appendCount - 1)).equals(m.content())));
         long lines = java.nio.file.Files.readAllLines(dir.resolve("session.jsonl")).size();
-        assertTrue(lines < 11, "首行 compacted 后膨胀应触发物理合并，文件行数应下降: " + lines);
+        assertTrue(lines < appendCount + 1,
+                "首行 compacted 后膨胀应触发物理合并，文件行数应下降: " + lines);
     }
 
     @Test
@@ -301,13 +305,15 @@ class ConversationHistoryCompactorTest {
 
     @Test
     void sessionCheckpointStoreRotatesOnAppendWhenOverLimit(@TempDir Path dir) throws Exception {
-        SessionCheckpointStore store = new SessionCheckpointStore(dir.resolve("session.jsonl"), 5);
-        for (int i = 0; i < 8; i++) {
+        // SessionCheckpointStore 把 keepLines clamp 到 >=50；无 compacted 时保留末尾 keep 行
+        int keep = 50;
+        SessionCheckpointStore store = new SessionCheckpointStore(dir.resolve("session.jsonl"), keep);
+        for (int i = 0; i < keep + 10; i++) {
             store.appendMessage(LlmClient.Message.user("u" + i));
         }
         List<LlmClient.Message> loaded = store.loadHistory();
-        assertTrue(loaded.size() <= 5);
-        assertEquals("u7", loaded.get(loaded.size() - 1).content());
+        assertTrue(loaded.size() <= keep);
+        assertEquals("u" + (keep + 9), loaded.get(loaded.size() - 1).content());
     }
 
     private static List<LlmClient.Message> baseHistory(int rounds, int chars) {

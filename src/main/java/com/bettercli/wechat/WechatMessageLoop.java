@@ -7,23 +7,29 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.ArrayDeque;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Queue;
 import java.util.Set;
 
+/**
+ * 微信 iLink long-poll 主循环。
+ *
+ * <p>普通消息按 {@code conversationId} FIFO 串行（{@link ConversationMessageQueue}）：
+ * 控制命令旁路；非队首或 Agent 忙时推「排队中」；超时条目可从任意位置剔除。
+ */
 public class WechatMessageLoop {
     private static final Logger log = LoggerFactory.getLogger(WechatMessageLoop.class);
     private static final int SESSION_EXPIRED = -14;
     private static final long TYPING_REFRESH_NANOS = 5_000_000_000L;
+    private static final Duration DEFAULT_QUEUE_TIMEOUT = Duration.ofMinutes(10);
 
     private final IlinkClient client;
     private final WechatAccountStore store;
     private final Renderer localRenderer;
+    private final ConversationMessageQueue<WechatMessage> messageQueue = new ConversationMessageQueue<>();
     private WechatAccount account;
     private WechatAgentSession session;
-    private final Queue<WechatMessage> queue = new ArrayDeque<>();
     private final Set<String> seenMessageIds = new HashSet<>();
     private boolean paused;
     private boolean stopped;
@@ -58,6 +64,7 @@ public class WechatMessageLoop {
             while (!stopped && !Thread.currentThread().isInterrupted()) {
                 try {
                     completeCurrentIfDone();
+                    evictExpired();
                     drainQueue();
                     refreshTypingIfNeeded();
                     long pollTimeoutMs = session != null && session.isRunning()
@@ -80,6 +87,7 @@ public class WechatMessageLoop {
                         handle(message);
                     }
                     completeCurrentIfDone();
+                    evictExpired();
                     drainQueue();
                 } catch (Exception e) {
                     log.warn("WeChat loop error: {}", e.getMessage());
@@ -100,6 +108,20 @@ public class WechatMessageLoop {
         if (session != null) {
             session.cancel();
         }
+    }
+
+    /** 测试 / 状态可见：当前会话队列深度。 */
+    int queueSize() {
+        return messageQueue.size(conversationKey());
+    }
+
+    private String conversationKey() {
+        if (session != null && session.conversationId() != null && !session.conversationId().isBlank()) {
+            return session.conversationId();
+        }
+        String accountPart = account == null || account.accountId() == null || account.accountId().isBlank()
+                ? "anon" : account.accountId().trim();
+        return "wechat-" + accountPart;
     }
 
     private String currentContextToken() {
@@ -123,15 +145,49 @@ public class WechatMessageLoop {
             handleBypass(command, message.contextToken());
             return;
         }
-        queue.add(message);
+        enqueueOrdinary(message);
+    }
+
+    private void enqueueOrdinary(WechatMessage message) throws IOException {
+        String key = conversationKey();
+        boolean busy = session != null && session.isRunning();
+        ConversationMessageQueue.EnqueueResult<WechatMessage> result = messageQueue.enqueue(key, message);
+        boolean needsWait = busy || !result.isHead() || paused;
+        if (needsWait) {
+            sendQueuedNotice(result, message.contextToken(), busy);
+        }
+        if (!paused && !busy && result.isHead()) {
+            drainQueue();
+        }
+    }
+
+    private void sendQueuedNotice(ConversationMessageQueue.EnqueueResult<WechatMessage> result,
+                                  String contextToken, boolean busy) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        if (paused) {
+            sb.append("⏳ 已入队（通道暂停，发送 /resume 恢复）。");
+        } else if (busy) {
+            sb.append("⏳ 排队中… 当前任务执行中。");
+        } else {
+            sb.append("⏳ 排队中…");
+        }
+        sb.append(" 排在第 ").append(result.position()).append(" 位");
+        int ahead = Math.max(0, result.position() - 1);
+        if (ahead > 0) {
+            sb.append("（前面还有 ").append(ahead).append(" 条）");
+        }
+        sb.append("。\n会话: ").append(conversationKey());
+        send(sb.toString(), contextToken);
     }
 
     private void handleBypass(WechatCommandParser.Command command, String contextToken) throws IOException {
         switch (command.type()) {
             case HELP -> send(helpText(), contextToken);
             case STATUS -> send("微信通道状态: " + (paused ? "paused" : "running")
-                    + "\n队列: " + queue.size()
-                    + "\nAgent: " + (session != null && session.isRunning() ? "running" : "idle"), contextToken);
+                    + "\n会话: " + conversationKey()
+                    + "\n队列: " + messageQueue.size(conversationKey())
+                    + "\nAgent: " + (session != null && session.isRunning() ? "running" : "idle")
+                    + "\n排队超时: " + queueTimeout().toSeconds() + "s", contextToken);
             case PAUSE -> {
                 paused = true;
                 send("微信通道已暂停，普通消息会继续排队。", contextToken);
@@ -149,7 +205,9 @@ public class WechatMessageLoop {
                 send("已请求取消当前任务。", contextToken);
             }
             case UNKNOWN -> send("未知微信命令: " + command.payload() + "\n发送 /help 查看可用命令。", contextToken);
-            default -> queue.add(new WechatMessage("", account.boundUserId(), contextToken, "/" + command.type().name().toLowerCase(), List.of()));
+            default -> enqueueOrdinary(new WechatMessage(
+                    "", account.boundUserId(), contextToken,
+                    "/" + command.type().name().toLowerCase(), List.of()));
         }
     }
 
@@ -157,10 +215,12 @@ public class WechatMessageLoop {
         if (paused || session == null || session.isRunning()) {
             return;
         }
-        WechatMessage message = queue.poll();
-        if (message == null) {
+        String key = conversationKey();
+        var ticket = messageQueue.dequeue(key);
+        if (ticket.isEmpty()) {
             return;
         }
+        WechatMessage message = ticket.get().payload();
         activeContextToken = safeContextToken(message.contextToken());
         WechatCommandParser.Command command = WechatCommandParser.parse(message.text());
         String prompt = message.text();
@@ -208,7 +268,44 @@ public class WechatMessageLoop {
             prompt += "\n\n用户发送了媒体文件，当前 MVP 已收到媒体元数据；图片/文件下载链路将在 CDN 解密模块完成后启用。";
         }
         startTyping();
-        session.submit(prompt);
+        try {
+            session.submit(prompt);
+        } catch (RuntimeException e) {
+            stopTyping();
+            send("无法启动任务: " + e.getMessage());
+            drainQueue();
+        }
+    }
+
+    private void evictExpired() throws IOException {
+        Duration timeout = queueTimeout();
+        List<ConversationMessageQueue.Ticket<WechatMessage>> expired =
+                messageQueue.removeExpired(conversationKey(), timeout);
+        for (ConversationMessageQueue.Ticket<WechatMessage> ticket : expired) {
+            WechatMessage msg = ticket.payload();
+            String token = msg == null ? "" : msg.contextToken();
+            send("⌛ 排队超时（超过 " + timeout.toSeconds() + "s），已从队列移除该消息。"
+                    + "\n会话: " + conversationKey(), safeContextToken(token));
+        }
+    }
+
+    static Duration queueTimeout() {
+        String raw = System.getProperty("bettercli.wechat.queue.timeout.seconds");
+        if (raw == null || raw.isBlank()) {
+            raw = System.getenv("BETTERCLI_WECHAT_QUEUE_TIMEOUT_SECONDS");
+        }
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_QUEUE_TIMEOUT;
+        }
+        try {
+            long sec = Long.parseLong(raw.trim());
+            if (sec <= 0) {
+                return DEFAULT_QUEUE_TIMEOUT;
+            }
+            return Duration.ofSeconds(sec);
+        } catch (NumberFormatException e) {
+            return DEFAULT_QUEUE_TIMEOUT;
+        }
     }
 
     private void completeCurrentIfDone() throws IOException {
@@ -288,12 +385,15 @@ public class WechatMessageLoop {
         return """
                 BetterCLI 微信通道命令：
                 /help      查看帮助
-                /status    查看状态
+                /status    查看状态（含队列深度）
                 /clear     清空当前微信会话
                 /compact   压缩当前上下文
                 /pause     暂停普通消息消费
                 /resume    恢复消息消费
-                /stop      取消当前任务
+                /stop      取消当前任务（旁路队列，立即生效）
+
+                普通消息按会话 FIFO 串行；忙碌或非队首时会收到「排队中」提示。
+                排队过久会被超时移除（默认 600s，可用 BETTERCLI_WECHAT_QUEUE_TIMEOUT_SECONDS 调整）。
 
                 安全策略：微信通道使用非交互式默认拒绝策略；execute_command 和 MCP 默认拒绝，写文件受 workspace PathGuard 限制。
                 """.trim();

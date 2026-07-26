@@ -157,6 +157,10 @@ mvn test -DskipTests=false
 
 设计意图：从「写工具」演进到「打包专家手册」。当工具堆成山（BetterCLI 当前内置 9 个 + MCP 60+ 工具），用 Skill 给 LLM 一份按场景展开的"专家手册"，比往 system prompt 里塞更多规则更可扩展。
 
+### Custom Subagent（与 Multi-Agent 独立）
+
+用户/项目用 `AGENT.md` 定义专属子 Agent（独立 prompt、工具白名单、可选模型与 maxTurns）。三种触发：主 Agent `run_subagent`、入站路由 LLM、消息前缀 `/subagent:name`（空格形式管理命令不执行任务）。管理：`/subagent list|reload|status|create|templates|audit`。长任务：`mode=background` + 完成通知/bg-react；运行管理工具 `running_agents_list` / `terminate_agent` / `steer_agent`。详见 `docs/custom-subagent.md`。
+
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
 v16.1 抽出 `Renderer` 接口 + 三个实现：
@@ -772,6 +776,18 @@ I
 - `/agent-memory clear` - 清空所有 Agent 记忆
 - `/init` - 生成精简项目级记忆 `BETTER.md`；已存在时不覆盖，`/init --force` 可重写
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.bettercli/exports/session-*.md`
+- `/subagent` / `/subagent list` / `/sa-l` - 查看已加载 Custom SubAgent
+- `/subagent create <name> [--project|--user] [--template blank|code-reviewer|researcher] [--force]` - 生成 AGENT.md 脚手架
+- `/subagent templates` - 列出脚手架模板
+- `/subagent reload` - 重新扫描 Custom SubAgent 目录
+- `/subagent status` / `/sa-st` - 查看运行中的 Custom SubAgent 委托
+- `/subagent audit [n]` - 查看最近审计 JSONL
+- `/subagent show <name>` - 查看某个 SubAgent 定义详情
+- `/subagent sessions [n]` - 列出落盘会话（轻量 HA）
+- `/subagent resume [sessionId]` - 从落盘会话续跑
+- `/subagent stats` - 审计事件统计
+- `/subagent delete <name> --force` - 删除 user/project 定义（不可删 builtin）
+- 任务硬指定（消息前缀，非管理命令）：`/subagent:name …` 或 `/sa:name …`
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱

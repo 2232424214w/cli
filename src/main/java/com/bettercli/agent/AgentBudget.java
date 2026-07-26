@@ -83,6 +83,18 @@ public class AgentBudget {
         );
     }
 
+    /**
+     * 与 {@link #fromLlmClient(LlmClient)} 相同，但可用 {@code maxTurnsOverride} 覆盖硬轮数
+     *（Custom SubAgent 的 maxTurns 配置）。{@code null} 或非正数时不覆盖。
+     */
+    public static AgentBudget fromLlmClient(LlmClient llmClient, Integer maxTurnsOverride) {
+        AgentBudget base = fromLlmClient(llmClient);
+        if (maxTurnsOverride == null || maxTurnsOverride <= 0) {
+            return base;
+        }
+        return new AgentBudget(base.tokenBudget(), base.stagnationWindow(), maxTurnsOverride);
+    }
+
     /** 进入新一轮迭代，返回当前轮次（从 1 开始）。 */
     public int beginIteration() {
         return ++iteration;

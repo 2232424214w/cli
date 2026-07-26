@@ -7,6 +7,13 @@ public class LlmClientFactory {
     private LlmClientFactory() {}
 
     public static LlmClient create(String provider, BetterCliConfig config) {
+        return create(provider, config, null);
+    }
+
+    /**
+     * @param modelOverride 非空时覆盖该 provider 在 config/env 中的默认 model（如路由专用小模型）
+     */
+    public static LlmClient create(String provider, BetterCliConfig config, String modelOverride) {
         if (provider == null) return null;
 
         String normalized = normalizeProvider(provider);
@@ -19,8 +26,9 @@ public class LlmClientFactory {
             return null;
         }
 
-        String model = firstConfigured(config.getModel(normalized),
-                configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider));
+        String model = firstConfigured(modelOverride,
+                firstConfigured(config.getModel(normalized),
+                        configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider)));
         String baseUrl = firstConfigured(config.getBaseUrl(normalized),
                 configuredProvider.equals(normalized) ? null : config.getBaseUrl(configuredProvider));
         String loraId = firstConfigured(config.getLoraId(normalized),

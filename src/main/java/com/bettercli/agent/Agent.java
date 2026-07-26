@@ -24,6 +24,11 @@ import com.bettercli.runtime.CancellationContext;
 import com.bettercli.skill.SkillContextBuffer;
 import com.bettercli.skill.SkillIndexFormatter;
 import com.bettercli.skill.SkillRegistry;
+import com.bettercli.subagent.BgReactCoordinator;
+import com.bettercli.subagent.CustomSubAgentCompletionEvent;
+import com.bettercli.subagent.CustomSubAgentCompletionNotice;
+import com.bettercli.subagent.CustomSubAgentIndexFormatter;
+import com.bettercli.subagent.CustomSubAgentRunner;
 import com.bettercli.util.AnsiStyle;
 import com.bettercli.tool.ToolRegistry;
 import com.bettercli.tool.ToolRegistry.ToolExecutionResult;
@@ -57,6 +62,20 @@ public class Agent {
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
+    private CustomSubAgentRunner customSubAgentRunner;
+    private final BgReactCoordinator bgReactCoordinator = new BgReactCoordinator();
+    private final java.util.concurrent.atomic.AtomicBoolean inRun =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /**
+     * 会话世代：/clear 递增，使已排队的 bg-react 与迟到的完成通知注入失效
+     * （单进程等价于 1024 `/new` 清 Redis running key）。
+     */
+    private final java.util.concurrent.atomic.AtomicLong sessionEpoch =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    /** 微信等通道默认后台委托；CLI 默认前台。 */
+    private volatile boolean subagentBackgroundDefault;
+    /** bg-react 汇总文本消费者（微信推送）；null 则只走 renderer。 */
+    private volatile java.util.function.Consumer<String> bgReactReplyConsumer;
     private Renderer renderer;
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
@@ -64,6 +83,8 @@ public class Agent {
     private SessionMessageIndexer sessionMessageIndexer;
     /** 对标 1024 session.jsonl：compacted 检查点持久化与 Resume 快进。 */
     private SessionCheckpointStore sessionCheckpointStore;
+    /** 无 SessionMessageIndexer 时的父会话 id（如微信通道）。 */
+    private volatile String fallbackConversationId;
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。会话级内存态，不持久化；
     // 每次 Agent 实例独立持有，通过 toolRegistry 注入给 update_plan 工具读写。
     private final PlanStore planStore = new PlanStore();
@@ -124,10 +145,69 @@ public class Agent {
     }
 
     /**
-     * 把 Planner / AgentOrchestrator 挂成 ReAct 工具（模式统一：单入口 + 按需调用）。
+     * 把 Planner / AgentOrchestrator / Custom SubAgent 挂成 ReAct 工具（模式统一：单入口 + 按需调用）。
      */
     private void wireModeCapabilityTools() {
         toolRegistry.setModeCapabilityHandlers(this::createPlanViaTool, this::runTeamViaTool);
+        toolRegistry.setRunSubagentHandler(this::runSubagentViaTool);
+        toolRegistry.setRunningAgentManagementHandlers(
+                this::runningAgentsListViaTool,
+                this::terminateAgentViaTool,
+                this::steerAgentViaTool);
+    }
+
+    /**
+     * 注入 Custom SubAgent 运行时（语义委托 run_subagent）。与 /team Multi-Agent 独立。
+     */
+    public void setCustomSubAgentRunner(CustomSubAgentRunner customSubAgentRunner) {
+        this.customSubAgentRunner = customSubAgentRunner;
+        if (customSubAgentRunner != null) {
+            customSubAgentRunner.setCompletionListener(this::onSubAgentBackgroundComplete);
+        }
+        toolRegistry.setRunningAgentManagementHandlers(
+                this::runningAgentsListViaTool,
+                this::terminateAgentViaTool,
+                this::steerAgentViaTool);
+        refreshSystemPromptAfterSubagentChange();
+    }
+
+    private String runningAgentsListViaTool() {
+        if (customSubAgentRunner == null) {
+            return "running_agents_list 失败: Custom SubAgent 未初始化";
+        }
+        String parentId = sessionMessageIndexer == null
+                ? fallbackConversationId : sessionMessageIndexer.getConversationId();
+        return customSubAgentRunner.formatRunningTree(parentId);
+    }
+
+    private String terminateAgentViaTool(String conversationId) {
+        if (customSubAgentRunner == null) {
+            return "terminate_agent 失败: Custom SubAgent 未初始化";
+        }
+        return customSubAgentRunner.terminateAgent(conversationId);
+    }
+
+    private String steerAgentViaTool(String conversationId, String message) {
+        if (customSubAgentRunner == null) {
+            return "steer_agent 失败: Custom SubAgent 未初始化";
+        }
+        return customSubAgentRunner.steerAgent(conversationId, message);
+    }
+
+    /** 微信等通道可设为 true，使 run_subagent 默认 background。 */
+    public void setSubagentBackgroundDefault(boolean backgroundDefault) {
+        this.subagentBackgroundDefault = backgroundDefault;
+    }
+
+    /** bg-react 结果推送（如微信 send）；未设置时走 renderer.stream。 */
+    public void setBgReactReplyConsumer(java.util.function.Consumer<String> consumer) {
+        this.bgReactReplyConsumer = consumer;
+    }
+
+    private void refreshSystemPromptAfterSubagentChange() {
+        if (conversationHistory != null && !conversationHistory.isEmpty()) {
+            conversationHistory.set(0, LlmClient.Message.system(buildSystemPrompt("")));
+        }
     }
 
     private String createPlanViaTool(String goal) {
@@ -185,6 +265,152 @@ public class Agent {
             return "run_team 失败: " + e.getMessage();
         } finally {
             teamNesting.decrementAndGet();
+        }
+    }
+
+    private String runSubagentViaTool(String name, String task, String mode) {
+        if (customSubAgentRunner == null) {
+            return "run_subagent 失败: Custom SubAgent 未初始化";
+        }
+        PrintStream progress = null;
+        try {
+            progress = renderer().stream();
+        } catch (Exception e) {
+            log.debug("Custom SubAgent progress stream unavailable: {}", e.getMessage());
+        }
+        String parentConversationId = sessionMessageIndexer == null
+                ? fallbackConversationId : sessionMessageIndexer.getConversationId();
+        boolean background = resolveSubagentBackground(mode);
+        return customSubAgentRunner.startAsync(
+                name, task, llmClient, toolRegistry, progress, parentConversationId,
+                background, null, sessionEpoch.get());
+    }
+
+    private boolean resolveSubagentBackground(String mode) {
+        if (mode != null && !mode.isBlank()) {
+            String m = mode.trim().toLowerCase(java.util.Locale.ROOT);
+            if ("background".equals(m) || "bg".equals(m) || "async".equals(m)) {
+                return true;
+            }
+            if ("foreground".equals(m) || "fg".equals(m) || "sync".equals(m)) {
+                return false;
+            }
+        }
+        String env = System.getProperty("bettercli.subagent.default.mode");
+        if (env == null || env.isBlank()) {
+            env = System.getenv("BETTERCLI_SUBAGENT_DEFAULT_MODE");
+        }
+        if (env != null && !env.isBlank()) {
+            String m = env.trim().toLowerCase(java.util.Locale.ROOT);
+            if ("background".equals(m) || "bg".equals(m)) {
+                return true;
+            }
+            if ("foreground".equals(m) || "fg".equals(m)) {
+                return false;
+            }
+        }
+        return subagentBackgroundDefault;
+    }
+
+    private void onSubAgentBackgroundComplete(CustomSubAgentCompletionEvent event) {
+        if (event == null) {
+            return;
+        }
+        final long epochAtStart = event.parentSessionEpoch();
+        if (sessionEpoch.get() != epochAtStart) {
+            log.info("drop stale SubAgent completion: startedEpoch={} currentEpoch={} child={}",
+                    epochAtStart, sessionEpoch.get(), event.childSessionId());
+            return;
+        }
+        String notice = CustomSubAgentCompletionNotice.format(event);
+        synchronized (conversationHistory) {
+            if (sessionEpoch.get() != epochAtStart) {
+                return;
+            }
+            conversationHistory.add(LlmClient.Message.user(notice));
+        }
+        String parentId = event.parentConversationId();
+        bgReactCoordinator.markSessionWrite(parentId);
+        bgReactCoordinator.enqueue(parentId, new BgReactCoordinator.BgReactTask() {
+            @Override
+            public String run() throws Exception {
+                if (sessionEpoch.get() != epochAtStart) {
+                    log.info("bg-react skip: session cleared (epoch {} -> {})",
+                            epochAtStart, sessionEpoch.get());
+                    return "";
+                }
+                waitUntilAgentIdle(60_000);
+                if (sessionEpoch.get() != epochAtStart) {
+                    return "";
+                }
+                if (CancellationContext.isCancelled()) {
+                    return "";
+                }
+                return runBgReactTurn();
+            }
+
+            @Override
+            public void onReply(String reply) {
+                if (sessionEpoch.get() != epochAtStart) {
+                    return;
+                }
+                deliverBgReactReply(reply);
+            }
+        });
+    }
+
+    private void waitUntilAgentIdle(long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + Math.max(1_000, timeoutMs);
+        while (inRun.get() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+    }
+
+    private String runBgReactTurn() {
+        String prompt = "[bg-react] 请根据最新的 SubAgent 完成通知处理："
+                + "若所有预期子任务已完成则汇总回复用户；"
+                + "若仍有未完成则只输出空或极短确认且不要重复已推送内容；"
+                + "若结果已在之前回复中体现则静默（可只回复 OK）。";
+        LlmClient override = com.bettercli.subagent.BgReactClientResolver.resolve(llmClient);
+        LlmClient previous = this.llmClient;
+        boolean swapped = override != null && override != previous;
+        if (swapped) {
+            setLlmClient(override);
+            log.info("bg-react start with override model={} ({})",
+                    override.getModelName(), override.getProviderName());
+        } else {
+            log.info("bg-react start");
+        }
+        try {
+            return run(prompt);
+        } finally {
+            if (swapped) {
+                setLlmClient(previous);
+            }
+        }
+    }
+
+    private void deliverBgReactReply(String reply) {
+        if (reply == null || reply.isBlank()) {
+            return;
+        }
+        String trimmed = reply.trim();
+        if ("OK".equalsIgnoreCase(trimmed) || "ok.".equalsIgnoreCase(trimmed)) {
+            return;
+        }
+        java.util.function.Consumer<String> consumer = bgReactReplyConsumer;
+        if (consumer != null) {
+            try {
+                consumer.accept(trimmed);
+                return;
+            } catch (Exception e) {
+                log.debug("bg-react consumer failed: {}", e.getMessage());
+            }
+        }
+        try {
+            renderer().stream().println(trimmed);
+        } catch (Exception e) {
+            log.debug("bg-react renderer failed: {}", e.getMessage());
         }
     }
 
@@ -274,6 +500,12 @@ public class Agent {
         }
     }
 
+    /** 无会话索引时仍可把 parentConversationId 写入 Custom SubAgent 审计/落盘。 */
+    public void setFallbackConversationId(String conversationId) {
+        this.fallbackConversationId = conversationId == null || conversationId.isBlank()
+                ? null : conversationId.trim();
+    }
+
     /**
      * 获取渲染器；首次调用时如果未设置，懒加载一个 {@link PlainRenderer} 兜底，
      * 保证旧调用方（构造 Agent 后没有 setRenderer 的代码、单测等）行为不变。
@@ -289,6 +521,15 @@ public class Agent {
      * 运行 Agent 循环（上下文压缩对标 1024：Pre-Turn / Mid-Turn / API 兜底）。
      */
     public String run(String userInput) {
+        inRun.set(true);
+        try {
+            return runInternal(userInput);
+        } finally {
+            inRun.set(false);
+        }
+    }
+
+    private String runInternal(String userInput) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         pruneHistoricalImagePayloads();
         // 存入短期记忆
@@ -463,9 +704,15 @@ public class Agent {
     }
 
     /**
-     * 清空对话历史并重建基础系统提示，不影响长期记忆条目
+     * 清空对话历史并重建基础系统提示，不影响长期记忆条目。
+     * 同时静默取消未完成的 Custom SubAgent，并递增 sessionEpoch 使已排队 bg-react 失效。
      */
     public void clearHistory() {
+        // 先静默取消进行中的委托（其 finally 仍可能回调完成通知），再递增 epoch 使已入队 bg-react 失效
+        if (customSubAgentRunner != null) {
+            customSubAgentRunner.cancelAllPending(false);
+        }
+        sessionEpoch.incrementAndGet();
         conversationHistory.clear();
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
 
@@ -490,6 +737,11 @@ public class Agent {
                 log.warn("afterClearHook failed: {}", e.toString());
             }
         }
+    }
+
+    /** 测试可见：当前会话世代（/clear 后递增）。 */
+    long sessionEpoch() {
+        return sessionEpoch.get();
     }
 
     /**
@@ -546,13 +798,18 @@ public class Agent {
     }
 
     private String buildSystemPrompt(String memoryContext) {
-        return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
+        String assembled = promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
                 .memoryContext(memoryContext)
                 .externalContext(buildExternalContext())
                 .skillIndex(buildSkillIndex())
                 .toolsEnabled(llmClient == null || llmClient.supportsTools())
                 .build());
+        String subagentIndex = buildCustomSubAgentIndex();
+        if (subagentIndex == null || subagentIndex.isBlank()) {
+            return assembled;
+        }
+        return assembled + "\n\n" + subagentIndex.trim();
     }
 
     /**
@@ -663,6 +920,18 @@ public class Agent {
         }
     }
 
+    private String buildCustomSubAgentIndex() {
+        if (customSubAgentRunner == null || customSubAgentRunner.registry() == null) {
+            return "";
+        }
+        try {
+            return CustomSubAgentIndexFormatter.format(customSubAgentRunner.registry().all());
+        } catch (Exception e) {
+            log.warn("Failed to build Custom SubAgent index", e);
+            return "";
+        }
+    }
+
     private String prependSkillBodies(String userInput) {
         if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
             return userInput;
@@ -727,6 +996,94 @@ public class Agent {
      */
     public List<LlmClient.Message> getConversationHistory() {
         return new ArrayList<>(conversationHistory);
+    }
+
+    /**
+     * 路由命中 Custom SubAgent 后，把本轮 user/assistant 写入主会话，保持对话连续。
+     */
+    public void recordExternalTurn(String userInput, String assistantReply) {
+        recordExternalTurn(userInput, assistantReply, null);
+    }
+
+    /**
+     * 路由/硬指定命中后写入主会话；{@code viaSubagent} 非空时在 assistant 内容前标注来源（对标文档可观测）。
+     */
+    public void recordExternalTurn(String userInput, String assistantReply, String viaSubagent) {
+        if (userInput != null && !userInput.isBlank()) {
+            memoryManager.addUserMessage(userInput);
+            conversationHistory.add(LlmClient.Message.user(userInput));
+        }
+        String reply = assistantReply == null ? "" : assistantReply;
+        if (viaSubagent != null && !viaSubagent.isBlank()) {
+            String tag = "[via:" + viaSubagent.trim() + "]\n";
+            if (!reply.startsWith(tag) && !reply.startsWith("[via:")) {
+                reply = tag + reply;
+            }
+        }
+        memoryManager.addAssistantMessage(reply);
+        conversationHistory.add(LlmClient.Message.assistant(reply));
+        if (sessionMessageIndexer != null) {
+            try {
+                sessionMessageIndexer.indexIncremental(new ArrayList<>(conversationHistory));
+            } catch (Exception e) {
+                log.debug("异步索引会话消息失败: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 主会话近期 transcript 摘录，供路由直达子 Agent 延续上下文（跳过 system）。
+     */
+    public String buildTranscriptExcerpt(int maxMessages, int maxChars) {
+        List<LlmClient.Message> msgs = recentDialogueMessages(maxMessages);
+        StringBuilder sb = new StringBuilder();
+        for (LlmClient.Message m : msgs) {
+            String role = m.role() == null ? "?" : m.role();
+            String content = m.content() == null ? "" : m.content().trim();
+            if (content.isEmpty()) {
+                continue;
+            }
+            if (content.length() > 400) {
+                content = content.substring(0, 400) + "...";
+            }
+            if (sb.length() > 0) {
+                sb.append("\n");
+            }
+            sb.append(role).append(": ").append(content);
+            if (sb.length() >= maxChars) {
+                break;
+            }
+        }
+        if (sb.length() > maxChars) {
+            return sb.substring(0, Math.max(0, maxChars)) + "...";
+        }
+        return sb.toString();
+    }
+
+    /** 供 Custom SubAgent 路由模式 seed 的近期对话（user/assistant，无 tool）。 */
+    public List<LlmClient.Message> recentDialogueMessages(int maxMessages) {
+        int limit = Math.max(1, maxMessages);
+        List<LlmClient.Message> msgs = new ArrayList<>();
+        for (LlmClient.Message m : conversationHistory) {
+            if (m == null) {
+                continue;
+            }
+            String role = m.role() == null ? "" : m.role().toLowerCase();
+            if ("system".equals(role) || "tool".equals(role)) {
+                continue;
+            }
+            if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
+                continue;
+            }
+            if (m.content() == null || m.content().isBlank()) {
+                continue;
+            }
+            msgs.add(m);
+        }
+        if (msgs.size() > limit) {
+            return new ArrayList<>(msgs.subList(msgs.size() - limit, msgs.size()));
+        }
+        return msgs;
     }
 
     /**
@@ -992,6 +1349,42 @@ public class Agent {
             log.info("Executing {} tool calls in parallel (iteration={})", invocations.size(), iteration);
         }
         List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        if (customSubAgentRunner != null) {
+            long pending = results.stream()
+                    .filter(r -> CustomSubAgentRunner.parsePendingSessionId(r.result()) != null)
+                    .count();
+            if (pending > 0) {
+                String phase = customSubAgentRunner.activeRunsSummary();
+                if (phase == null || phase.isBlank()) {
+                    phase = "sa×" + pending;
+                }
+                try {
+                    renderer().updateStatus(currentStatus(phase));
+                } catch (Exception e) {
+                    log.debug("subagent status update skipped: {}", e.getMessage());
+                }
+                try {
+                    renderer().stream().println(AnsiStyle.subtle(
+                            "  ⏳ 等待 " + pending + " 个 Custom SubAgent 完成…"));
+                } catch (Exception e) {
+                    log.debug("subagent wait hint skipped: {}", e.getMessage());
+                }
+            }
+            results = customSubAgentRunner.materializeAsyncResults(results);
+            // 防止占位泄漏进对话
+            List<ToolExecutionResult> sanitized = new ArrayList<>(results.size());
+            for (ToolExecutionResult r : results) {
+                if (CustomSubAgentRunner.parsePendingSessionId(r.result()) != null) {
+                    sanitized.add(new ToolExecutionResult(
+                            r.id(), r.name(), r.argumentsJson(),
+                            "run_subagent 失败: 异步结果未回填",
+                            r.elapsedMillis(), false, r.imageParts()));
+                } else {
+                    sanitized.add(r);
+                }
+            }
+            results = sanitized;
+        }
         for (ToolExecutionResult result : results) {
             log.debug("Tool result preview [{}]: {}", result.name(), preview(result.result(), 300));
             emitToolResultSummary(result);

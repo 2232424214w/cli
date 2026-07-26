@@ -444,7 +444,8 @@ public class ConversationHistoryCompactor {
         String content = msg.content() == null ? "" : msg.content();
         String trimmed = content.stripLeading();
         // 系统/运行时注入，不是用户原始输入；也不应进入检查点「近期用户消息」段
-        if (trimmed.startsWith(SUMMARY_MARKER)
+        if (isSyntheticUserTurn(content)
+                || trimmed.startsWith(SUMMARY_MARKER)
                 || trimmed.startsWith(LEGACY_SUMMARY_MARKER)
                 || trimmed.startsWith(HARD_TRUNCATE_MARKER)
                 || trimmed.startsWith("[反思提示]")
@@ -484,6 +485,21 @@ public class ConversationHistoryCompactor {
         } catch (Exception e) {
             log.warn("checkpoint listener failed (memory compaction kept): {}", e.toString());
         }
+    }
+
+    /**
+     * 不计入「真实用户轮次」的合成 user 消息：SubAgent 完成通知、bg-react 调度提示。
+     * 前缀须与 {@code CustomSubAgentCompletionNotice.RUNTIME_PREFIX} / Agent bg-react prompt 保持一致。
+     */
+    static boolean isSyntheticUserTurn(String content) {
+        if (content == null || content.isBlank()) {
+            return false;
+        }
+        if (content.startsWith("[bg-react]")) {
+            return true;
+        }
+        return content.contains("BetterCLI runtime context (internal):")
+                && content.contains("[SubAgent 完成通知]");
     }
 
     /**

@@ -51,6 +51,7 @@ final class BetterCliCompleter implements Completer {
                 || completeConfig(input, candidates)
                 || completeMcp(input, candidates)
                 || completeSkill(input, candidates)
+                || completeSubagent(input, candidates)
                 || completeTask(input, candidates)
                 || completeBrowser(input, candidates)
                 || completeSnapshot(input, candidates)) {
@@ -180,6 +181,66 @@ final class BetterCliCompleter implements Completer {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addSkillCandidates(candidates, prefix);
             return true;
+        }
+        return true;
+    }
+
+    private boolean completeSubagent(String input, List<Candidate> candidates) {
+        if (!input.equalsIgnoreCase("/subagent") && !input.regionMatches(true, 0, "/subagent ", 0, 10)
+                && !input.equalsIgnoreCase("/sa") && !input.regionMatches(true, 0, "/sa ", 0, 4)) {
+            return false;
+        }
+        String payload;
+        if (input.regionMatches(true, 0, "/subagent", 0, 9)) {
+            payload = input.length() <= 9 ? "" : input.substring(9).trim();
+            if (input.length() > 9 && input.charAt(9) == ' ') {
+                payload = input.substring(10);
+            } else if (input.length() == 9) {
+                payload = "";
+            }
+        } else {
+            payload = input.length() <= 3 ? "" : input.substring(3).trim();
+            if (input.length() > 3 && input.charAt(3) == ' ') {
+                payload = input.substring(4);
+            }
+        }
+        String[] parts = payload.trim().isEmpty() ? new String[0] : payload.trim().split("\\s+");
+        if (parts.length <= 1 && !payload.endsWith(" ")) {
+            addMatching(candidates, "Custom SubAgent", payload,
+                    option("list", "查看 Custom SubAgent 列表"),
+                    option("reload", "重新扫描 Custom SubAgent 目录"),
+                    option("status", "查看运行中委托"),
+                    option("create", "生成 AGENT.md 脚手架"),
+                    option("templates", "列出脚手架模板"),
+                    option("audit", "查看审计日志"),
+                    option("show", "查看某个 SubAgent 定义"),
+                    option("sessions", "列出落盘会话（轻量 HA）"),
+                    option("resume", "从落盘会话续跑"),
+                    option("stats", "审计事件统计"),
+                    option("delete", "删除 user/project 定义（需 --force）"));
+            return true;
+        }
+        if (parts.length >= 1 && "show".equalsIgnoreCase(parts[0])) {
+            return true;
+        }
+        if (parts.length >= 1 && "create".equalsIgnoreCase(parts[0])) {
+            if (parts.length == 1 && payload.endsWith(" ")) {
+                addMatching(candidates, "create 选项", "",
+                        option("--project", "写入项目 .bettercli/agents（默认）"),
+                        option("--user", "写入 ~/.bettercli/agents"),
+                        option("--template", "指定模板"),
+                        option("--force", "覆盖已有 AGENT.md"));
+                return true;
+            }
+            if (parts.length >= 2 && ("--template".equalsIgnoreCase(parts[parts.length - 1])
+                    || "-t".equalsIgnoreCase(parts[parts.length - 1])) && payload.endsWith(" ")) {
+                addMatching(candidates, "模板", "",
+                        option("blank", "空白模板"),
+                        option("code-reviewer", "只读审查"),
+                        option("researcher", "调研（只读+联网）"),
+                        option("sql-analyzer", "SQL 分析"));
+                return true;
+            }
         }
         return true;
     }
