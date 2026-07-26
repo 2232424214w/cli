@@ -62,6 +62,12 @@ public class Agent {
     private final BgReactCoordinator bgReactCoordinator = new BgReactCoordinator();
     private final java.util.concurrent.atomic.AtomicBoolean inRun =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    /**
+     * 会话世代：/clear 递增，使已排队的 bg-react 与迟到的完成通知注入失效
+     * （单进程等价于 1024 `/new` 清 Redis running key）。
+     */
+    private final java.util.concurrent.atomic.AtomicLong sessionEpoch =
+            new java.util.concurrent.atomic.AtomicLong(0);
     /** 微信等通道默认后台委托；CLI 默认前台。 */
     private volatile boolean subagentBackgroundDefault;
     /** bg-react 汇总文本消费者（微信推送）；null 则只走 renderer。 */
@@ -284,8 +290,12 @@ public class Agent {
         if (event == null) {
             return;
         }
+        final long epochAtEnqueue = sessionEpoch.get();
         String notice = CustomSubAgentCompletionNotice.format(event);
         synchronized (conversationHistory) {
+            if (sessionEpoch.get() != epochAtEnqueue) {
+                return;
+            }
             conversationHistory.add(LlmClient.Message.user(notice));
         }
         String parentId = event.parentConversationId();
@@ -293,7 +303,15 @@ public class Agent {
         bgReactCoordinator.enqueue(parentId, new BgReactCoordinator.BgReactTask() {
             @Override
             public String run() throws Exception {
+                if (sessionEpoch.get() != epochAtEnqueue) {
+                    log.info("bg-react skip: session cleared (epoch {} -> {})",
+                            epochAtEnqueue, sessionEpoch.get());
+                    return "";
+                }
                 waitUntilAgentIdle(60_000);
+                if (sessionEpoch.get() != epochAtEnqueue) {
+                    return "";
+                }
                 if (CancellationContext.isCancelled()) {
                     return "";
                 }
@@ -302,6 +320,9 @@ public class Agent {
 
             @Override
             public void onReply(String reply) {
+                if (sessionEpoch.get() != epochAtEnqueue) {
+                    return;
+                }
                 deliverBgReactReply(reply);
             }
         });
@@ -568,9 +589,15 @@ public class Agent {
     }
 
     /**
-     * 清空对话历史并重建基础系统提示，不影响长期记忆条目
+     * 清空对话历史并重建基础系统提示，不影响长期记忆条目。
+     * 同时静默取消未完成的 Custom SubAgent，并递增 sessionEpoch 使已排队 bg-react 失效。
      */
     public void clearHistory() {
+        // 先静默取消进行中的委托（其 finally 仍可能回调完成通知），再递增 epoch 使已入队 bg-react 失效
+        if (customSubAgentRunner != null) {
+            customSubAgentRunner.cancelAllPending(false);
+        }
+        sessionEpoch.incrementAndGet();
         conversationHistory.clear();
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
 
@@ -582,6 +609,11 @@ public class Agent {
         // 清空 ReAct 规划（对标 /clear 清空其它会话级状态）
         planStore.clear();
         sessionNotebook.clear();
+    }
+
+    /** 测试可见：当前会话世代（/clear 后递增）。 */
+    long sessionEpoch() {
+        return sessionEpoch.get();
     }
 
     /**

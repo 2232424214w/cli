@@ -57,6 +57,8 @@ public final class CustomSubAgentRunner {
     private final Map<String, PendingRun> pendingBySession = new ConcurrentHashMap<>();
     private final Map<String, PendingRun> backgroundBySession = new ConcurrentHashMap<>();
     private final Set<String> completionFiredSessions = ConcurrentHashMap.newKeySet();
+    /** /clear 静默取消：禁止随后 finally / cancelMap 再发完成通知。 */
+    private final Set<String> suppressCompletionSessions = ConcurrentHashMap.newKeySet();
     private final AgentSteerService steerService = new AgentSteerService();
     private final CustomSubAgentSessionStore sessionStore;
     private volatile java.util.function.Consumer<CustomSubAgentCompletionEvent> completionListener = e -> {};
@@ -386,34 +388,45 @@ public final class CustomSubAgentRunner {
         return out;
     }
 
-    /** 取消所有尚未完成的前台 / 后台委托。 */
+    /** 取消所有尚未完成的前台 / 后台委托（后台会发 cancelled 完成通知）。 */
     public void cancelAllPending() {
-        cancelMap(pendingBySession);
-        cancelMap(backgroundBySession);
+        cancelAllPending(true);
+    }
+
+    /**
+     * @param notifyBackgroundCompletion false 时只取消不发完成通知（供 /clear 静默丢弃进行中委托）
+     */
+    public void cancelAllPending(boolean notifyBackgroundCompletion) {
+        cancelMap(pendingBySession, notifyBackgroundCompletion);
+        cancelMap(backgroundBySession, notifyBackgroundCompletion);
         pendingBySession.clear();
         backgroundBySession.clear();
     }
 
-    private void cancelMap(Map<String, PendingRun> map) {
+    private void cancelMap(Map<String, PendingRun> map, boolean notifyBackgroundCompletion) {
         for (Map.Entry<String, PendingRun> e : new ArrayList<>(map.entrySet())) {
             PendingRun p = e.getValue();
+            String sessionId = e.getKey();
+            if (!notifyBackgroundCompletion) {
+                suppressCompletionSessions.add(sessionId);
+            }
             if (p != null && p.cancelToken() != null) {
                 p.cancelToken().cancel();
             }
             if (p != null && p.future() != null) {
                 p.future().cancel(true);
             }
-            LiveSubAgentRun live = activeRuns.remove(e.getKey());
+            LiveSubAgentRun live = activeRuns.remove(sessionId);
             if (live != null) {
                 live.cancelToken().cancel();
             }
-            sessionStore.finish(e.getKey(), CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
+            sessionStore.finish(sessionId, CustomSubAgentSessionStore.Status.CANCELLED, null, List.of());
             CustomSubAgentAudit.record("SUBAGENT_CANCELLED",
-                    p == null ? null : p.name(), e.getKey(), null, null);
-            steerService.clear(e.getKey());
-            if (p != null && p.background()) {
+                    p == null ? null : p.name(), sessionId, null, null);
+            steerService.clear(sessionId);
+            if (notifyBackgroundCompletion && p != null && p.background()) {
                 fireCompletionOnce(new CustomSubAgentCompletionEvent(
-                        p.parentId(), e.getKey(), p.name(), p.toolCallId(), p.task(),
+                        p.parentId(), sessionId, p.name(), p.toolCallId(), p.task(),
                         false, true, "用户取消"));
             }
         }
@@ -423,7 +436,13 @@ public final class CustomSubAgentRunner {
         if (event == null || event.childSessionId() == null) {
             return;
         }
-        if (!completionFiredSessions.add(event.childSessionId())) {
+        String sessionId = event.childSessionId();
+        if (suppressCompletionSessions.remove(sessionId)) {
+            completionFiredSessions.add(sessionId);
+            log.debug("suppress background completion after quiet cancel session={}", sessionId);
+            return;
+        }
+        if (!completionFiredSessions.add(sessionId)) {
             return;
         }
         fireCompletion(event);

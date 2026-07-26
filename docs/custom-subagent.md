@@ -76,7 +76,7 @@
 | 完成后写通知 + 记写入时间 + 触发 bg-react | `onSubAgentBackgroundComplete` | ✅ | 顺序：history 追加 → `markSessionWrite` → `enqueue` |
 | 完成通知格式（围栏 / Action / status） | `CustomSubAgentCompletionNotice` | ✅ | 前缀为 `BetterCLI runtime context`（对标 ReactMind）；多 `agent:` 字段 |
 | 通知 role=user | `Message.user(notice)` | ✅ | |
-| 通知不计入真实用户轮次 | `isCompletionNotice` 已提供 | ⚠️ | **压缩器未排除**：`ConversationHistoryCompactor` 仍把完成通知当 user 轮次计入 retain |
+| 通知不计入真实用户轮次 | `ConversationHistoryCompactor.isSyntheticUserTurn` | ✅ | 完成通知与 `[bg-react]` 不占 retain；极端仅合成消息时回退按全部 user 计 |
 | bg-react 空/静默不推送 | `deliverBgReactReply` 跳过 blank / `OK` | ✅ | |
 | session 写入时间去重 | `BgReactCoordinator` | ✅ | **内存 Map**；进程重启丢失；无 24h TTL |
 | 仅 foreground 计入 pending | background 不进 materialize 等待 | ✅ | 对标 `launched && !background` |
@@ -88,13 +88,14 @@
 | 微信放行三运行管理工具 | `WechatPolicyDecider` | ✅ | |
 | Redis running Hash / reactTraceId | — | ❌ | 单机无需 |
 | 大象 Rendezvous / backgroundSubagentCallback | — | ❌ | 微信 iLink `setBgReactReplyConsumer` 替代 |
-| `/new` 后 `isRunning=false` 跳过 bg-react | `/clear` 只清 history | ⚠️ | 已排队的 bg-react 仍可能跑；无 Redis key 守卫 |
+| `/new` 后跳过 bg-react | `/clear` → 静默 `cancelAllPending(false)` + `sessionEpoch++` | ✅ | 不换 conversationId；epoch 使已排队 bg-react 失效（单进程等价） |
 | RoleHub / belongPaas | — | ❌ | 平台专属 |
 
 ### 已知限制（与 1024 §8 对应）
 
 - 多子 Agent 陆续完成仍会多轮 bg-react（去重只跳「已覆盖写入」的重复入队）。
-- 完成通知占 history 体积；极端堆积会抬高压缩压力（且当前计入 user 轮次，见上 ⚠️）。
+- 完成通知仍占 history 体积（不计 retain 轮次，但占 token）；极端堆积仍会触发压缩。
+- `/stop` 仍会取消后台子 Agent（有意偏差，见矩阵）。
 
 ### 行为摘要
 

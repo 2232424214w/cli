@@ -121,7 +121,7 @@ src/main/java/com/bettercli/
 - inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。
 - 默认 CLI 启动路径应先 `Renderer.start()` 并初始化底部 dock；inline 首屏不要在 `readLine` 前裸写 stdout，而是通过 `InlineRenderer.installStartupScreen(...)` 挂到 `LineReader.CALLBACK_INIT`，首次进入输入时用 `printAbove` 一次性显示完整 Banner + tips，避免 logo 被 LineReader 首次重绘滚出可视区域。
 - `BottomStatusBar` 现在是 JLine `Status` 托管的底部 dock：由 JLine 维护滚动区域和状态行位置，不再手写 `\n` / `moveUp` / `CLEAR_TO_EOS` 清屏。输入期会把 LineReader 光标定位到 dock 上方一行，让 `*` 输入行和 Status 同处底部区域；dock 保留两类信息：上层模式 + MCP/Skill 摘要，下层 Auto Model / model / phase / ctx 百分比与 token / cost / elapsed / cwd。关键字段可用克制的 JLine `AttributedString` 彩色样式突出，但纯文本格式和宽度裁剪逻辑要保持稳定。`ctx` 表示当前仍会带入下一轮请求的上下文估算；`in/out/cache` 表示最近任务的 LLM 调用统计，二者不要混用。
-- 普通任务和斜杠命令提交后，`Main` 会把本轮原始输入以暗色整行块写回 transcript：输入态左提示仍是 `* `，提交回显左提示改为 `>`；单行输入只占一行，不额外追加空白行。普通任务随后再展开 MCP resource / 本地 `@path` 并进入 Agent；不要只依赖 JLine 提交行残留，否则 activity 重绘或 dock 刷新可能让用户输入从可见历史里消失。`/clear` 清空 conversationHistory、shortTermMemory、待注入 Skill buffer，并重建不含上一轮检索记忆的 system prompt；长期记忆保留。`/compact` 会手动压缩当前 ReAct conversationHistory，不等待上下文阈值触发，保留最近 1 个 user 轮次和 tool_call/tool_result 边界。
+- 普通任务和斜杠命令提交后，`Main` 会把本轮原始输入以暗色整行块写回 transcript：输入态左提示仍是 `* `，提交回显左提示改为 `>`；单行输入只占一行，不额外追加空白行。普通任务随后再展开 MCP resource / 本地 `@path` 并进入 Agent；不要只依赖 JLine 提交行残留，否则 activity 重绘或 dock 刷新可能让用户输入从可见历史里消失。`/clear` 清空 conversationHistory、shortTermMemory、待注入 Skill buffer，并重建不含上一轮检索记忆的 system prompt；长期记忆保留。同时静默取消未完成 Custom SubAgent（不发完成通知）并递增 `sessionEpoch`，使已排队 bg-react 失效。`/compact` 会手动压缩当前 ReAct conversationHistory，不等待上下文阈值触发，保留最近 1 个真实 user 轮次和 tool_call/tool_result 边界（SubAgent 完成通知 / `[bg-react]` 不计 retain）。
 - ReAct LLM 调用期间，inline renderer 使用固定高度 live thinking 区动态显示 `Thinking...` 和灰色竖线 reasoning 预览；该区域只能清理自己刚打印的几行，不能用独立 JLine `Display.update()` / `CLEAR_TO_EOS` 向上覆盖 transcript。content 或 tool call 开始前先清掉 live 区，再把完整 reasoning 引用块落到正文区，正文回答用低调标记起始，不再刷强标题。
 - 交互期输出应优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都支持把输出流接到 inline renderer，避免直接争抢 stdout。`CodeIndex` 的索引进度通过 `ProgressListener` 注入，`/index` 应绑定到当前 renderer 输出流。
 - Phase 22 开始，`InlineRenderer` 可绑定当前 `LineReader`；当 `LineReader.isReading()` 为 true 时，`Renderer.stream()` 的完整行输出优先通过 `LineReader#printAbove` 显示在输入行上方，未绑定 / 非读取态 / 测试路径回退到原 `PrintStream`。
@@ -250,6 +250,7 @@ src/main/java/com/bettercli/
 - 轻量 HA：`sessions`/`resume`；`stats` 审计聚合；`delete --force` 删 user/project 定义
 - 路由/硬指定标注 `[via:name]`；可选 Webhook；微信硬指定可用（路由默认关）
 - 长任务（对齐 1024）：微信 conversationId FIFO；`mode=background` + 完成通知 + bg-react 去重；主 Agent 可用 `running_agents_list` / `terminate_agent` / `steer_agent`（子 Agent 剥离）
+- `/clear` 静默取消后台委托 + `sessionEpoch` 作废 bg-react；压缩不计完成通知轮次；`/stop` 仍取消后台（单进程有意偏差，异于 1024「终止思考留后台」）
 - **CLI 对齐已收口**（定义方案 + 长任务后台，见 `docs/custom-subagent.md`）；RoleHub / belongPaas / Redis 运行表不做
 
 ## 修改时的硬规则
@@ -298,7 +299,7 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
-| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CustomSubAgentRuntimeMgmtTest,ConversationMessageQueueTest,WechatPolicyDeciderTest,CliCommandParserTest` |
+| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CustomSubAgentRuntimeMgmtTest,ConversationMessageQueueTest,WechatPolicyDeciderTest,CliCommandParserTest,ConversationHistoryCompactorTest,AgentClearHistoryTest` |
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent reviewer fail-safe | `mvn test -Dtest=ReviewerFailSafeIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |

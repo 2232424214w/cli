@@ -95,16 +95,26 @@ public class ConversationHistoryCompactor {
 
         int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
 
-        List<Integer> userIndices = new ArrayList<>();
+        // 轮次按「真实用户」计：SubAgent 完成通知 / bg-react 合成注入不占 retain 预算
+        List<Integer> realUserIndices = new ArrayList<>();
+        List<Integer> allUserIndices = new ArrayList<>();
         for (int i = systemEnd; i < history.size(); i++) {
-            if ("user".equals(history.get(i).role())) {
-                userIndices.add(i);
+            LlmClient.Message msg = history.get(i);
+            if (!"user".equals(msg.role())) {
+                continue;
+            }
+            allUserIndices.add(i);
+            if (!isSyntheticUserTurn(msg.content())) {
+                realUserIndices.add(i);
             }
         }
         int effectiveRetainRounds = Math.max(1, retainRounds);
+        List<Integer> userIndices = realUserIndices.size() > effectiveRetainRounds
+                ? realUserIndices
+                : allUserIndices;
         if (userIndices.size() <= effectiveRetainRounds) {
-            log.info("compactIfNeeded skip: only {} user turns, < retain {}",
-                    userIndices.size(), effectiveRetainRounds);
+            log.info("compactIfNeeded skip: only {} user turns (real={}), < retain {}",
+                    userIndices.size(), realUserIndices.size(), effectiveRetainRounds);
             return false;
         }
 
@@ -171,6 +181,21 @@ public class ConversationHistoryCompactor {
                 "hard-truncated conversationHistory after summary failure: tokens %d -> %d, messages -> %d",
                 beforeTokens, afterTokens, rebuilt.size()));
         return true;
+    }
+
+    /**
+     * 不计入「真实用户轮次」的合成 user 消息：SubAgent 完成通知、bg-react 调度提示。
+     * 前缀须与 {@code CustomSubAgentCompletionNotice.RUNTIME_PREFIX} / Agent bg-react prompt 保持一致。
+     */
+    static boolean isSyntheticUserTurn(String content) {
+        if (content == null || content.isBlank()) {
+            return false;
+        }
+        if (content.startsWith("[bg-react]")) {
+            return true;
+        }
+        return content.contains("BetterCLI runtime context (internal):")
+                && content.contains("[SubAgent 完成通知]");
     }
 
     /**

@@ -215,6 +215,37 @@ class ConversationHistoryCompactorTest {
         assertTrue(history.get(1).content().contains("硬截断"));
     }
 
+    @Test
+    void syntheticTurnsDoNotConsumeRetainBudget() {
+        StubCompactor c = new StubCompactor("SUMMARY", 2);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        history.add(LlmClient.Message.user("OldQ " + longText(3_000)));
+        history.add(LlmClient.Message.assistant("OldA"));
+        // 多条完成通知 / bg-react 不应占 retain 槽位
+        history.add(LlmClient.Message.user("""
+                BetterCLI runtime context (internal):
+                [SubAgent 完成通知]
+                status: ✅ done
+                """));
+        history.add(LlmClient.Message.user("[bg-react] 请根据最新的 SubAgent 完成通知处理"));
+        history.add(LlmClient.Message.user("Recent1 " + longText(3_000)));
+        history.add(LlmClient.Message.assistant("A1"));
+        history.add(LlmClient.Message.user("Recent2 " + longText(3_000)));
+        history.add(LlmClient.Message.assistant("A2"));
+
+        assertTrue(ConversationHistoryCompactor.isSyntheticUserTurn(history.get(3).content()));
+        assertTrue(ConversationHistoryCompactor.isSyntheticUserTurn(history.get(4).content()));
+
+        boolean compacted = c.compactIfNeeded(history, 100);
+        assertTrue(compacted);
+        // retain=2 真实轮次 → 保留 Recent1/Recent2；OldQ 进摘要
+        assertTrue(history.get(1).content().contains("SUMMARY"));
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Recent1")));
+        assertTrue(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("Recent2")));
+        assertFalse(history.stream().anyMatch(m -> m.content() != null && m.content().startsWith("OldQ")));
+    }
+
     private static String longText(int chars) {
         StringBuilder sb = new StringBuilder(chars);
         for (int i = 0; i < chars; i++) sb.append('x');
