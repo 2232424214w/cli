@@ -25,8 +25,6 @@ import java.util.Set;
 public class ProjectMemoryLoader {
     private static final Logger log = LoggerFactory.getLogger(ProjectMemoryLoader.class);
 
-    /** 总字符预算（含 @relative/path.md 导入内容），保留原有行为 */
-    private static final int MAX_TOTAL_CHARS = 24_000;
     private static final int MAX_IMPORT_DEPTH = 3;
 
     /** BETTER.md 主体字符上限（对标美团 2200 字符），可通过系统属性覆盖 */
@@ -113,15 +111,41 @@ public class ProjectMemoryLoader {
                 body.append("\n\n");
             }
             body.append("### ").append(label(source.path())).append("\n\n").append(content);
-            if (body.length() >= MAX_TOTAL_CHARS) {
-                return truncateSection(body);
+            // 注入硬预算对齐 1024 MEMORY.md（默认 2200）；读盘仍可更大，由 read_better_md 管理
+            if (body.length() >= paiMdMaxChars) {
+                return formatPromptSection(body, true);
             }
         }
 
         if (body.isEmpty()) {
             return "";
         }
-        return "## BETTER.md 项目记忆\n\n" + body;
+        return formatPromptSection(body, false);
+    }
+
+    /**
+     * 对标 1024：以 {@code <user_memory>} 封装静态注入内容，并按主体字符上限截断。
+     */
+    private String formatPromptSection(StringBuilder body, boolean truncated) {
+        String content = body.toString();
+        boolean wasTruncated = truncated;
+        if (content.length() > paiMdMaxChars) {
+            int keep = Math.max(0, paiMdMaxChars - 40);
+            content = content.substring(0, Math.min(content.length(), keep)).stripTrailing();
+            wasTruncated = true;
+        }
+        StringBuilder out = new StringBuilder();
+        out.append("## BETTER.md 项目记忆（静态注入）\n\n");
+        out.append("<user_memory>\n");
+        out.append(content);
+        if (!content.endsWith("\n")) {
+            out.append('\n');
+        }
+        if (wasTruncated) {
+            out.append("\n[BETTER.md 内容已按 ").append(paiMdMaxChars).append(" 字符预算截断；请用 read_better_md 查看全文并整合]\n");
+        }
+        out.append("</user_memory>");
+        return out.toString();
     }
 
     private List<MemorySource> sources() {
@@ -232,12 +256,6 @@ public class ProjectMemoryLoader {
         return path;
     }
 
-    private static String truncateSection(StringBuilder body) {
-        int keep = Math.max(0, MAX_TOTAL_CHARS - 80);
-        String truncated = body.substring(0, Math.min(body.length(), keep)).stripTrailing();
-        return "## BETTER.md 项目记忆\n\n" + truncated + "\n\n[BETTER.md 内容已按 " + MAX_TOTAL_CHARS + " 字符预算截断]";
-    }
-
     private static String label(Path path) {
         return path.toAbsolutePath().normalize().toString();
     }
@@ -331,6 +349,20 @@ public class ProjectMemoryLoader {
         }
         return String.format("BETTER.md 容量: %d / %d 字符 (%.0f%%) - %s",
                 current, max, ratio * 100, status);
+    }
+
+    /**
+     * P2-2：超 80% / 上限时的整合指引（对标 1024 MEMORY.md 容量管理）。
+     */
+    public static String consolidationGuide() {
+        return """
+                ## BETTER.md 整合指引
+                1. 用 read_better_md 通读现有条目，标出重复/过时/可合并项
+                2. 把相关规则压成高密度短句（一行一条，信息密度优先）
+                3. 删除任务进度、临时调试、一次性路径等不应进静态记忆的内容（这些用 session_search）
+                4. 经 HITL 用文件工具或手工编辑目标 BETTER.md；整合后再 suggest_better_md
+                好的条目示例：用户使用 macOS + zsh；Java 项目 Maven；4 空格缩进；接口统一 Result<T>
+                """.strip();
     }
 
     /**

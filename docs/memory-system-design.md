@@ -1,15 +1,18 @@
 # BetterCLI 记忆系统设计文档
 
-> 状态：**已交付（M1-M4 全部完成）** · 对标美团 1024 Agent 记忆方案 + Claude Code CLAUDE.md 体系
-> 实施分支：feat
+> 状态：**已交付（M1–M5）** · 对标美团 1024 Agent 记忆方案 + Claude Code CLAUDE.md 体系
+> 实施规格：`docs/phase-memory-align-1024.md`
 >
 > 交付清单：
 > - **M1 BETTER.md 静态注入**：递归发现 + 容量管理 + `read_better_md` / `suggest_better_md` 工具
 > - **M2 Agent 事实记忆**：SQLite FTS5 + `agent_memory_search/save/update/delete` 工具 + `/agent-memory` CLI + 迁移
 > - **M3 会话历史检索**：`session_search` 工具 + 五阶段管道 + 异步索引 + jsonl 迁移
 > - **M4 可插拔后端**：`MemoryStoreFactory` + `BETTERCLI_MEMORY_BACKEND` 配置 + PostgreSQL 骨架
+> - **M5 P0**：关闭默认 Legacy 每轮预取；`/save` 写 agent_memory；BETTER 注入 2200 + `<user_memory>`
+> - **M5 P1**：session_search 关键词窗口 + 并行 LLM 摘要（降级 preview）+ `format=json|markdown`
+> - **M5 P2**：confidence PENDING 确认流；默认停 JSON 双写；`/memory` 委托 agent_memory；Legacy `MemoryRetriever` deprecate
 >
-> 未交付（云端场景启用）：PostgreSQL JDBC 实现、SQLite→PostgreSQL 迁移工具完整逻辑
+> 未交付：PostgreSQL JDBC 完整实现、SQLite→PostgreSQL 迁移工具完整逻辑
 
 ## 一、背景与目标
 

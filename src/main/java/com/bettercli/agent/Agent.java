@@ -536,9 +536,12 @@ public class Agent {
         memoryManager.addUserMessage(userInput);
         storeExplicitBrowserMemoryHint(userInput);
 
-        // 检索相关长期记忆，注入到 system prompt
+        // Legacy 每轮被动预取默认关闭（对齐 1024）；稳定事实靠 BETTER.md + agent_memory 启动摘要 / 主动检索
         ContextProfile contextProfile = memoryManager.getContextProfile();
-        String memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
+        String memoryContext = "";
+        if (MemoryManager.isLegacyPrefetchEnabled()) {
+            memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
+        }
         updateSystemPromptWithMemory(memoryContext);
 
         // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）

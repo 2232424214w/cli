@@ -31,7 +31,10 @@ class AgentClearHistoryTest {
     @Test
     void clearHistoryRebuildsSystemPromptAndDropsPendingSkillContext() {
         String oldMemoryDir = System.getProperty("bettercli.memory.dir");
+        String oldPrefetch = System.getProperty("bettercli.memory.legacy_prefetch.enabled");
         System.setProperty("bettercli.memory.dir", tempDir.toString());
+        // 本测验证 /clear 清掉「被动预取」段；需显式开启 legacy prefetch（默认已关）
+        System.setProperty("bettercli.memory.legacy_prefetch.enabled", "true");
         try {
             RecordingClient llmClient = new RecordingClient(List.of(
                     new LlmClient.ChatResponse("assistant", "ok", null, 50_000, 1_000)
@@ -44,7 +47,7 @@ class AgentClearHistoryTest {
             agent.run("CLEAR_MARKER");
 
             assertTrue(llmClient.firstSystemPrompt().contains("CLEAR_MARKER"),
-                    "sanity check: the first turn should inject query-specific long-term memory");
+                    "sanity check: with legacy prefetch on, first turn injects query-specific long-term memory");
             long beforeClearTokens = agent.currentStatus("idle").totalTokens();
 
             skillContextBuffer.push("demo", "pending skill body");
@@ -64,6 +67,11 @@ class AgentClearHistoryTest {
                 System.clearProperty("bettercli.memory.dir");
             } else {
                 System.setProperty("bettercli.memory.dir", oldMemoryDir);
+            }
+            if (oldPrefetch == null) {
+                System.clearProperty("bettercli.memory.legacy_prefetch.enabled");
+            } else {
+                System.setProperty("bettercli.memory.legacy_prefetch.enabled", oldPrefetch);
             }
         }
     }

@@ -45,7 +45,7 @@ mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
 mvn test -DskipTests=false                  # 全量回归
 /init                    # 生成精简项目级记忆 BETTER.md；已有文件不覆盖，/init --force 可重写
 /export                  # 导出当前 ReAct 会话为 Markdown，包含完整 system prompt
-/agent-memory            # 查看 Agent 维护的事实记忆统计；/agent-memory list/search/stats/export/clear 管理视图
+/agent-memory            # Agent 事实记忆；list/search/stats/export/clear；pending/confirm/reject 待确认流
 ```
 
 ## 架构概览
@@ -138,13 +138,13 @@ src/main/java/com/bettercli/
 - `suggest_better_md` 工具：Agent 向 BETTER.md 提议新条目，经 HITL 用户确认（批准 / 修改 / 拒绝 / 跳过）后追加到目标文件（默认项目根 `BETTER.md`，可通过 `target` 指定）。超容量上限时直接拒绝并提示先整合。属于中危写入操作，已纳入 `ApprovalPolicy.DANGEROUS_TOOLS`。
 - Agent 维护的事实记忆（对标美团 1024 Agent `agent_memory` 表，与 `/save` 长期记忆分工不同）：
   - 存储：SQLite FTS5（`~/.bettercli/memory/agent_memory.db`），CRUD + BM25 全文检索 + confidence 加权（`final = -bm25 * (0.5 + confidence)`）+ user_vocabulary boost。
-  - `agent_memory_save`：Agent 自主保存事实/模式/调试经验/工作流；`confidence < 0.7` 不应调用；敏感词（API key/密码/Bearer）会被拦截；`keywords` 必须是 3-8 个专有名词。
-  - `agent_memory_search`：BM25 检索，按当前项目作用域过滤（PROJECT + GLOBAL 都可见）。
+  - `agent_memory_save`：`confidence < 0.7` 拒绝；`[0.7,0.9)` → `PENDING`（TTL 7 天，不可被 search）；`≥0.9` → `ACTIVE`；敏感词拦截；`keywords` 3-8 个。
+  - `agent_memory_search`：仅 ACTIVE；BM25 + 项目作用域（PROJECT + GLOBAL）。
   - `agent_memory_update` / `agent_memory_delete`：更新/删除单条记忆。
-  - 护栏：默认 1000 条上限（`BETTERCLI_MEMORY_MAX_ENTRIES` 可调），超限拒绝写入；`findSimilar` 基于 BM25 相似度（默认 0.85）自动去重；`MemoryMaintenanceScheduler` 后台定期清理 `expired` 状态条目。
-  - 启动注入：`Agent.buildProjectMemoryContext()` 在 BETTER.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限），供 system prompt 引用。
-  - 迁移：启动时 `LongTermMemoryMigrator` 自动从 `~/.bettercli/memory/long_term_memory.json` 迁移到 SQLite（`source=MIGRATED`，幂等，写 `.migrated-to-sqlite` 标记，不删原文件）。
-  - CLI 命令：`/agent-memory`（或 `/am`）查看统计；`/agent-memory list` 列出条目；`/agent-memory search <关键词>` BM25 检索；`/agent-memory stats` 查看统计；`/agent-memory export` 导出为 JSON；`/agent-memory clear` 清空。用户只读视图，写入由 Agent 通过工具自主完成。
+  - 护栏：默认 1000 条上限（`BETTERCLI_MEMORY_MAX_ENTRIES`）；`findSimilar` 去重；`MemoryMaintenanceScheduler` 清理 expired / 超时 PENDING。
+  - 启动注入：`Agent.buildProjectMemoryContext()` 在 BETTER.md 之后追加 Agent 记忆摘要（前 50 条 / 10KB 硬上限）。
+  - 迁移：启动时 `LongTermMemoryMigrator` 从旧 JSON 迁移到 SQLite（幂等）。
+  - CLI：`/agent-memory`（`/am`）list/search/stats/export/clear；`pending` / `confirm <id>` / `reject <id>` 确认流。有 store 时 `/memory *` 委托至此并提示改用本命令。
 - 历史会话检索（对标美团 1024 Agent `session_messages` + `session_search`）：
   - 存储：SQLite FTS5（`~/.bettercli/memory/session_messages.db`），与 `agent_memory.db` 分开。
   - `session_search` 工具：BM25 全文检索 + 五阶段管道（检索 → 按 `conversation_id` 分组 → 加载完整会话 → 截断预览 → 返回）。默认当前项目作用域、回溯 30 天；可指定 `role_filter`（user/assistant）和 `days_back`（1-365）。
@@ -199,12 +199,14 @@ src/main/java/com/bettercli/
 
 ### Memory
 
-- 长期记忆只通过 `/save` 或用户明确要求保存；默认不自动提取事实（可用 `bettercli.memory.auto_extract.enabled=true` 在压缩前 opt-in）
-- 长期记忆检索：关键词 +（可选）语义向量经 RRF 融合（`MemoryVectorIndex` 复用 EmbeddingClient/HnswIndex）；`bettercli.memory.semantic.enabled=false` 可关语义路；FACT 类型不做 24h 时间衰减
-- `BETTER.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `BETTER.md`
-- 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
-- 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
-- Agent 维护的事实记忆（`agent_memory`）由 Agent 自主读写，不需要用户确认；`confidence < 0.7` 不应保存，敏感词（API key/密码/Bearer）会被拦截；默认 1000 条上限，超限拒绝写入；`findSimilar` 自动去重；`/agent-memory` 命令组提供用户只读视图（list/search/stats/export/clear）
+- 对齐 1024 三机制：静态注入（BETTER.md）+ 主动检索（`agent_memory_*` / `session_search`）；**默认不做**每轮自动预取。规格见 `docs/phase-memory-align-1024.md`
+- `session_search`：BM25→分组→关键词窗口→可选 LLM 摘要（`summarize`，失败降级）；`format=json` 返回结构化 sessions
+- `/save` 与 `save_memory` **默认只写** `agent_memory`；JSON 双写需 `BETTERCLI_MEMORY_JSON_DUAL_WRITE=true`；Agent 自主发现用 `agent_memory_save`
+- Legacy 每轮预取默认关；开启时优先 agent_memory BM25（`MemoryRetriever` 已 deprecate）
+- 长期记忆只通过 `/save` 或用户明确要求保存；默认不自动提取事实（`BETTERCLI_MEMORY_AUTO_EXTRACT=true` 可 opt-in）
+- `BETTER.md` 注入硬预算 2200（`<user_memory>`）；超 80% 时 `read_better_md`/`suggest_better_md` 附整合指引
+- `/memory list|search|delete|clear` 有 store 时委托 agent_memory；推荐 `/agent-memory`
+- `agent_memory_save`：`<0.7` 拒、`[0.7,0.9)` PENDING 需 `/agent-memory confirm`、`≥0.9` ACTIVE；敏感词拦截；1000 条上限
 - 两道压缩不要混淆：shortTermMemory 压缩 vs conversationHistory 压缩（后者是防 window 超限的关键）
 - 主轨上下文压缩对标 1024 Context Checkpoint Compaction：双条件触发（总 token > `window − 20k buffer − 8k maxOut`，且消息体 ≥ 20k；总量取 `max(API usage, 消息估算 + Tools Schema)`，避免 Mid-Turn 沿用工具前过期 usage）；触发点为 Pre-Turn（本轮首次 LLM 前，保留当前用户消息）/ Mid-Turn（工具执行后全量压缩）/ `prompt_too_long` 与 `context_window_exceeded` 兜底重试（ReAct / Plan / SubAgent 均接入）；检查点为全 user-role（**最早真实用户消息钉住为任务种子** + 近期真实用户消息 + 中性前缀 AI 摘要，摘要强制分节：任务目标/关键约束/进展/未完成/关键数据），过滤反思/LSP/Skill 等注入；摘要失败走**按轮次**渐进裁剪再硬截断，摘要输入长度随窗口收紧；`summaryMaxTokens` 默认 6000（`bettercli.compaction.summary.max.tokens` / `BETTERCLI_COMPACTION_SUMMARY_MAX_TOKENS` 可调，建议 4000~8000）。成功后写入 `~/.bettercli/history/session-<id>.jsonl` 的 `compacted` 行（Resume 快进 + rotate，快照含 retain），并把摘要索引进 `session_messages` 供 `session_search` 检索；压缩后重置增量索引游标（单线程串行，防竞态）。主轨压缩前可选自动事实提取（`BETTERCLI_MEMORY_AUTO_EXTRACT=true`，默认关）。粘性会话 ID 存于 `~/.bettercli/history/active-session.id`（可用 `BETTERCLI_SESSION_ID` 覆盖）；`/clear` 轮换新 ID 并换绑检查点与会话索引器。微信通道同样挂检查点 + `session_messages` 索引（独立 `wechat-*-active-session.id`）。辅轨 `shortTermMemory` 仍由 `ContextCompressor` 独立压缩，不替代主轨。
 

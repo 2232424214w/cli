@@ -386,6 +386,7 @@ public class Main {
                 sessionMessageStore = memoryFactory.createSessionMessageStore();
                 if (sessionMessageStore != null) {
                     hitlToolRegistry.setSessionMessageStore(sessionMessageStore);
+                    hitlToolRegistry.setSessionSearchLlm(llmClient);
                     // 从 session_*.jsonl 迁移历史消息（幂等，不删原文件）
                     try {
                         File historyDir = new File(new File(System.getProperty("user.home"), ".bettercli"), "history");
@@ -416,6 +417,9 @@ public class Main {
             }
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            if (agentMemoryStore != null) {
+                reactAgent.getMemoryManager().setAgentMemoryStore(agentMemoryStore);
+            }
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
@@ -616,18 +620,32 @@ public class Main {
                         ui.println("📋 记忆系统状态：");
                         ui.println(reactAgent.getMemoryManager().getSystemStatus());
                         ui.println("   当前项目作用域: " + reactAgent.getMemoryManager().getCurrentProject());
+                        if (hitlToolRegistry.getAgentMemoryStore() != null) {
+                            ui.println("   主路径: agent_memory（/memory 已委托；推荐 /agent-memory）");
+                        }
                         ui.println("   /memory list - 查看长期记忆");
                         ui.println("   /memory search <关键词> - 搜索当前项目可见长期记忆");
                         ui.println("   /memory delete <id> - 删除单条长期记忆");
                         ui.println("   /memory clear - 清空长期记忆");
                         ui.println("   /save <事实> - 保存项目级长期记忆；/save --global <事实> 保存全局记忆");
+                        ui.println("   /agent-memory pending|confirm|reject - 待确认记忆");
                         ui.println();
                         continue;
                     }
                     case MEMORY_LIST -> {
-                        List<MemoryEntry> entries = reactAgent.getMemoryManager().listLongTerm();
-                        ui.println(formatMemoryEntries("📋 长期记忆列表", entries));
-                        ui.println();
+                        com.bettercli.memory.AgentMemoryStore amStore = hitlToolRegistry.getAgentMemoryStore();
+                        if (amStore != null) {
+                            java.util.List<com.bettercli.memory.AgentMemoryEntry> amEntries = amStore.list(
+                                    com.bettercli.memory.MemoryListQuery.builder()
+                                            .limit(100).orderBy("created_at").build());
+                            ui.println(formatAgentMemoryEntries("📋 长期记忆列表（委托 agent_memory）", amEntries));
+                            ui.println("   提示: 请改用 /agent-memory list（本命令为兼容委托）");
+                            ui.println();
+                        } else {
+                            List<MemoryEntry> entries = reactAgent.getMemoryManager().listLongTerm();
+                            ui.println(formatMemoryEntries("📋 长期记忆列表", entries));
+                            ui.println();
+                        }
                         continue;
                     }
                     case MEMORY_SEARCH -> {
@@ -635,9 +653,23 @@ public class Main {
                         if (query == null || query.isBlank()) {
                             ui.println("❌ 请提供搜索关键词，例如 /memory search Chrome 登录态\n");
                         } else {
-                            List<MemoryEntry> entries = reactAgent.getMemoryManager().searchLongTerm(query, 20);
-                            ui.println(formatMemoryEntries("🔎 长期记忆搜索: " + query, entries));
-                            ui.println();
+                            com.bettercli.memory.AgentMemoryStore amStore = hitlToolRegistry.getAgentMemoryStore();
+                            if (amStore != null) {
+                                amStore.recordUserQuery(query);
+                                java.util.List<com.bettercli.memory.MemorySearchResult> results = amStore.search(
+                                        com.bettercli.memory.MemorySearchQuery.builder()
+                                                .query(query).limit(20)
+                                                .project(Path.of(".").toAbsolutePath().normalize().toString())
+                                                .build());
+                                ui.println(formatAgentMemorySearchResults(
+                                        "🔎 长期记忆搜索（委托 agent_memory）: " + query, results));
+                                ui.println("   提示: 请改用 /agent-memory search（本命令为兼容委托）");
+                                ui.println();
+                            } else {
+                                List<MemoryEntry> entries = reactAgent.getMemoryManager().searchLongTerm(query, 20);
+                                ui.println(formatMemoryEntries("🔎 长期记忆搜索: " + query, entries));
+                                ui.println();
+                            }
                         }
                         continue;
                     }
@@ -645,17 +677,34 @@ public class Main {
                         String id = command.payload();
                         if (id == null || id.isBlank()) {
                             ui.println("❌ 请提供要删除的记忆 id，例如 /memory delete fact-abcd1234\n");
-                        } else if (reactAgent.getMemoryManager().deleteLongTerm(id)) {
-                            ui.println("🗑️ 已删除长期记忆: " + id + "\n");
                         } else {
-                            ui.println("📭 未找到长期记忆: " + id + "\n");
+                            com.bettercli.memory.AgentMemoryStore amStore = hitlToolRegistry.getAgentMemoryStore();
+                            if (amStore != null) {
+                                if (amStore.delete(id)) {
+                                    ui.println("🗑️ 已删除 Agent 记忆: " + id);
+                                    ui.println("   提示: 请改用 /agent-memory（本命令为兼容委托）\n");
+                                } else {
+                                    ui.println("📭 未找到记忆: " + id + "\n");
+                                }
+                            } else if (reactAgent.getMemoryManager().deleteLongTerm(id)) {
+                                ui.println("🗑️ 已删除长期记忆: " + id + "\n");
+                            } else {
+                                ui.println("📭 未找到长期记忆: " + id + "\n");
+                            }
                         }
                         continue;
                     }
                     case MEMORY_CLEAR -> {
-                        reactAgent.getMemoryManager().clearLongTerm();
-                        ui.println("🧹 长期记忆已清空\n");
-                        ui.println();
+                        com.bettercli.memory.AgentMemoryStore amStore = hitlToolRegistry.getAgentMemoryStore();
+                        if (amStore != null) {
+                            int before = amStore.size();
+                            amStore.clear();
+                            ui.println("🧹 已清空 Agent 记忆：删除 " + before + " 条");
+                            ui.println("   提示: 请改用 /agent-memory clear（本命令为兼容委托）\n");
+                        } else {
+                            reactAgent.getMemoryManager().clearLongTerm();
+                            ui.println("🧹 长期记忆已清空\n");
+                        }
                         continue;
                     }
                     case MEMORY_SAVE -> {
@@ -664,7 +713,11 @@ public class Main {
                             ui.println("❌ 请提供要保存的内容，例如 /save 这个项目使用Java 17，或 /save --global 默认用中文回答\n");
                         } else {
                             reactAgent.getMemoryManager().storeFact(saveRequest.fact(), saveRequest.scope());
-                            ui.println("💾 已保存到长期记忆(" + saveRequest.scope() + "): " + saveRequest.fact() + "\n");
+                            ui.println("💾 已保存到长期记忆(" + saveRequest.scope() + "): " + saveRequest.fact());
+                            if (reactAgent.getMemoryManager().getAgentMemoryStore() != null) {
+                                ui.println("   → 已写入 agent_memory（可用 /agent-memory search 检索）");
+                            }
+                            ui.println();
                         }
                         continue;
                     }
@@ -679,11 +732,87 @@ public class Main {
                                         .limit(100).orderBy("created_at").build());
                         ui.println(formatAgentMemoryEntries("📋 Agent 记忆列表", entries));
                         ui.println("   共 " + store.size() + " 条");
+                        ui.println("   /agent-memory pending - 待确认记忆");
                         ui.println("   /agent-memory search <关键词> - BM25 检索");
                         ui.println("   /agent-memory stats - 查看统计");
                         ui.println("   /agent-memory export - 导出为 JSON");
                         ui.println("   /agent-memory clear - 清空所有 Agent 记忆");
                         ui.println();
+                        continue;
+                    }
+                    case AGENT_MEMORY_PENDING -> {
+                        com.bettercli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory pending\n");
+                            continue;
+                        }
+                        java.util.List<com.bettercli.memory.AgentMemoryEntry> pending = store.list(
+                                com.bettercli.memory.MemoryListQuery.builder()
+                                        .status(com.bettercli.memory.AgentMemoryEntry.MemoryStatus.PENDING)
+                                        .limit(100).orderBy("created_at").build());
+                        ui.println(formatAgentMemoryEntries("⏳ 待确认 Agent 记忆", pending));
+                        ui.println("   /agent-memory confirm <id> - 确认生效（可被 search 命中）");
+                        ui.println("   /agent-memory reject <id> - 拒绝并删除");
+                        ui.println();
+                        continue;
+                    }
+                    case AGENT_MEMORY_CONFIRM -> {
+                        com.bettercli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory confirm\n");
+                            continue;
+                        }
+                        String id = command.payload();
+                        if (id == null || id.isBlank()) {
+                            ui.println("❌ 请提供记忆 id，例如 /agent-memory confirm mem-xxxx\n");
+                            continue;
+                        }
+                        var existing = store.retrieve(id);
+                        if (existing.isEmpty()) {
+                            ui.println("📭 未找到记忆: " + id + "\n");
+                            continue;
+                        }
+                        if (existing.get().getStatus() != com.bettercli.memory.AgentMemoryEntry.MemoryStatus.PENDING) {
+                            ui.println("ℹ️ 记忆 " + id + " 状态为 " + existing.get().getStatus()
+                                    + "，无需确认（仅 PENDING 可 confirm）\n");
+                            continue;
+                        }
+                        boolean ok = store.update(id, com.bettercli.memory.MemoryEntryPatch.builder()
+                                .status(com.bettercli.memory.AgentMemoryEntry.MemoryStatus.ACTIVE)
+                                .build());
+                        if (ok) {
+                            ui.println("✅ 已确认记忆: " + id + "（status=ACTIVE，现可被 search 命中）\n");
+                        } else {
+                            ui.println("❌ 确认失败: " + id + "\n");
+                        }
+                        continue;
+                    }
+                    case AGENT_MEMORY_REJECT -> {
+                        com.bettercli.memory.AgentMemoryStore store = hitlToolRegistry.getAgentMemoryStore();
+                        if (store == null) {
+                            ui.println("❌ Agent 记忆存储未初始化，无法执行 /agent-memory reject\n");
+                            continue;
+                        }
+                        String id = command.payload();
+                        if (id == null || id.isBlank()) {
+                            ui.println("❌ 请提供记忆 id，例如 /agent-memory reject mem-xxxx\n");
+                            continue;
+                        }
+                        var existing = store.retrieve(id);
+                        if (existing.isEmpty()) {
+                            ui.println("📭 未找到记忆: " + id + "\n");
+                            continue;
+                        }
+                        if (existing.get().getStatus() != com.bettercli.memory.AgentMemoryEntry.MemoryStatus.PENDING) {
+                            ui.println("ℹ️ 记忆 " + id + " 状态为 " + existing.get().getStatus()
+                                    + "，reject 仅针对 PENDING；删除 ACTIVE 请用 /agent-memory 或 /memory delete\n");
+                            continue;
+                        }
+                        if (store.delete(id)) {
+                            ui.println("🗑️ 已拒绝并删除待确认记忆: " + id + "\n");
+                        } else {
+                            ui.println("❌ 删除失败: " + id + "\n");
+                        }
                         continue;
                     }
                     case AGENT_MEMORY_SEARCH -> {
@@ -717,6 +846,7 @@ public class Main {
                         ui.println(store.stats().formatForCli());
                         ui.println();
                         ui.println("   /agent-memory list - 查看所有条目");
+                        ui.println("   /agent-memory pending - 待确认记忆");
                         ui.println("   /agent-memory search <关键词> - BM25 检索");
                         ui.println();
                         continue;
@@ -2055,11 +2185,20 @@ public class Main {
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史"),
                 new SlashCommandHint("/context", "/context", "查看上下文和记忆状态"),
                 new SlashCommandHint("/memory", "/memory", "查看记忆状态"),
-                new SlashCommandHint("/memory list", "/memory list", "查看长期记忆列表"),
-                new SlashCommandHint("/memory search ", "/memory search <关键词>", "搜索当前项目可见长期记忆"),
+                new SlashCommandHint("/memory list", "/memory list", "查看长期记忆（有 store 时委托 agent_memory）"),
+                new SlashCommandHint("/memory search ", "/memory search <关键词>", "搜索长期记忆（有 store 时委托）"),
                 new SlashCommandHint("/memory delete ", "/memory delete <id>", "删除单条长期记忆"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
-                new SlashCommandHint("/save ", "/save [--global] <事实内容>", "手动保存项目级或全局长期记忆"),
+                new SlashCommandHint("/save ", "/save [--global] <事实内容>", "手动保存到 agent_memory"),
+                new SlashCommandHint("/agent-memory", "/agent-memory", "Agent 记忆统计"),
+                new SlashCommandHint("/agent-memory list", "/agent-memory list", "列出 Agent 记忆"),
+                new SlashCommandHint("/agent-memory pending", "/agent-memory pending", "列出待确认记忆"),
+                new SlashCommandHint("/agent-memory confirm ", "/agent-memory confirm <id>", "确认待确认记忆"),
+                new SlashCommandHint("/agent-memory reject ", "/agent-memory reject <id>", "拒绝并删除待确认记忆"),
+                new SlashCommandHint("/agent-memory search ", "/agent-memory search <关键词>", "BM25 检索 Agent 记忆"),
+                new SlashCommandHint("/agent-memory stats", "/agent-memory stats", "Agent 记忆统计"),
+                new SlashCommandHint("/agent-memory export", "/agent-memory export", "导出 Agent 记忆为 JSON"),
+                new SlashCommandHint("/agent-memory clear", "/agent-memory clear", "清空 Agent 记忆"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),

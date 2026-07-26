@@ -6,9 +6,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Memory 管理器 - Memory 系统的门面类
@@ -18,6 +22,8 @@ import java.util.UUID;
  */
 public class MemoryManager {
     private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
+    private static final Pattern KEYWORD_TOKEN = Pattern.compile("[\\p{IsHan}]{2,}|[A-Za-z][A-Za-z0-9._-]{1,}");
+
     private final ConversationMemory shortTermMemory;
     private final LongTermMemory longTermMemory;
     private final ContextCompressor compressor;
@@ -25,6 +31,8 @@ public class MemoryManager {
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
     private String currentProject;
+    /** 对标 1024 agent_memory：/save 与 save_memory 的主写入路径（可空，测试可不注入）。 */
+    private AgentMemoryStore agentMemoryStore;
 
     public MemoryManager(LlmClient llmClient) {
         this(llmClient, ContextProfile.from(llmClient), null);
@@ -164,21 +172,120 @@ public class MemoryManager {
     public void storeFact(String fact, String scope, String source) {
         String normalizedScope = normalizeScope(scope);
         String src = source == null || source.isBlank() ? "fact" : source;
+        String id = "fact-" + UUID.randomUUID().toString().substring(0, 8);
         Map<String, String> metadata = "global".equals(normalizedScope)
                 ? Map.of("source", src, "scope", "global")
                 : Map.of("source", src, "scope", "project", "project", currentProject);
         MemoryEntry entry = new MemoryEntry(
-                "fact-" + UUID.randomUUID().toString().substring(0, 8),
+                id,
                 fact,
                 MemoryEntry.MemoryType.FACT,
                 metadata,
                 MemoryEntry.estimateTokens(fact)
         );
-        longTermMemory.store(entry);
-        MemoryVectorIndex index = retriever.getVectorIndex();
-        if (index != null) {
-            index.invalidate(entry.getId());
+        // 主路径：agent_memory（对标 1024）
+        storeFactToAgentMemory(id, fact, normalizedScope, src);
+        // JSON 双写默认关闭；无 agent store 时仍写 JSON 兜底；显式 dual_write 可开
+        if (agentMemoryStore == null || isJsonDualWriteEnabled()) {
+            longTermMemory.store(entry);
+            MemoryVectorIndex index = retriever.getVectorIndex();
+            if (index != null) {
+                index.invalidate(entry.getId());
+            }
         }
+    }
+
+    /**
+     * 是否双写旧 JSON LongTermMemory。默认 false（P2-3）。
+     * {@code bettercli.memory.json_dual_write.enabled=true} /
+     * {@code BETTERCLI_MEMORY_JSON_DUAL_WRITE=true}
+     */
+    public static boolean isJsonDualWriteEnabled() {
+        String prop = System.getProperty("bettercli.memory.json_dual_write.enabled");
+        String env = System.getenv("BETTERCLI_MEMORY_JSON_DUAL_WRITE");
+        String raw = prop != null ? prop : env;
+        return raw != null && raw.equalsIgnoreCase("true");
+    }
+
+    public void setAgentMemoryStore(AgentMemoryStore agentMemoryStore) {
+        this.agentMemoryStore = agentMemoryStore;
+    }
+
+    public AgentMemoryStore getAgentMemoryStore() {
+        return agentMemoryStore;
+    }
+
+    /**
+     * Legacy 每轮被动预取（MemoryRetriever 注入 system prompt）。
+     * 默认关闭，对齐 1024「不做自动预取」；开启：
+     * {@code bettercli.memory.legacy_prefetch.enabled=true} /
+     * {@code BETTERCLI_MEMORY_LEGACY_PREFETCH=true}。
+     */
+    public static boolean isLegacyPrefetchEnabled() {
+        String prop = System.getProperty("bettercli.memory.legacy_prefetch.enabled");
+        String env = System.getenv("BETTERCLI_MEMORY_LEGACY_PREFETCH");
+        String raw = prop != null ? prop : env;
+        return raw != null && raw.equalsIgnoreCase("true");
+    }
+
+    private void storeFactToAgentMemory(String id, String fact, String normalizedScope, String src) {
+        if (agentMemoryStore == null || fact == null || fact.isBlank()) {
+            return;
+        }
+        try {
+            AgentMemoryEntry.MemorySource memSource =
+                    "fact_extractor".equals(src)
+                            ? AgentMemoryEntry.MemorySource.AGENT_TOOL
+                            : AgentMemoryEntry.MemorySource.EXPLICIT_HINT;
+            AgentMemoryEntry.MemoryScope memScope =
+                    "global".equals(normalizedScope)
+                            ? AgentMemoryEntry.MemoryScope.GLOBAL
+                            : AgentMemoryEntry.MemoryScope.PROJECT;
+            List<String> keywords = extractKeywords(fact);
+            if (keywords.size() < 3) {
+                // agent_memory_save 要求 3-8 个；不足时用占位补齐，保证用户显式 /save 可落库
+                List<String> padded = new ArrayList<>(keywords);
+                String[] fillers = {"preference", "stable-fact", "user-save", "project-memory"};
+                for (String f : fillers) {
+                    if (padded.size() >= 3) {
+                        break;
+                    }
+                    if (!padded.contains(f)) {
+                        padded.add(f);
+                    }
+                }
+                keywords = padded;
+            }
+            AgentMemoryEntry agentEntry = AgentMemoryEntry.builder()
+                    .id(id)
+                    .content(fact.trim())
+                    .keywords(keywords.size() > 8 ? keywords.subList(0, 8) : keywords)
+                    .type(AgentMemoryEntry.MemoryType.FACT)
+                    .scope(memScope)
+                    .project("global".equals(normalizedScope) ? null : currentProject)
+                    .confidence(1.0)
+                    .source(memSource)
+                    .status(AgentMemoryEntry.MemoryStatus.ACTIVE)
+                    .build();
+            agentMemoryStore.store(agentEntry);
+        } catch (Exception e) {
+            log.warn("写入 agent_memory 失败: {}", e.toString());
+        }
+    }
+
+    static List<String> extractKeywords(String fact) {
+        List<String> out = new ArrayList<>();
+        if (fact == null || fact.isBlank()) {
+            return out;
+        }
+        Matcher m = KEYWORD_TOKEN.matcher(fact.toLowerCase(Locale.ROOT));
+        while (m.find() && out.size() < 8) {
+            String t = m.group();
+            if (!out.contains(t)) {
+                out.add(t);
+            }
+        }
+        return out;
     }
 
     /**
@@ -242,9 +349,33 @@ public class MemoryManager {
     }
 
     /**
-     * 构建用于 LLM 的记忆上下文
+     * 构建用于 LLM 的记忆上下文（仅 Legacy 预取开启时调用）。
+     * P2-4：优先 AgentMemoryStore BM25；否则回退 {@link MemoryRetriever}。
      */
     public String buildContextForQuery(String query, int maxTokens) {
+        if (agentMemoryStore != null) {
+            try {
+                List<MemorySearchResult> hits = agentMemoryStore.search(MemorySearchQuery.builder()
+                        .query(query == null ? "" : query)
+                        .limit(8)
+                        .project(currentProject)
+                        .build());
+                if (!hits.isEmpty()) {
+                    StringBuilder sb = new StringBuilder("## 相关长期记忆（agent_memory BM25）\n");
+                    int budget = Math.max(200, maxTokens * 3);
+                    for (MemorySearchResult hit : hits) {
+                        String line = "- " + hit.entry().getContent() + "\n";
+                        if (sb.length() + line.length() > budget) {
+                            break;
+                        }
+                        sb.append(line);
+                    }
+                    return sb.toString().trim();
+                }
+            } catch (Exception e) {
+                log.warn("agent_memory 预取失败，回退 MemoryRetriever: {}", e.toString());
+            }
+        }
         return retriever.buildContextForQuery(query, maxTokens, currentProject);
     }
 

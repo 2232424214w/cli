@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
@@ -683,6 +684,43 @@ class ToolRegistryTest {
             assertTrue(result.contains("已保存到 Agent 记忆"), "应提示保存成功");
             assertTrue(result.contains("mem-"), "应返回记忆 ID");
             assertEquals(1, store.size());
+        }
+    }
+
+    @Test
+    void agentMemorySavePendingNotSearchableUntilConfirmed(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        try (com.bettercli.memory.SqliteAgentMemoryStore store =
+                     new com.bettercli.memory.SqliteAgentMemoryStore(tempDir.toString(), tempDir.toFile(), 100, 0.85)) {
+            registry.setAgentMemoryStore(store);
+
+            String save = registry.executeTool("agent_memory_save",
+                    "{\"fact\":\"中置信度待确认事实 Redis 缓存选型\","
+                            + "\"keywords\":\"Redis,缓存,选型\","
+                            + "\"confidence\":0.8,"
+                            + "\"type\":\"FACT\"}");
+            assertTrue(save.contains("待确认"), save);
+            assertEquals(1, store.size());
+            assertEquals(com.bettercli.memory.AgentMemoryEntry.MemoryStatus.PENDING,
+                    store.list(com.bettercli.memory.MemoryListQuery.builder().limit(10).build()).get(0).getStatus());
+
+            String searchPending = registry.executeTool("agent_memory_search",
+                    "{\"query\":\"Redis 缓存\",\"limit\":5}");
+            assertFalse(searchPending.contains("中置信度待确认事实"),
+                    "PENDING 不应被 search 命中: " + searchPending);
+
+            String id = store.list(com.bettercli.memory.MemoryListQuery.builder().limit(10).build()).get(0).getId();
+            assertTrue(store.update(id, com.bettercli.memory.MemoryEntryPatch.builder()
+                    .status(com.bettercli.memory.AgentMemoryEntry.MemoryStatus.ACTIVE)
+                    .build()));
+            assertNull(store.retrieve(id).orElseThrow().getPendingExpiresAt());
+
+            String searchActive = registry.executeTool("agent_memory_search",
+                    "{\"query\":\"Redis 缓存\",\"limit\":5}");
+            assertTrue(searchActive.contains("中置信度待确认事实")
+                            || searchActive.contains(id),
+                    "confirm 后应可检索: " + searchActive);
         }
     }
 

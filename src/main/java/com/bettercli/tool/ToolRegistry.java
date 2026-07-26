@@ -30,6 +30,7 @@ import com.bettercli.memory.SessionMessage;
 import com.bettercli.memory.SessionMessageSearchQuery;
 import com.bettercli.memory.SessionMessageSearchResult;
 import com.bettercli.memory.SessionMessageStore;
+import com.bettercli.memory.SessionSearchSummarizer;
 import com.bettercli.runtime.CancellationContext;
 import com.bettercli.snapshot.RestoreResult;
 import com.bettercli.snapshot.SnapshotService;
@@ -119,6 +120,8 @@ public class ToolRegistry {
     private ProjectMemoryLoader projectMemoryLoader = ProjectMemoryLoader.createDefault(Path.of(projectPath));
     private AgentMemoryStore agentMemoryStore;
     private SessionMessageStore sessionMessageStore;
+    /** session_search 第 4 阶段摘要用；未注入时 summarize 自动降级 preview。 */
+    private com.bettercli.llm.LlmClient sessionSearchLlm;
     // ReAct 轻量规划存储（对标 Claude Code TodoWrite）。由 Agent 在构造后注入；
     // 未注入时 update_plan 工具返回未初始化提示，不影响其它工具。
     private com.bettercli.agent.PlanStore planStore;
@@ -347,6 +350,10 @@ public class ToolRegistry {
         this.sessionMessageStore = sessionMessageStore;
     }
 
+    public void setSessionSearchLlm(com.bettercli.llm.LlmClient sessionSearchLlm) {
+        this.sessionSearchLlm = sessionSearchLlm;
+    }
+
     public SessionMessageStore getSessionMessageStore() {
         return sessionMessageStore;
     }
@@ -479,6 +486,18 @@ public class ToolRegistry {
                 sb.append(line);
                 currentSize += line.length();
             }
+            try {
+                int pending = agentMemoryStore.list(MemoryListQuery.builder()
+                        .status(AgentMemoryEntry.MemoryStatus.PENDING)
+                        .limit(200)
+                        .build()).size();
+                if (pending > 0) {
+                    sb.append("\n⏳ 另有 ").append(pending)
+                            .append(" 条待确认记忆，用户可用 /agent-memory pending 查看并 confirm/reject。\n");
+                }
+            } catch (Exception ignored) {
+                // best-effort
+            }
             return sb.toString();
         } catch (Exception e) {
             return "";
@@ -502,19 +521,21 @@ public class ToolRegistry {
 
     /**
      * 注册会话历史检索工具（对标美团 1024 Agent session_search）。
-     * 五阶段管道：BM25 检索 → 按会话分组 → 加载完整 → 截断预览 → 返回。
+     * 五阶段：BM25 → 按会话分组 → 加载完整 + 关键词窗口 → 可选 LLM 摘要 → markdown/json 返回。
      */
     private void registerSessionSearchTool() {
         tools.put("session_search", new Tool(
                 "session_search",
                 "检索历史会话消息。当用户问\"之前怎么处理过 X\"、或需要回溯历史决策时调用。"
-                        + "BM25 全文检索，按会话分组返回相关历史对话片段。"
-                        + "当前项目作用域内检索，默认回溯 30 天。",
+                        + "BM25 全文检索，按会话分组；默认对 TopN 会话做 LLM 摘要（失败降级 preview）。"
+                        + "当前项目作用域内检索，默认回溯 30 天。format=json 可拿结构化结果。",
                 createParameters(
                         new Param("query", "string", "检索查询（关键词或自然语言）", true),
                         new Param("limit", "integer", "返回会话数，默认 3，最多 10", false),
                         new Param("role_filter", "string", "user / assistant，默认全部", false),
-                        new Param("days_back", "integer", "回溯天数，默认 30，最大 365", false)
+                        new Param("days_back", "integer", "回溯天数，默认 30，最大 365", false),
+                        new Param("summarize", "string", "是否 LLM 摘要：true/false，默认 true", false),
+                        new Param("format", "string", "返回格式：markdown（默认）或 json", false)
                 ),
                 args -> sessionSearch(args)
         ));
@@ -532,6 +553,12 @@ public class ToolRegistry {
         String roleFilter = args.get("role_filter");
         if (roleFilter != null && roleFilter.isBlank()) roleFilter = null;
         int daysBack = clamp(parseInt(args.get("days_back"), 30), 1, 365);
+        boolean summarize = parseBool(args.get("summarize"), true);
+        String format = args.get("format");
+        if (format == null || format.isBlank()) {
+            format = "markdown";
+        }
+        format = format.trim().toLowerCase(java.util.Locale.ROOT);
 
         java.time.Instant since = java.time.Instant.now().minusSeconds((long) daysBack * 86400);
 
@@ -546,30 +573,100 @@ public class ToolRegistry {
         try {
             java.util.List<SessionMessageSearchResult> results = sessionMessageStore.search(searchQuery);
             if (results.isEmpty()) {
+                if ("json".equals(format)) {
+                    return "{\"mode\":\"search\",\"query\":"
+                            + jsonQuote(query.trim())
+                            + ",\"sessions\":[]}";
+                }
                 return "未找到匹配的历史会话（query=" + query + ", days_back=" + daysBack + "）";
             }
-            return formatSessionSearchResults(query, results);
+            java.util.List<SessionSearchSummarizer.SessionSummary> summaries;
+            if (summarize) {
+                summaries = SessionSearchSummarizer.summarizeAll(
+                        results, query.trim(), sessionSearchLlm,
+                        SessionSearchSummarizer.DEFAULT_TIMEOUT_SECONDS);
+            } else {
+                summaries = results.stream()
+                        .map(r -> SessionSearchSummarizer.degraded(r, query.trim()))
+                        .toList();
+            }
+            if ("json".equals(format)) {
+                return formatSessionSearchJson(query.trim(), summaries);
+            }
+            return formatSessionSearchResults(query.trim(), results, summaries);
         } catch (Exception e) {
             return "session_search 检索失败: " + e.getMessage();
         }
     }
 
-    private static String formatSessionSearchResults(String query, java.util.List<SessionMessageSearchResult> results) {
+    private static boolean parseBool(String raw, boolean defaultValue) {
+        if (raw == null || raw.isBlank()) {
+            return defaultValue;
+        }
+        String v = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("true".equals(v) || "1".equals(v) || "yes".equals(v)) {
+            return true;
+        }
+        if ("false".equals(v) || "0".equals(v) || "no".equals(v)) {
+            return false;
+        }
+        return defaultValue;
+    }
+
+    private static String formatSessionSearchResults(String query,
+                                                     java.util.List<SessionMessageSearchResult> results,
+                                                     java.util.List<SessionSearchSummarizer.SessionSummary> summaries) {
         StringBuilder sb = new StringBuilder();
         sb.append("🔍 历史会话检索: ").append(query).append("\n");
         sb.append("找到 ").append(results.size()).append(" 个相关会话:\n\n");
         for (int i = 0; i < results.size(); i++) {
             SessionMessageSearchResult r = results.get(i);
+            SessionSearchSummarizer.SessionSummary sum = i < summaries.size() ? summaries.get(i) : null;
             sb.append("## 会话 #").append(i + 1).append(": ").append(r.getConversationId()).append("\n");
             sb.append("- 消息数: ").append(r.getTotalMessages()).append("\n");
             sb.append("- BM25 分: ").append(String.format("%.3f", r.getBestBm25Score())).append("\n");
+            if (sum != null) {
+                sb.append("- 摘要状态: ").append(sum.status()).append("\n");
+                sb.append("- 摘要: ").append(sum.summary()).append("\n");
+            }
             sb.append("- 命中消息:\n");
             for (SessionMessageSearchResult.MatchedMessage m : r.getMatchedMessages()) {
                 sb.append("  [").append(m.getRole()).append("] ").append(m.getPreview()).append("\n");
             }
-            sb.append("\n").append(r.formatConversationPreview()).append("\n\n---\n\n");
+            sb.append("\n").append(r.formatConversationPreview(query)).append("\n\n---\n\n");
         }
         return sb.toString().trim();
+    }
+
+    private static String formatSessionSearchJson(String query,
+                                                  java.util.List<SessionSearchSummarizer.SessionSummary> summaries) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"mode\":\"search\",\"query\":").append(jsonQuote(query)).append(",\"sessions\":[");
+        for (int i = 0; i < summaries.size(); i++) {
+            SessionSearchSummarizer.SessionSummary s = summaries.get(i);
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("{\"conversation_id\":").append(jsonQuote(s.conversationId()))
+                    .append(",\"summary\":").append(jsonQuote(s.summary()))
+                    .append(",\"status\":").append(jsonQuote(s.status()))
+                    .append('}');
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private static String jsonQuote(String s) {
+        if (s == null) {
+            return "\"\"";
+        }
+        String escaped = s
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
+        return "\"" + escaped + "\"";
     }
 
     /**
@@ -1218,7 +1315,9 @@ public class ToolRegistry {
     private void registerMemoryTools() {
         tools.put("save_memory", new Tool(
                 "save_memory",
-                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入长期记忆；scope 默认 project，跨项目偏好才用 global；不要保存一次性任务请求、临时文件名或模型猜测。",
+                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入 agent_memory（并兼容写入旧 JSON）；"
+                        + "scope 默认 project，跨项目偏好才用 global；不要保存一次性任务请求、临时文件名或模型猜测。"
+                        + "自主发现的稳定事实优先用 agent_memory_save。",
                 createParameters(
                         new Param("fact", "string", "要长期保存的稳定事实或用户偏好，必须精炼、可跨会话复用", true),
                         new Param("scope", "string", "记忆作用域：project 或 global。默认 project；跨项目长期偏好才用 global", false)
@@ -1293,6 +1392,9 @@ public class ToolRegistry {
         }
         StringBuilder sb = new StringBuilder();
         sb.append(loader.getCapacityStatus()).append("\n");
+        if (loader.isOverThreshold() || loader.isOverLimit()) {
+            sb.append('\n').append(ProjectMemoryLoader.consolidationGuide());
+        }
         List<Path> loadedFiles = loader.getLoadedFiles();
         if (loadedFiles.isEmpty()) {
             sb.append("\n当前未加载任何 BETTER.md 文件。");
@@ -1326,8 +1428,8 @@ public class ToolRegistry {
         // 容量护栏：超上限直接拒绝，提示先整合
         if (loader.isOverLimit()) {
             return "suggest_better_md 失败: " + loader.getCapacityStatus()
-                    + "\n请先整合已有条目（合并相似规则、删除过时条目）后再添加新条目。"
-                    + "可调用 read_better_md 查看现有内容。";
+                    + "\n" + ProjectMemoryLoader.consolidationGuide()
+                    + "\n可调用 read_better_md 查看现有内容后再整合。";
         }
         // 决定写入目标
         Path target;
@@ -1404,14 +1506,14 @@ public class ToolRegistry {
 
         tools.put("agent_memory_save", new Tool(
                 "agent_memory_save",
-                "保存到 Agent 维护的长期记忆。Agent 自主判断，不需要用户确认。"
-                        + "confidence < 0.7 不要调用；临时任务/文件名不要保存；"
-                        + "不要保存 API key、密码、个人隐私。"
+                "保存到 Agent 维护的长期记忆。"
+                        + "confidence < 0.7 不要调用；[0.7,0.9) 进入 PENDING 待用户 /agent-memory confirm；≥0.9 直接 ACTIVE。"
+                        + "临时任务/文件名不要保存；不要保存 API key、密码、个人隐私。"
                         + "keywords 必须是专有名词或核心词，3-8 个。",
                 createParameters(
                         new Param("fact", "string", "要保存的事实，必须精炼、可跨会话复用", true),
                         new Param("keywords", "string", "提取的关键词，逗号分隔，3-8 个专有名词（例如：SQLite,数据库,存储）", true),
-                        new Param("confidence", "number", "0-1 置信度，必须诚实评估，< 0.7 不要调用本工具", true),
+                        new Param("confidence", "number", "0-1 置信度；<0.7 拒绝，[0.7,0.9) 待确认，≥0.9 直接生效", true),
                         new Param("type", "string", "FACT / PATTERN / DEBUG_INSIGHT / WORKFLOW", true),
                         new Param("scope", "string", "PROJECT 或 GLOBAL，默认 PROJECT；跨项目通用偏好才用 GLOBAL", false)
                 ),
@@ -1942,8 +2044,10 @@ public class ToolRegistry {
         if (agentMemoryStore.findSimilar(fact, keywords, 0.0).isPresent()) {
             return "agent_memory_save 跳过: 检测到与已有记忆高度相似，未保存。可先 agent_memory_search 查看现有条目";
         }
+        // P2-1：[0.7, 0.9) → PENDING（待 /agent-memory confirm）；≥0.9 → ACTIVE
+        boolean pending = confidence < 0.9;
         String id = generateMemoryId();
-        AgentMemoryEntry entry = AgentMemoryEntry.builder()
+        AgentMemoryEntry.Builder entryBuilder = AgentMemoryEntry.builder()
                 .id(id)
                 .content(fact.trim())
                 .keywords(keywords)
@@ -1952,9 +2056,23 @@ public class ToolRegistry {
                 .project(scope == AgentMemoryEntry.MemoryScope.PROJECT ? projectPath : null)
                 .confidence(confidence)
                 .source(AgentMemoryEntry.MemorySource.AGENT_TOOL)
-                .build();
+                .status(pending
+                        ? AgentMemoryEntry.MemoryStatus.PENDING
+                        : AgentMemoryEntry.MemoryStatus.ACTIVE);
+        if (pending) {
+            entryBuilder.pendingExpiresAt(java.time.Instant.now().plus(7, java.time.temporal.ChronoUnit.DAYS));
+        }
+        AgentMemoryEntry entry = entryBuilder.build();
         try {
             agentMemoryStore.store(entry);
+            if (pending) {
+                return "⏳ 已暂存为待确认记忆: " + id
+                        + "\n内容: " + (fact.length() > 100 ? fact.substring(0, 100) + "..." : fact)
+                        + "\n置信度: " + confidence + "（[0.7,0.9) 需用户确认后才可检索）"
+                        + "\n请用户执行: /agent-memory confirm " + id
+                        + "\n或拒绝: /agent-memory reject " + id
+                        + "\n关键词: " + String.join(", ", keywords);
+            }
             return "💾 已保存到 Agent 记忆: " + id
                     + "\n内容: " + (fact.length() > 100 ? fact.substring(0, 100) + "..." : fact)
                     + "\n类型: " + type + " / 作用域: " + scope

@@ -308,6 +308,21 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesAgentMemoryPendingConfirmRejectSlashCommands() {
+        CliCommandParser.ParsedCommand pending = CliCommandParser.parse("/agent-memory pending");
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_PENDING, pending.type());
+        assertNull(pending.payload());
+
+        CliCommandParser.ParsedCommand confirm = CliCommandParser.parse("/agent-memory confirm mem-abc");
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_CONFIRM, confirm.type());
+        assertEquals("mem-abc", confirm.payload());
+
+        CliCommandParser.ParsedCommand reject = CliCommandParser.parse("/am reject mem-xyz");
+        assertEquals(CliCommandParser.CommandType.AGENT_MEMORY_REJECT, reject.type());
+        assertEquals("mem-xyz", reject.payload());
+    }
+
+    @Test
     void parsesAgentMemoryShortAliasSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/am list");
 

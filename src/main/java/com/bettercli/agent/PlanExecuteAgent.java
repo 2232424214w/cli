@@ -517,13 +517,15 @@ public class PlanExecuteAgent {
                 .toolsEnabled(llmClient == null || llmClient.supportsTools())
                 .build());
 
-        // 注入长期记忆上下文
-        String memoryContext = memoryManager.buildContextForQuery(
-                task.getDescription(),
-                memoryManager.getContextProfile().memoryContextTokens());
+        // Legacy 每轮被动预取默认关闭（对齐 1024）
         String taskInput = buildTaskContext(goal, plan, task);
-        if (!memoryContext.isEmpty()) {
-            taskInput = taskInput + "\n\n" + memoryContext;
+        if (MemoryManager.isLegacyPrefetchEnabled()) {
+            String memoryContext = memoryManager.buildContextForQuery(
+                    task.getDescription(),
+                    memoryManager.getContextProfile().memoryContextTokens());
+            if (!memoryContext.isEmpty()) {
+                taskInput = taskInput + "\n\n" + memoryContext;
+            }
         }
         taskInput = prependSkillBodies(taskInput);
 

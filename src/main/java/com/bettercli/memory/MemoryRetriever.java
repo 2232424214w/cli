@@ -8,11 +8,16 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 记忆检索器 - 根据查询从短期记忆和长期记忆中检索最相关的信息
+ * 记忆检索器 - 根据查询从短期记忆和长期记忆中检索最相关的信息（Legacy JSON）。
  *
  * <p>长期记忆：关键词打分 +（可选）语义向量召回，经 {@link ReciprocalRankFusion} 融合；
  * FACT 类不做 24h 时间衰减（越稳越该保留）。
+ *
+ * @deprecated 对标 1024：主检索应走 {@link AgentMemoryStore#search} / {@code agent_memory_search}。
+ *             Legacy 预取默认关闭；若开启且已注入 AgentMemoryStore，{@link MemoryManager#buildContextForQuery}
+ *             优先 BM25，本类仅作无 store 时的兜底。
  */
+@Deprecated
 public class MemoryRetriever {
     private static final Logger log = LoggerFactory.getLogger(MemoryRetriever.class);
 

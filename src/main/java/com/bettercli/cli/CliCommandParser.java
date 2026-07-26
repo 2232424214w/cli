@@ -22,6 +22,9 @@ final class CliCommandParser {
         MEMORY_SEARCH,
         MEMORY_SAVE,
         AGENT_MEMORY_LIST,
+        AGENT_MEMORY_PENDING,
+        AGENT_MEMORY_CONFIRM,
+        AGENT_MEMORY_REJECT,
         AGENT_MEMORY_SEARCH,
         AGENT_MEMORY_STATS,
         AGENT_MEMORY_EXPORT,
@@ -190,6 +193,21 @@ final class CliCommandParser {
         }
         if (trimmed.equalsIgnoreCase("/agent-memory list") || trimmed.equalsIgnoreCase("/am list")) {
             return new ParsedCommand(CommandType.AGENT_MEMORY_LIST, null);
+        }
+        if (trimmed.equalsIgnoreCase("/agent-memory pending") || trimmed.equalsIgnoreCase("/am pending")) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_PENDING, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/agent-memory confirm ", 0, 22)) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_CONFIRM, trimmed.substring(22).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/am confirm ", 0, 12)) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_CONFIRM, trimmed.substring(12).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/agent-memory reject ", 0, 21)) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_REJECT, trimmed.substring(21).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/am reject ", 0, 11)) {
+            return new ParsedCommand(CommandType.AGENT_MEMORY_REJECT, trimmed.substring(11).trim());
         }
         if (trimmed.equalsIgnoreCase("/agent-memory stats") || trimmed.equalsIgnoreCase("/am stats")) {
             return new ParsedCommand(CommandType.AGENT_MEMORY_STATS, null);

@@ -75,28 +75,18 @@ public class SessionMessageSearchResult {
 
     /**
      * 将命中会话格式化为 Agent 可读的对话片段（[USER]: ... [ASSISTANT]: ...）。
+     * 超长时按关键词居中截断（见 {@link SessionSearchWindow}）。
      */
     public String formatConversationPreview() {
+        return formatConversationPreview(null);
+    }
+
+    public String formatConversationPreview(String query) {
         if (fullConversation.isEmpty()) {
             return "(空会话)";
         }
-        StringBuilder sb = new StringBuilder();
-        sb.append("会话 ").append(conversationId).append(" (").append(totalMessages).append(" 条消息, best BM25=")
-                .append(String.format("%.3f", bestBm25Score)).append(")\n");
-        for (SessionMessage msg : fullConversation) {
-            String label = switch (msg.getRole()) {
-                case "user" -> "[USER]";
-                case "assistant" -> "[ASSISTANT]";
-                case "tool" -> "[TOOL]";
-                case "system" -> "[SYSTEM]";
-                default -> "[" + msg.getRole().toUpperCase() + "]";
-            };
-            String text = msg.getContent();
-            if (text.length() > 500) {
-                text = text.substring(0, 500) + "...";
-            }
-            sb.append(label).append(": ").append(text).append("\n");
-        }
-        return sb.toString().trim();
+        String body = SessionSearchWindow.formatWithWindow(fullConversation, query, SessionSearchWindow.DEFAULT_MAX_CHARS);
+        return "会话 " + conversationId + " (" + totalMessages + " 条消息, best BM25="
+                + String.format("%.3f", bestBm25Score) + ")\n" + body;
     }
 }

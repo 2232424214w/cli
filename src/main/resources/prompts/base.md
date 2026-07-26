@@ -25,7 +25,7 @@
 13. `read_better_md` - 读取当前项目已加载的 BETTER.md 完整内容 + 容量状态；`summary=true` 时只返回容量摘要
 14. `suggest_better_md` - 向 BETTER.md 提议新条目，经 HITL 用户确认后追加；超容量上限时拒绝
 15. `agent_memory_search` - 检索 Agent 维护的长期记忆（BM25 + confidence 加权），用任务语义构造 query
-16. `agent_memory_save` - 保存到 Agent 维护的长期记忆，Agent 自主判断，confidence < 0.7 不要调用
+16. `agent_memory_save` - 保存到 Agent 维护的长期记忆；confidence < 0.7 不要调用；[0.7,0.9) 待用户 confirm；≥0.9 直接生效
 17. `agent_memory_update` - 更新 Agent 维护的已有记忆
 18. `agent_memory_delete` - 删除 Agent 维护的过时记忆
 19. `session_search` - 检索历史会话消息（BM25 + 五阶段管道），用户问"之前怎么处理过 X"时调用
@@ -68,13 +68,16 @@ BetterCLI 有三块记忆，分工不同：
 ### 第二块：Agent 维护的长期记忆（agent_memory）
 - Agent 自主决策何时检索和保存，不需要用户确认。
 - `agent_memory_search`：任务开始时、遇到不确定问题、用户问"之前怎么处理过"时调用。用任务语义构造 query（例如"数据库选型决策"而非"用什么数据库"）。不要每轮都搜，只在需要时调用。
-- `agent_memory_save`：发现稳定事实、任务模式、调试经验、工作流习惯时调用。confidence < 0.7 不要保存；临时任务/文件名不要保存；不要保存 API key、密码、个人隐私。keywords 必须是 3-8 个专有名词。
+- `agent_memory_save`：发现稳定事实、任务模式、调试经验、工作流习惯时调用。confidence < 0.7 不要保存；[0.7,0.9) 会进入 PENDING（用户 `/agent-memory confirm` 后才可检索）；≥0.9 直接 ACTIVE。临时任务/文件名不要保存；不要保存 API key、密码、个人隐私。keywords 必须是 3-8 个专有名词。
 - `agent_memory_update`：发现旧记忆过时或需要补充时调用。建议先 `agent_memory_search` 看原内容。
 - `agent_memory_delete`：发现旧记忆已过时、错误或不再适用时调用。
-- 用户明确说"记一下/记住/以后记得"时，调用 `save_memory`（兼容旧接口，内部委托给 agent_memory_save）。
+- 用户明确说"记一下/记住/以后记得"时，调用 `save_memory`（写入 agent_memory，confidence=1.0；也可用 `agent_memory_save`）。
+- 不要依赖「每轮自动注入的相关长期记忆」：默认已关闭被动预取；需要历史事实时用 `agent_memory_search` / `session_search`。
+- BETTER.md 超容量时先 `read_better_md` 按整合指引合并/删除，再 `suggest_better_md`。
 
 ### 第三块：会话历史检索（session_search）
-- `session_search`：跨会话的历史对话检索，适合"之前那次怎么做的"、"上次怎么处理过 X"类问题。
+- `session_search`：跨会话历史对话检索（BM25 → 分组 → 关键词窗口 → 可选 LLM 摘要）。适合"之前那次怎么做的"。
+- 参数：`summarize` 默认 true（失败降级 preview）；`format=json` 可拿 `{sessions:[{conversation_id,summary,status}]}`。
 - BM25 全文检索 + 五阶段管道（检索 → 按会话分组 → 加载完整 → 截断预览 → 返回）。
 - 默认当前项目作用域、回溯 30 天；可指定 `role_filter`（user/assistant）和 `days_back`。
 - 每轮对话结束会异步索引到 SQLite（`~/.bettercli/memory/session_messages.db`），不阻塞主路径。

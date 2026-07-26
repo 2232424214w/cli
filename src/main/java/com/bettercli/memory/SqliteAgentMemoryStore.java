@@ -237,7 +237,10 @@ public class SqliteAgentMemoryStore implements AgentMemoryStore {
                 .confidence(patch.getConfidence() != null ? patch.getConfidence() : old.getConfidence())
                 .source(old.getSource())
                 .status(patch.getStatus() != null ? patch.getStatus() : old.getStatus())
-                .pendingExpiresAt(old.getPendingExpiresAt())
+                // 确认 ACTIVE 后清除 PENDING TTL；否则保留原过期时间
+                .pendingExpiresAt(patch.getStatus() == AgentMemoryEntry.MemoryStatus.ACTIVE
+                        ? null
+                        : old.getPendingExpiresAt())
                 .tokenCount(old.getTokenCount())
                 .accessCount(old.getAccessCount())
                 .lastAccessedAt(old.getLastAccessedAt())

@@ -30,6 +30,8 @@ class ProjectMemoryLoaderTest {
         String context = new ProjectMemoryLoader(userDir, projectRoot).loadForPrompt();
 
         assertTrue(context.contains("## BETTER.md 项目记忆"));
+        assertTrue(context.contains("<user_memory>"));
+        assertTrue(context.contains("</user_memory>"));
         assertTrue(context.indexOf("user rule") < context.indexOf("project rule"));
         assertTrue(context.indexOf("project rule") < context.indexOf("dot project rule"));
         assertTrue(context.indexOf("dot project rule") < context.indexOf("local rule"));
@@ -182,6 +184,14 @@ class ProjectMemoryLoaderTest {
     }
 
     @Test
+    void consolidationGuideMentionsMergeAndSessionSearch() {
+        String guide = ProjectMemoryLoader.consolidationGuide();
+        assertTrue(guide.contains("整合指引"));
+        assertTrue(guide.contains("合并") || guide.contains("删除"));
+        assertTrue(guide.contains("session_search"));
+    }
+
+    @Test
     void capacityStatusReportsHealthyWhenUnderThreshold() throws Exception {
         Path userDir = tempDir.resolve("user");
         Path projectRoot = tempDir.resolve("project");
@@ -253,5 +263,20 @@ class ProjectMemoryLoaderTest {
         Path target = loader.getSuggestTarget();
         assertEquals(projectRoot.resolve("BETTER.md").toAbsolutePath().normalize(),
                 target.toAbsolutePath().normalize());
+    }
+
+    @Test
+    void loadForPromptHardCapsAtPaiMdMaxChars() throws Exception {
+        Path userDir = tempDir.resolve("user");
+        Path projectRoot = tempDir.resolve("project");
+        Files.createDirectories(userDir);
+        Files.createDirectories(projectRoot);
+        Files.writeString(projectRoot.resolve("BETTER.md"), "x".repeat(5000));
+
+        String context = new ProjectMemoryLoader(userDir, projectRoot, false, 2200, 0.8).loadForPrompt();
+        assertTrue(context.contains("<user_memory>"));
+        assertTrue(context.contains("截断"));
+        // 整段注入（含标签）应远小于原文 5000，并贴近 2200 预算
+        assertTrue(context.length() < 2800, "injected length=" + context.length());
     }
 }
