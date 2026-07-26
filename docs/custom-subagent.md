@@ -49,36 +49,58 @@
 
 ## 1024 长任务能力对齐矩阵
 
+对照原文 `restored-docs/1024-长任务下的SubAgent后台执行与通知机制.md`（2026-05-05）逐条复核后的结果。
+
+### 设计目标（§2）
+
+| 目标 | 状态 | BetterCLI 做法 |
+|------|------|----------------|
+| 消除工具重复触发 | ✅ | 微信 FIFO：旧 ReAct 未结束时新消息只排队，不会并发开第二条推理（机制不同于「感知进行中工具状态」） |
+| 消息处理顺序 | ✅ | `conversationId` 队列 + `finally` 等价：出队后再 `submit`，忙时不 drain |
+| 长任务后台执行 | ✅ | `mode=background` + 完成通知 + bg-react |
+| 避免无效 bg-react | ✅ | `sessionWrite ≤ lastBgReactStart` 跳过（内存，非 Redis） |
+
+### 能力明细（§3–§9）
+
 | 1024 能力 | BetterCLI 等价 | 状态 | 平台差异 / 说明 |
 |-----------|----------------|------|-----------------|
 | 同 conversationId FIFO 串行 | `ConversationMessageQueue` + `WechatMessageLoop` | ✅ | CLI 交互本身单线；微信通道实现队列 |
-| 非队首「排队中」回执 | 微信推送排队文案 | ✅ | 无大象卡片，纯文本回执 |
-| 超时从任意位置 `removeIf` | `evictExpired` + `BETTERCLI_WECHAT_QUEUE_TIMEOUT_SECONDS`（默认 600） | ✅ | 单机内存，无 Redis TTL |
-| `/stop` `/status` 等旁路入队 | 控制命令入队前处理 | ✅ | 对标终止思考 / `/sa-st` 旁路 |
-| 前台 mode（同步等结果） | `run_subagent` 默认 / `mode=foreground` → `CUSTOM_SUBAGENT_PENDING:` + materialize | ✅ | 批次结束回填，非每 5s 轮询 API |
-| 后台 mode（accepted 即结束） | `mode=background` / 微信默认 background / `BETTERCLI_SUBAGENT_DEFAULT_MODE` | ✅ | 对标大象工作区；CLI 默认仍前台 |
-| 完成后写入 session 通知 | `CustomSubAgentCompletionNotice` 注入主会话（role=user） | ✅ | 前缀 `BetterCLI runtime context`（对标 ReactMind） |
-| untrusted 结果围栏 | `<<<BEGIN/END_UNTRUSTED_CHILD_RESULT>>>` | ✅ | 与 1024 格式一致 |
-| status done / cancelled | `✅ done` / `❌ cancelled` | ✅ | |
-| bg-react 拉起主 Agent 汇总 | `BgReactCoordinator` + `Agent` 空闲后推理 | ✅ | 微信经 `setBgReactReplyConsumer` 回推 |
-| session 写入时间去重 | `markSessionWrite` vs `lastBgReactStart` | ✅ | **内存 Map**，非 Redis；同进程有效 |
-| 仅 foreground 计入 pending | background 不走 materialize 等待 | ✅ | 对标 `DispatchResult(launched, background)` |
-| 子 Agent 结果队列隔离 | 子 run 独立 session / Future，不共享 pending 表 | ✅ | 无 BusinessInfo.deepCopy 历史坑 |
-| 运行中 Agent 注册表 | `LiveSubAgentRun` + `activeRuns` | ✅ | **进程内** ConcurrentHashMap，非 Redis Hash |
-| `running_agents_list` 树形进度 | `formatRunningTree`（progress / lastActiveTime） | ✅ | 仅主 Agent 工具；子 Agent 白名单剥离 |
-| `terminate_agent` 杀子树 | `terminateAgent(conversationId)` + 每 run 独立 `CancellationToken` | ✅ | `/cancel` 仍可取消当前主任务 |
-| `steer_agent` 下一轮纠偏 | `AgentSteerService` 内存队列，不落盘 | ✅ | 工具结束后下一轮 LLM 注入 |
-| 微信放行三运行管理工具 | `WechatPolicyDecider` | ✅ | 与 `run_subagent` 同级只读/管控类 |
-| Redis running Hash / reactTraceId | — | ❌ | 单机 CLI 无需跨请求 Redis 协调 |
-| 大象 Rendezvous / backgroundSubagentCallback | — | ❌ | 微信 iLink 本机回推替代 |
-| `/new` 清 running key 跳过 bg-react | — | ⚠️ | CLI `/clear` 清主会话；跨进程 HA 不保证跳过已排队 bg-react |
+| 非队首「排队中」回执 | 微信推送排队文案 + 位次 | ✅ | 无大象卡片；轮到时 `startTyping`，无单独「思考中」卡片更新 |
+| 超时从任意位置剔除 | `removeExpired` + `BETTERCLI_WECHAT_QUEUE_TIMEOUT_SECONDS`（默认 600） | ✅ | 单机内存，无 Redis TTL |
+| 控制命令旁路入队 | `/stop` `/status` `/help` `/pause` `/resume` 等 `bypassQueue` | ✅ | 微信无 `/sa-st`；CLI 用 `/subagent status` |
+| **终止思考不杀后台子 Agent** | `/stop` → `WechatAgentSession.cancel` → `cancelAllPending` | ⚠️ | **有意偏差**：当前会取消前台+后台委托并可能触发 cancelled 完成通知；1024 工作区只停主链路 |
+| 前台 mode | 默认 / `mode=foreground` → `CUSTOM_SUBAGENT_PENDING:` + `materializeAsyncResults` | ✅ | 批次结束回填，非每 5s 轮询 |
+| 后台 mode | `mode=background` / 微信 `setSubagentBackgroundDefault(true)` / `BETTERCLI_SUBAGENT_DEFAULT_MODE` | ✅ | CLI 默认仍前台（对标 API 同步） |
+| bg-react 内再启子 Agent 走后台 | 微信会话级 `backgroundDefault=true` | ✅* | *CLI 若未设 DEFAULT_MODE=background，bg-react 内再委托仍可能前台 |
+| 提前生成 subagentConversationId | `startAsync` 先分配 sessionId 再占位 | ✅ | |
+| 完成后写通知 + 记写入时间 + 触发 bg-react | `onSubAgentBackgroundComplete` | ✅ | 顺序：history 追加 → `markSessionWrite` → `enqueue` |
+| 完成通知格式（围栏 / Action / status） | `CustomSubAgentCompletionNotice` | ✅ | 前缀为 `BetterCLI runtime context`（对标 ReactMind）；多 `agent:` 字段 |
+| 通知 role=user | `Message.user(notice)` | ✅ | |
+| 通知不计入真实用户轮次 | `isCompletionNotice` 已提供 | ⚠️ | **压缩器未排除**：`ConversationHistoryCompactor` 仍把完成通知当 user 轮次计入 retain |
+| bg-react 空/静默不推送 | `deliverBgReactReply` 跳过 blank / `OK` | ✅ | |
+| session 写入时间去重 | `BgReactCoordinator` | ✅ | **内存 Map**；进程重启丢失；无 24h TTL |
+| 仅 foreground 计入 pending | background 不进 materialize 等待 | ✅ | 对标 `launched && !background` |
+| 子 Agent 结果队列隔离 | 独立 `PendingRun` / Future，不共享父 pending 表 | ✅ | |
+| 运行中 Agent 注册表 | `LiveSubAgentRun` + `activeRuns` | ✅ | 进程内 Map；无 reactTraceId / Redis Hash |
+| `running_agents_list` | `formatRunningTree`（depth / task / lastProgress / lastActiveMs） | ✅ | 文本树；仅主 Agent；子 Agent 工具白名单剥离 |
+| `terminate_agent` 杀子树 | `terminateAgent` + 独立 `CancellationToken` | ✅ | 工具描述含「仅用户明确要求时」约束 |
+| `steer_agent` 不落盘 | `AgentSteerService` + SubAgent 每轮 `drain` | ✅ | `[steer — ephemeral]` 仅附带当轮请求 |
+| 微信放行三运行管理工具 | `WechatPolicyDecider` | ✅ | |
+| Redis running Hash / reactTraceId | — | ❌ | 单机无需 |
+| 大象 Rendezvous / backgroundSubagentCallback | — | ❌ | 微信 iLink `setBgReactReplyConsumer` 替代 |
+| `/new` 后 `isRunning=false` 跳过 bg-react | `/clear` 只清 history | ⚠️ | 已排队的 bg-react 仍可能跑；无 Redis key 守卫 |
 | RoleHub / belongPaas | — | ❌ | 平台专属 |
+
+### 已知限制（与 1024 §8 对应）
+
+- 多子 Agent 陆续完成仍会多轮 bg-react（去重只跳「已覆盖写入」的重复入队）。
+- 完成通知占 history 体积；极端堆积会抬高压缩压力（且当前计入 user 轮次，见上 ⚠️）。
 
 ### 行为摘要
 
 - **后台模式**：`run_subagent(..., mode=background)` 或 `BETTERCLI_SUBAGENT_DEFAULT_MODE=background`；微信通道默认 background。立即 `CUSTOM_SUBAGENT_BG_ACCEPTED:`，materialize 不等待；完成后写完成通知并触发 bg-react（写入时间去重）。
 - **运行管理**（仅主 Agent）：`running_agents_list` 树形进度；`terminate_agent(conversation_id)` 杀子树；`steer_agent(conversation_id, message)` 下一轮纠偏（不落盘）。
-- **刻意不做**：Redis 运行注册表、大象推送协议、与 `/team` 融合。
+- **刻意不做 / 有意偏差**：Redis 运行表、大象推送、与 `/team` 融合；`/stop` 会杀后台子 Agent（不同于 1024 终止思考）。
 
 ## 验证
 
