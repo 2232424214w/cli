@@ -257,7 +257,8 @@ public class Agent {
                 ? fallbackConversationId : sessionMessageIndexer.getConversationId();
         boolean background = resolveSubagentBackground(mode);
         return customSubAgentRunner.startAsync(
-                name, task, llmClient, toolRegistry, progress, parentConversationId, background, null);
+                name, task, llmClient, toolRegistry, progress, parentConversationId,
+                background, null, sessionEpoch.get());
     }
 
     private boolean resolveSubagentBackground(String mode) {
@@ -290,10 +291,15 @@ public class Agent {
         if (event == null) {
             return;
         }
-        final long epochAtEnqueue = sessionEpoch.get();
+        final long epochAtStart = event.parentSessionEpoch();
+        if (sessionEpoch.get() != epochAtStart) {
+            log.info("drop stale SubAgent completion: startedEpoch={} currentEpoch={} child={}",
+                    epochAtStart, sessionEpoch.get(), event.childSessionId());
+            return;
+        }
         String notice = CustomSubAgentCompletionNotice.format(event);
         synchronized (conversationHistory) {
-            if (sessionEpoch.get() != epochAtEnqueue) {
+            if (sessionEpoch.get() != epochAtStart) {
                 return;
             }
             conversationHistory.add(LlmClient.Message.user(notice));
@@ -303,13 +309,13 @@ public class Agent {
         bgReactCoordinator.enqueue(parentId, new BgReactCoordinator.BgReactTask() {
             @Override
             public String run() throws Exception {
-                if (sessionEpoch.get() != epochAtEnqueue) {
+                if (sessionEpoch.get() != epochAtStart) {
                     log.info("bg-react skip: session cleared (epoch {} -> {})",
-                            epochAtEnqueue, sessionEpoch.get());
+                            epochAtStart, sessionEpoch.get());
                     return "";
                 }
                 waitUntilAgentIdle(60_000);
-                if (sessionEpoch.get() != epochAtEnqueue) {
+                if (sessionEpoch.get() != epochAtStart) {
                     return "";
                 }
                 if (CancellationContext.isCancelled()) {
@@ -320,7 +326,7 @@ public class Agent {
 
             @Override
             public void onReply(String reply) {
-                if (sessionEpoch.get() != epochAtEnqueue) {
+                if (sessionEpoch.get() != epochAtStart) {
                     return;
                 }
                 deliverBgReactReply(reply);
@@ -336,12 +342,27 @@ public class Agent {
     }
 
     private String runBgReactTurn() {
-        log.info("bg-react start");
         String prompt = "[bg-react] 请根据最新的 SubAgent 完成通知处理："
                 + "若所有预期子任务已完成则汇总回复用户；"
                 + "若仍有未完成则只输出空或极短确认且不要重复已推送内容；"
                 + "若结果已在之前回复中体现则静默（可只回复 OK）。";
-        return run(prompt);
+        LlmClient override = com.bettercli.subagent.BgReactClientResolver.resolve(llmClient);
+        LlmClient previous = this.llmClient;
+        boolean swapped = override != null && override != previous;
+        if (swapped) {
+            setLlmClient(override);
+            log.info("bg-react start with override model={} ({})",
+                    override.getModelName(), override.getProviderName());
+        } else {
+            log.info("bg-react start");
+        }
+        try {
+            return run(prompt);
+        } finally {
+            if (swapped) {
+                setLlmClient(previous);
+            }
+        }
     }
 
     private void deliverBgReactReply(String reply) {

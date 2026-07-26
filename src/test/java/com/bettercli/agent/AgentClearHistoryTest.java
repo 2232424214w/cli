@@ -127,7 +127,8 @@ class AgentClearHistoryTest {
         agent.setFallbackConversationId("parent-clear");
 
         String accepted = runner.startAsync(
-                "slow", "long", blockingClient, agent.getToolRegistry(), null, "parent-clear", true, null);
+                "slow", "long", blockingClient, agent.getToolRegistry(), null, "parent-clear",
+                true, null, agent.sessionEpoch());
         assertTrue(accepted.contains("CUSTOM_SUBAGENT_BG_ACCEPTED:"));
         assertTrue(entered.await(3, TimeUnit.SECONDS));
 

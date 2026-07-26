@@ -36,7 +36,7 @@
 
 ## 配置
 
-见 `.env.example`：`BETTERCLI_SUBAGENT_ROUTER_*`、`WEBHOOK_URL`、`SESSIONS_DIR`、`WECHAT_SUBAGENT_ROUTER`、`WECHAT_QUEUE_TIMEOUT_SECONDS`、`SUBAGENT_DEFAULT_MODE`。
+见 `.env.example`：`BETTERCLI_SUBAGENT_ROUTER_*`、`WEBHOOK_URL`、`SESSIONS_DIR`、`WECHAT_SUBAGENT_ROUTER`、`WECHAT_QUEUE_TIMEOUT_SECONDS`、`SUBAGENT_DEFAULT_MODE`、`SUBAGENT_BG_MAX_CONCURRENT`、`BG_REACT_PROVIDER`/`MODEL`。
 
 ## 长任务后台（1024）四期状态
 
@@ -89,6 +89,9 @@
 | Redis running Hash / reactTraceId | — | ❌ | 单机无需 |
 | 大象 Rendezvous / backgroundSubagentCallback | — | ❌ | 微信 iLink `setBgReactReplyConsumer` 替代 |
 | `/new` 后跳过 bg-react | `/clear` → 静默 `cancelAllPending(false)` + `sessionEpoch++` | ✅ | 不换 conversationId；epoch 使已排队 bg-react 失效（单进程等价） |
+| 完成通知绑定会话世代 | `parentSessionEpoch` 写入事件；不匹配则丢弃 | ✅ | 堵 `/clear` 后迟到 finally 污染 |
+| 每会话后台并发上限 | `BETTERCLI_SUBAGENT_BG_MAX_CONCURRENT`（默认 3） | ✅ | 超限拒绝并提示；0=不限制 |
+| bg-react 独立小模型 | `BETTERCLI_BG_REACT_PROVIDER` / `_MODEL` | ✅ | 未配或失败回退主模型 |
 | RoleHub / belongPaas | — | ❌ | 平台专属 |
 
 ### 已知限制（与 1024 §8 对应）

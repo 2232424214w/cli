@@ -250,7 +250,8 @@ src/main/java/com/bettercli/
 - 轻量 HA：`sessions`/`resume`；`stats` 审计聚合；`delete --force` 删 user/project 定义
 - 路由/硬指定标注 `[via:name]`；可选 Webhook；微信硬指定可用（路由默认关）
 - 长任务（对齐 1024）：微信 conversationId FIFO；`mode=background` + 完成通知 + bg-react 去重；主 Agent 可用 `running_agents_list` / `terminate_agent` / `steer_agent`（子 Agent 剥离）
-- `/clear` 静默取消后台委托 + `sessionEpoch` 作废 bg-react；压缩不计完成通知轮次；`/stop` 仍取消后台（单进程有意偏差，异于 1024「终止思考留后台」）
+- `/clear` 静默取消后台委托 + `sessionEpoch` 作废 bg-react；完成通知携带 `parentSessionEpoch`，不匹配则丢弃；压缩不计完成通知轮次；`/stop` 仍取消后台（单进程有意偏差）
+- 后台并发：`BETTERCLI_SUBAGENT_BG_MAX_CONCURRENT`（默认 3）；bg-react 可选 `BETTERCLI_BG_REACT_PROVIDER`/`_MODEL` 降本
 - **CLI 对齐已收口**（定义方案 + 长任务后台，见 `docs/custom-subagent.md`）；RoleHub / belongPaas / Redis 运行表不做
 
 ## 修改时的硬规则
@@ -299,7 +300,7 @@ src/main/java/com/bettercli/
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
-| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CustomSubAgentRuntimeMgmtTest,ConversationMessageQueueTest,WechatPolicyDeciderTest,CliCommandParserTest,ConversationHistoryCompactorTest,AgentClearHistoryTest` |
+| Custom Subagent | `mvn test -Dtest=CustomSubAgentRegistryTest,CustomSubAgentRunnerTest,CustomSubAgentMemoryToolTest,CustomSubAgentRouterTest,CustomSubAgentScaffoldTest,CustomSubAgentAuditTest,CustomSubAgentSessionStoreTest,CustomSubAgentBgReactTest,CustomSubAgentRuntimeMgmtTest,SubAgentBgLimitsTest,BgReactClientResolverTest,ConversationMessageQueueTest,WechatPolicyDeciderTest,CliCommandParserTest,ConversationHistoryCompactorTest,AgentClearHistoryTest` |
 | Multi-Agent 动态重规划 | `mvn test -Dtest=ReplanIntegrationTest` |
 | Multi-Agent reviewer fail-safe | `mvn test -Dtest=ReviewerFailSafeIntegrationTest` |
 | Multi-Agent Scatter-Gather / 辩论收敛 | `mvn test -Dtest=ScatterGatherTest,DebateConvergenceIntegrationTest,ReflectionServiceTest` |

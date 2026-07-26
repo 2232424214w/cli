@@ -237,7 +237,7 @@ public final class CustomSubAgentRunner {
         if (pending != null && pending.background()) {
             fireCompletionOnce(new CustomSubAgentCompletionEvent(
                     pending.parentId(), sessionId, pending.name(), pending.toolCallId(), pending.task(),
-                    false, true, "terminated"));
+                    false, true, "terminated", pending.parentSessionEpoch()));
         }
         return live != null || pending != null;
     }
@@ -253,12 +253,20 @@ public final class CustomSubAgentRunner {
      */
     public String startAsync(String name, String task, LlmClient parentClient, ToolRegistry toolRegistry,
                              PrintStream progressOut, String parentConversationId) {
-        return startAsync(name, task, parentClient, toolRegistry, progressOut, parentConversationId, false, null);
+        return startAsync(name, task, parentClient, toolRegistry, progressOut, parentConversationId,
+                false, null, 0L);
     }
 
     public String startAsync(String name, String task, LlmClient parentClient, ToolRegistry toolRegistry,
                              PrintStream progressOut, String parentConversationId,
                              boolean background, String toolCallId) {
+        return startAsync(name, task, parentClient, toolRegistry, progressOut, parentConversationId,
+                background, toolCallId, 0L);
+    }
+
+    public String startAsync(String name, String task, LlmClient parentClient, ToolRegistry toolRegistry,
+                             PrintStream progressOut, String parentConversationId,
+                             boolean background, String toolCallId, long parentSessionEpoch) {
         if (isInCustomSubAgent()) {
             return "run_subagent 失败: 不可嵌套调用（Custom SubAgent 执行中）";
         }
@@ -270,19 +278,28 @@ public final class CustomSubAgentRunner {
             return "run_subagent 失败: 未找到子 Agent \"" + name + "\"\n" + availableList();
         }
         return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId,
-                background, toolCallId);
+                background, toolCallId, parentSessionEpoch);
     }
 
     public String startAsync(CustomSubAgentDefinition def, String task,
                              LlmClient parentClient, ToolRegistry toolRegistry,
                              PrintStream progressOut, String parentConversationId) {
-        return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId, false, null);
+        return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId,
+                false, null, 0L);
     }
 
     public String startAsync(CustomSubAgentDefinition def, String task,
                              LlmClient parentClient, ToolRegistry toolRegistry,
                              PrintStream progressOut, String parentConversationId,
                              boolean background, String toolCallId) {
+        return startAsync(def, task, parentClient, toolRegistry, progressOut, parentConversationId,
+                background, toolCallId, 0L);
+    }
+
+    public String startAsync(CustomSubAgentDefinition def, String task,
+                             LlmClient parentClient, ToolRegistry toolRegistry,
+                             PrintStream progressOut, String parentConversationId,
+                             boolean background, String toolCallId, long parentSessionEpoch) {
         if (isInCustomSubAgent()) {
             return "run_subagent 失败: 不可嵌套调用（Custom SubAgent 执行中）";
         }
@@ -291,11 +308,19 @@ public final class CustomSubAgentRunner {
             return prepError;
         }
 
-        String childSessionId = newSessionId(def.name());
         String parentId = normalizeParentId(parentConversationId);
+        if (background) {
+            String limitError = checkBackgroundLimit(parentId);
+            if (limitError != null) {
+                return limitError;
+            }
+        }
+
+        String childSessionId = newSessionId(def.name());
         String taskPreview = preview(task.trim(), 80);
         int timeoutSec = def.resolveTimeoutSeconds();
         String taskText = task.trim();
+        final long epoch = parentSessionEpoch;
 
         CancellationToken runToken = new CancellationToken();
         LiveSubAgentRun live = new LiveSubAgentRun(
@@ -330,20 +355,47 @@ public final class CustomSubAgentRunner {
                     fireCompletionOnce(new CustomSubAgentCompletionEvent(
                             parentId, childSessionId, def.name(), toolCallId, taskText,
                             success, cancelled || runToken.isCancelled() || CancellationContext.isCancelled(),
-                            outcome == null ? "" : outcome));
+                            outcome == null ? "" : outcome, epoch));
                 }
             }
         });
         live.setFuture(future);
 
         PendingRun pending = new PendingRun(
-                future, timeoutSec, def.name(), background, taskText, toolCallId, parentId, runToken);
+                future, timeoutSec, def.name(), background, taskText, toolCallId, parentId, runToken, epoch);
         if (background) {
             backgroundBySession.put(childSessionId, pending);
             return bgAcceptedPlaceholder(childSessionId, def.name(), parentId, timeoutSec);
         }
         pendingBySession.put(childSessionId, pending);
         return placeholder(childSessionId, def.name(), parentId, timeoutSec);
+    }
+
+    /** 当前 parent 下后台委托数是否已达上限；超限返回错误文案，否则 null。 */
+    String checkBackgroundLimit(String parentId) {
+        int max = SubAgentBgLimits.maxConcurrentBackground();
+        if (max <= 0) {
+            return null;
+        }
+        int running = countBackgroundForParent(parentId);
+        if (running < max) {
+            return null;
+        }
+        return "run_subagent 失败: 后台并发已达上限 " + max
+                + "（parent=" + parentId + ", running=" + running + "）。"
+                + "请等待完成、terminate_agent，或调高 BETTERCLI_SUBAGENT_BG_MAX_CONCURRENT。"
+                + "\n" + formatRunningTree(parentId);
+    }
+
+    int countBackgroundForParent(String parentId) {
+        String pid = normalizeParentId(parentId);
+        int n = 0;
+        for (PendingRun p : backgroundBySession.values()) {
+            if (p != null && p.background() && pid.equals(p.parentId())) {
+                n++;
+            }
+        }
+        return n;
     }
 
     /**
@@ -427,7 +479,7 @@ public final class CustomSubAgentRunner {
             if (notifyBackgroundCompletion && p != null && p.background()) {
                 fireCompletionOnce(new CustomSubAgentCompletionEvent(
                         p.parentId(), sessionId, p.name(), p.toolCallId(), p.task(),
-                        false, true, "用户取消"));
+                        false, true, "用户取消", p.parentSessionEpoch()));
             }
         }
     }
@@ -512,7 +564,7 @@ public final class CustomSubAgentRunner {
                 childSessionId, parentId, parentHistory, parentTranscript, true));
         live.setFuture(future);
         PendingRun pending = new PendingRun(
-                future, timeoutSec, def.name(), false, userMessage.trim(), null, parentId, runToken);
+                future, timeoutSec, def.name(), false, userMessage.trim(), null, parentId, runToken, 0L);
         pendingBySession.put(childSessionId, pending);
         try {
             PendingRun toAwait = pendingBySession.remove(childSessionId);
@@ -902,7 +954,7 @@ public final class CustomSubAgentRunner {
         });
         live.setFuture(future);
         pendingBySession.put(childSessionId, new PendingRun(
-                future, timeoutSec, def.name(), false, continueTask, null, parentId, runToken));
+                future, timeoutSec, def.name(), false, continueTask, null, parentId, runToken, 0L));
         try {
             PendingRun pending = pendingBySession.remove(childSessionId);
             if (pending == null) {
@@ -1011,7 +1063,8 @@ public final class CustomSubAgentRunner {
             String task,
             String toolCallId,
             String parentId,
-            CancellationToken cancelToken
+            CancellationToken cancelToken,
+            long parentSessionEpoch
     ) {
     }
 }
