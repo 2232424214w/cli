@@ -1,5 +1,13 @@
 # 第 15 期开发任务：Skill 系统 + 内置 web-access Skill
 
+> **P3 补充（CLI 产品化）**：`/skill check` 本地核查；`/skill new` 骨架；`/skill import|export` ZIP（防 Zip Slip，无远程 marketplace）；`/skill draft` 从会话生成 SKILL.md 草稿。不做平台 UI / 群 Skill / SSO webhook。
+>
+> **P2 补充**：frontmatter `skill-dependencies`（块列表 / 行内数组，兼 `requires`）在 `load_skill` 时拓扑装载；PLANNER/REVIEWER 可 `load_skill`；Orchestrator 每角色独立 `SkillContextBuffer` + `ToolRegistry.bindSkillContextBuffer`；`load_skill` 进审计；`/skill show` 展示依赖。
+>
+> **P1 补充**：`SkillQuality` 提供 name/description/body 软护栏；`load_skill` 确认嵌入 INDEX.md 摘要；内置 `progressive-knowledge` 演示 references 渐进知识库。
+>
+> **P0 勘误（对齐 1024 渐进式加载）**：`load_skill` 后正文在**同一用户 turn**内、工具批结束后写入 conversationHistory（`flushPendingSkillBodies`），不再等到下一条用户消息。`SkillContextBuffer.drain()` 仍可在 run 入口消费遗留项。
+>
 > 这份文档是给执行 Agent 的开发任务说明书，自包含、可直接照着推进。
 >
 > **开工前必读**：
@@ -37,11 +45,11 @@
 
 **明确不做**（拆给后续期次或永远不做）：
 - 改 `web_fetch` 工具内部链路（**不**做"本地 → Jina → 浏览器"三档级联，违背第 9 期纯本地约定）
-- Skill 间依赖声明（`requires` 字段，YAGNI）
+- ~~Skill 间依赖声明（`requires` 字段，YAGNI）~~ → **P2 已做** `skill-dependencies` / `requires` 自动装载
 - Skill marketplace / 远程下载 / 自动更新
 - 把 Skill body 全部一次性注入 system prompt（token 成本失控）
 - 把 scripts/ 注册成虚拟工具（变相绕开 HITL）
-- 跨 Agent 角色的 Skill 路由差异化（ReAct / Plan / Team 共享同一套启用列表）
+- ~~跨 Agent 角色的 Skill 路由差异化~~ → **P2 部分**：索引仍共享启用列表；各角色 **独立** SkillContextBuffer（避免互相污染）
 - 给 Skill 单独的"全部放行"维度（沿用 `execute_command` / MCP 既有 HITL 维度即可）
 - Skill 内嵌 LLM 调用 / sub-agent 编排
 - Markdown 之外的格式（YAML / JSON / TOML 写 SKILL.md，本期只支持 Markdown frontmatter）

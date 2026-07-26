@@ -24,6 +24,13 @@ class SkillBuiltinExtractorTest {
         assertTrue(Files.isRegularFile(skillDir.resolve(".version")));
         assertEquals(SkillBuiltinExtractor.CURRENT_VERSION,
                 Files.readString(skillDir.resolve(".version")).trim());
+
+        Path knowledge = tempDir.resolve("progressive-knowledge");
+        assertTrue(Files.isDirectory(knowledge));
+        assertTrue(Files.isRegularFile(knowledge.resolve("SKILL.md")));
+        assertTrue(Files.isRegularFile(knowledge.resolve("references/INDEX.md")));
+        assertTrue(Files.isRegularFile(knowledge.resolve("references/getting-started.md")));
+        assertTrue(Files.isRegularFile(knowledge.resolve("references/faq.md")));
     }
 
     @Test

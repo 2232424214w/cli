@@ -46,16 +46,18 @@ class AgentRoleTest {
         assertTrue(planner.contains("read_file"));
         assertTrue(planner.contains("grep_code"));
         assertTrue(planner.contains("web_search"));
+        assertTrue(planner.contains("load_skill"));
         assertFalse(planner.contains("write_file"));
         assertFalse(planner.contains("execute_command"));
         assertFalse(planner.contains("save_memory"));
         assertFalse(planner.contains("revert_turn"));
 
-        // REVIEWER：纯只读，禁止联网/写/执行
+        // REVIEWER：纯只读 + load_skill（可按指引读 references），禁止联网/写/执行
         var reviewer = AgentRole.REVIEWER.allowedTools();
         assertNotNull(reviewer);
         assertTrue(reviewer.contains("read_file"));
         assertTrue(reviewer.contains("glob_files"));
+        assertTrue(reviewer.contains("load_skill"));
         assertFalse(reviewer.contains("web_search"));
         assertFalse(reviewer.contains("web_fetch"));
         assertFalse(reviewer.contains("write_file"));

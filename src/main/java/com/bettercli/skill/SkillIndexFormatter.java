@@ -46,7 +46,8 @@ public final class SkillIndexFormatter {
 
         sb.append('\n');
         sb.append("判断准则：当任务描述匹配某个 skill 的触发场景时，调用 load_skill(name) 加载完整指引；")
-                .append("已加载的 skill 会在下一轮以 \"## 已加载 Skill\" 段落出现在你的 user message 中。")
+                .append("已加载的 skill 会在同轮下一次模型调用前以 \"## 已加载 Skill\" 段落注入对话。")
+                .append("若 skill 含 references/INDEX.md，先 read_file 索引再按需加载，勿一次读入全部。")
                 .append("不要重复加载同一 skill；同一会话内一次足够。\n");
 
         if (sb.length() > MAX_INDEX_BYTES) {

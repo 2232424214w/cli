@@ -524,6 +524,30 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesSkillProductizationCommands() {
+        CliCommandParser.ParsedCommand checkAll = CliCommandParser.parse("/skill check");
+        assertEquals(CliCommandParser.CommandType.SKILL_CHECK, checkAll.type());
+        assertNull(checkAll.payload());
+
+        CliCommandParser.ParsedCommand checkOne = CliCommandParser.parse("/skill check web-access");
+        assertEquals(CliCommandParser.CommandType.SKILL_CHECK, checkOne.type());
+        assertEquals("web-access", checkOne.payload());
+
+        CliCommandParser.ParsedCommand neu = CliCommandParser.parse("/skill new my-flow --project");
+        assertEquals(CliCommandParser.CommandType.SKILL_NEW, neu.type());
+        assertEquals("my-flow --project", neu.payload());
+
+        assertEquals(CliCommandParser.CommandType.SKILL_EXPORT,
+                CliCommandParser.parse("/skill export web-access ./a.zip").type());
+        assertEquals(CliCommandParser.CommandType.SKILL_IMPORT,
+                CliCommandParser.parse("/skill import ./a.zip --force").type());
+
+        CliCommandParser.ParsedCommand draft = CliCommandParser.parse("/skill draft");
+        assertEquals(CliCommandParser.CommandType.SKILL_DRAFT, draft.type());
+        assertNull(draft.payload());
+    }
+
+    @Test
     void parsesSubagentListAndReloadOnly() {
         assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent").type());
         assertEquals(CliCommandParser.CommandType.SUBAGENT_LIST, CliCommandParser.parse("/subagent list").type());

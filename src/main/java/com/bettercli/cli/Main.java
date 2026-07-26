@@ -942,10 +942,34 @@ public class Main {
                         continue;
                     }
                     case SKILL_RELOAD -> {
-                        skillRegistry.reload();
-                        ui.println("🔄 已重新扫描 skill 目录");
-                        ui.println(SkillCommandHandler.startupSummary(skillRegistry));
-                        ui.println("✅ 下一轮 LLM 调用生效");
+                        ui.println(SkillCommandHandler.reload(skillRegistry));
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
+                    case SKILL_CHECK -> {
+                        ui.println(SkillCommandHandler.check(skillRegistry, command.payload()));
+                        continue;
+                    }
+                    case SKILL_NEW -> {
+                        ui.println(SkillCommandHandler.createNew(skillRegistry, command.payload()));
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
+                    case SKILL_EXPORT -> {
+                        ui.println(SkillCommandHandler.exportZip(skillRegistry, command.payload()));
+                        continue;
+                    }
+                    case SKILL_IMPORT -> {
+                        ui.println(SkillCommandHandler.importZip(skillRegistry, command.payload()));
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
+                    case SKILL_DRAFT -> {
+                        ui.println(SkillCommandHandler.draft(
+                                skillRegistry,
+                                reactAgent.getConversationHistory(),
+                                llmClient,
+                                command.payload()));
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
@@ -2039,6 +2063,11 @@ public class Main {
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
+                new SlashCommandHint("/skill check", "/skill check [name]", "本地核查 skill 质量与依赖"),
+                new SlashCommandHint("/skill new ", "/skill new <name> [--project]", "创建 skill 骨架"),
+                new SlashCommandHint("/skill export ", "/skill export <name> [zip]", "导出 skill 为 ZIP"),
+                new SlashCommandHint("/skill import ", "/skill import <zip> [--project] [--force]", "从 ZIP 导入 skill"),
+                new SlashCommandHint("/skill draft", "/skill draft [name] [--project]", "从当前会话生成 skill 草稿"),
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
@@ -2199,7 +2228,7 @@ public class Main {
             case 0, 1 -> "💡 GLM: /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|step|kimi|freellmapi|xfyun|agnes 读取配置模型";
             case 2 -> "💡 切换语言: /lang zh  |  /lang en";
             case 3 -> "💡 切换 HITL: /hitl on / /hitl off";
-            case 4 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
+            case 4 -> "💡 管理 Skill: /skill list / /skill check / /skill new <name> / /skill draft";
             case 5 -> "💡 切换渲染器（重启后生效）: BETTERCLI_RENDERER=inline|lanterna|plain";
             case 6 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
             default -> "(unknown)";

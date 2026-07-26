@@ -9,9 +9,9 @@ import java.util.Set;
  * 只暴露该角色允许使用的工具 schema，并在工具执行层拦截越权调用。
  *
  * 设计原则：最小权限
- * - PLANNER  只读 + 调研，不能写文件、不能执行命令、不能改记忆
+ * - PLANNER  只读 + 调研 + load_skill，不能写文件、不能执行命令、不能改记忆
  * - WORKER   全部内置工具（执行者要能动手）
- * - REVIEWER 纯只读，不能联网、不能写、不能执行（避免审查者被外部信息带偏或误改代码）
+ * - REVIEWER 只读 + load_skill，不能联网、不能写、不能执行（避免审查者被外部信息带偏或误改代码）
  *
  * 返回 null 表示"不限制"（兼容 WORKER 全量场景，避免硬编码全量列表导致新增工具时漏配）。
  */
@@ -53,13 +53,15 @@ public enum AgentRole {
                     "grep_code",
                     "list_dir",
                     "web_search",
-                    "web_fetch"
+                    "web_fetch",
+                    "load_skill"
             );
             case REVIEWER -> Set.of(
                     "read_file",
                     "glob_files",
                     "grep_code",
-                    "list_dir"
+                    "list_dir",
+                    "load_skill"
             );
             case WORKER -> null;
         };

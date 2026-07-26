@@ -240,7 +240,10 @@ src/main/java/com/bettercli/
 ### Skill
 
 - system prompt 索引段注入三处提示词，上限 20 个 / 4KB
-- `load_skill` → SkillContextBuffer → 下一轮 user message 前置注入
+- `load_skill` → SkillContextBuffer → **同轮**工具批结束后 / 下次 LLM 调用前注入独立 user 消息（`## 已加载 Skill：<name>`）；确认文案含 `references/` 与 `INDEX.md` 摘要（渐进加载）；`/skill reload` 展示质量护栏警告；内置 `progressive-knowledge` 演示 references 协议
+- `skill-dependencies`（兼 `requires`）：`load_skill` 按依赖拓扑先装子 skill 再装主 skill；PLANNER/REVIEWER 白名单含 `load_skill`；Team 各角色独立 `SkillContextBuffer`（`ToolRegistry.bindSkillContextBuffer` 防并行串扰）；`load_skill` 写入审计
+- CLI 产品化：`/skill check` 本地核查；`/skill new` 骨架；`/skill import|export` ZIP；`/skill draft` 从会话生成草稿（LLM 优先，失败回退启发式）
+- 软护栏：name kebab-case≤64、description 触发语境、SKILL.md 约 500 行/5k 词（超限警告不阻断）
 
 ### Custom Subagent
 

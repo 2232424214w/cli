@@ -26,6 +26,30 @@ import static org.junit.jupiter.api.Assertions.*;
 class AgentOrchestratorTest {
 
     @Test
+    void skillSystemGivesEachRoleIndependentBuffer() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        com.bettercli.skill.SkillRegistry registry = new com.bettercli.skill.SkillRegistry(
+                null, null, null, null);
+        com.bettercli.skill.SkillContextBuffer sharedFromMain = new com.bettercli.skill.SkillContextBuffer();
+        orchestrator.setSkillSystem(registry, sharedFromMain);
+
+        SubAgent planner = orchestrator.plannerAgent();
+        SubAgent reviewer = orchestrator.reviewerAgent();
+        List<SubAgent> workers = orchestrator.workerAgents();
+        assertNotNull(planner.getSkillContextBuffer());
+        assertNotNull(reviewer.getSkillContextBuffer());
+        assertFalse(workers.isEmpty());
+        assertNotNull(workers.get(0).getSkillContextBuffer());
+
+        assertNotSame(planner.getSkillContextBuffer(), reviewer.getSkillContextBuffer());
+        assertNotSame(planner.getSkillContextBuffer(), workers.get(0).getSkillContextBuffer());
+        assertNotSame(reviewer.getSkillContextBuffer(), workers.get(0).getSkillContextBuffer());
+        // Team 路径忽略 Main 传入的共享实例
+        assertNotSame(sharedFromMain, planner.getSkillContextBuffer());
+        assertNotSame(sharedFromMain, workers.get(0).getSkillContextBuffer());
+    }
+
+    @Test
     void shouldParseSimplePlan() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
         String planJson = """

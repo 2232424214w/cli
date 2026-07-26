@@ -171,13 +171,19 @@ final class BetterCliCompleter implements Completer {
             addMatching(candidates, "Skill 命令", payload,
                     option("list", "查看 skill 列表"),
                     option("show ", "查看 SKILL.md 全文"),
+                    option("check", "本地核查 skill"),
+                    option("check ", "核查指定 skill"),
+                    option("new ", "创建 skill 骨架"),
+                    option("export ", "导出 skill ZIP"),
+                    option("import ", "导入 skill ZIP"),
+                    option("draft", "从会话生成草稿"),
                     option("on ", "启用 skill"),
                     option("off ", "禁用 skill"),
                     option("reload", "重新扫描 skill 目录"));
             return true;
         }
         String sub = parts.length == 0 ? "" : parts[0].toLowerCase();
-        if (List.of("show", "on", "off").contains(sub)) {
+        if (List.of("show", "on", "off", "check", "export").contains(sub)) {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addSkillCandidates(candidates, prefix);
             return true;

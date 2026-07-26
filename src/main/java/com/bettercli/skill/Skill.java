@@ -7,9 +7,9 @@ import java.util.List;
  * 一个 Skill 是 BetterCLI 沉淀决策与经验的复用单元。
  *
  * 由 SKILL.md 文件解析得到：frontmatter 决定索引段元数据，body 在 LLM 调用 load_skill
- * 时通过 SkillContextBuffer 注入下一轮 user message。
+ * 时通过 SkillContextBuffer 注入；同轮工具批结束后写入 conversationHistory。
  *
- * source 标记加载来源，用于 /skill list 展示与三层覆盖的可观测性。
+ * {@code dependencies} 对应 frontmatter {@code skill-dependencies}：主 skill 加载前自动装入子 skill。
  */
 public record Skill(
         String name,
@@ -20,7 +20,8 @@ public record Skill(
         Source source,
         String body,
         Path skillMdPath,
-        Path referencesDir
+        Path referencesDir,
+        List<String> dependencies
 ) {
 
     public enum Source {
@@ -41,6 +42,11 @@ public record Skill(
         }
         if (body == null) {
             body = "";
+        }
+        if (dependencies == null) {
+            dependencies = List.of();
+        } else {
+            dependencies = List.copyOf(dependencies);
         }
     }
 

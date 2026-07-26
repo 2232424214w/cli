@@ -567,6 +567,7 @@ public class Agent {
                 return "⏹️ 已取消当前任务。";
             }
             injectPendingLspDiagnostics();
+            flushPendingSkillBodies();
             // Pre-Turn：仅本轮首次 LLM 调用前检测（对标 1024）
             if (!preTurnDone) {
                 maybeCompact(CompactTrigger.PRE_TURN);
@@ -636,6 +637,8 @@ public class Agent {
                     appendImageToolMessages(toolResults);
                     // 工具失败反思：本轮若有失败/拒绝/超时，注入反思提示引导 LLM 复述原因 + 改换策略
                     maybeInjectReflection(toolResults, iteration);
+                    // load_skill 后必须在 Mid-Turn 压缩前落盘，否则正文会被摘要掉或拖到下一用户轮
+                    flushPendingSkillBodies();
                     // Mid-Turn：工具全部执行完后检测溢出，全量压缩后继续下一轮采样
                     maybeCompact(CompactTrigger.MID_TURN);
                     pushStatus(budget, startNanos, "running");
@@ -939,6 +942,22 @@ public class Agent {
         String drained = skillContextBuffer.drain();
         if (drained.isEmpty()) return userInput;
         return drained + "\n用户输入：\n" + userInput;
+    }
+
+    /**
+     * 将 {@link SkillContextBuffer} 中待注入的 skill 正文写成独立 user 消息。
+     * 必须在工具批结束后、下次 LLM 调用 / Mid-Turn 压缩前调用，保证同轮 load_skill 生效。
+     */
+    private void flushPendingSkillBodies() {
+        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
+            return;
+        }
+        String drained = skillContextBuffer.drain();
+        if (drained == null || drained.isBlank()) {
+            return;
+        }
+        persistMessage(LlmClient.Message.user(drained.trim()));
+        log.info("Flushed pending skill body injection into conversationHistory");
     }
 
     private String buildExternalContext() {
@@ -1348,7 +1367,13 @@ public class Agent {
         if (invocations.size() > 1) {
             log.info("Executing {} tool calls in parallel (iteration={})", invocations.size(), iteration);
         }
-        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        toolRegistry.bindSkillContextBuffer(skillContextBuffer);
+        List<ToolExecutionResult> results;
+        try {
+            results = toolRegistry.executeTools(invocations);
+        } finally {
+            toolRegistry.bindSkillContextBuffer(null);
+        }
         if (customSubAgentRunner != null) {
             long pending = results.stream()
                     .filter(r -> CustomSubAgentRunner.parsePendingSessionId(r.result()) != null)

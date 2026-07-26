@@ -110,4 +110,21 @@ class SkillFrontmatterParserTest {
         assertEquals("foo", r.frontmatter().get("name"));
         assertEquals("", r.body());
     }
+
+    @Test
+    void parsesBlockListDependencies() {
+        String input = """
+                ---
+                name: main-skill
+                skill-dependencies:
+                  - skill-a
+                  - skill-b
+                ---
+                body
+                """;
+        SkillFrontmatterParser.ParseResult r = SkillFrontmatterParser.parse(input);
+        @SuppressWarnings("unchecked")
+        List<String> deps = (List<String>) r.frontmatter().get("skill-dependencies");
+        assertEquals(List.of("skill-a", "skill-b"), deps);
+    }
 }

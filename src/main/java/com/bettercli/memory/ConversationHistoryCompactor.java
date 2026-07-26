@@ -448,6 +448,7 @@ public class ConversationHistoryCompactor {
                 || trimmed.startsWith(SUMMARY_MARKER)
                 || trimmed.startsWith(LEGACY_SUMMARY_MARKER)
                 || trimmed.startsWith(HARD_TRUNCATE_MARKER)
+                || trimmed.startsWith("## 已加载 Skill")
                 || trimmed.startsWith("[反思提示]")
                 || trimmed.startsWith("[LSP")
                 || trimmed.startsWith("<skill>")

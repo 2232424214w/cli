@@ -97,8 +97,43 @@ public final class SkillFrontmatterParser {
             }
 
             if (rawValue.isEmpty()) {
-                warnings.add("frontmatter 字段 '" + key + "' 缺少值或使用了不支持的嵌套结构");
+                // 块列表：key:\n  - item（对标 skill-dependencies）
                 i++;
+                List<String> blockItems = new ArrayList<>();
+                while (i < lines.length) {
+                    String next = lines[i];
+                    if (next.isBlank()) {
+                        i++;
+                        continue;
+                    }
+                    int indent = leadingSpaces(next);
+                    String trimmed = next.trim();
+                    if (indent == 0) {
+                        break;
+                    }
+                    if (trimmed.startsWith("- ")) {
+                        String item = trimmed.substring(2).trim();
+                        if (item.startsWith("\"") && item.endsWith("\"") && item.length() >= 2) {
+                            item = item.substring(1, item.length() - 1);
+                        } else if (item.startsWith("'") && item.endsWith("'") && item.length() >= 2) {
+                            item = item.substring(1, item.length() - 1);
+                        }
+                        if (!item.isEmpty()) {
+                            blockItems.add(item);
+                        }
+                        i++;
+                        continue;
+                    }
+                    // 缩进但不是列表项：不支持的嵌套
+                    warnings.add("frontmatter 字段 '" + key + "' 缺少值或使用了不支持的嵌套结构");
+                    blockItems.clear();
+                    break;
+                }
+                if (!blockItems.isEmpty()) {
+                    result.put(key, blockItems);
+                } else if (!result.containsKey(key)) {
+                    warnings.add("frontmatter 字段 '" + key + "' 缺少值或使用了不支持的嵌套结构");
+                }
                 continue;
             }
 

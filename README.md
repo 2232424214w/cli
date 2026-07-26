@@ -151,7 +151,7 @@ mvn test -DskipTests=false
 - 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，BetterCLI 把 SKILL.md 正文（5KB 截断）写入 `SkillContextBuffer`，下一轮 user message 自动前置注入
 - 内置 web-access skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
 - frontmatter 走手写 YAML 子集解析，不引 SnakeYAML；解析失败 stderr 警告但不阻塞启动
-- CLI 命令：`/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill reload`
+- CLI 命令：`/skill list` / `/skill show <name>` / `/skill check [name]` / `/skill new <name> [--project]` / `/skill import|export` / `/skill draft [name]` / `/skill on|off <name>` / `/skill reload`
 - 启用状态持久化：`~/.bettercli/skills.json` 的 `disabled` 列表，默认全启用
 - 与 HITL 协同：Skill 内调用 `execute_command` 等危险工具仍走既有 HITL 审批，沿用 `execute_command` 工具维度全放行；不给 Skill 单独审批维度
 
